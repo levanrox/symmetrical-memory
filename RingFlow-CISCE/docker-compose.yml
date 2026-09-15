@@ -1,0 +1,39 @@
+version: "3.8"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ringflow-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: event_suite
+      POSTGRES_PASSWORD: event_suite
+      POSTGRES_DB: ringflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - ringflow-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U event_suite -d ringflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  postgrest:
+    image: postgrest/postgrest:latest
+    container_name: ringflow-postgrest-svc
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: "postgres://event_suite:event_suite@db:5432/ringflow"
+      PGRST_DB_SCHEMAS: "public"
+      PGRST_DB_ANON_ROLE: "event_suite"
+      PGRST_SERVER_PORT: "54322"
+      PGRST_JWT_SECRET: "test-anon-key-that-is-at-least-32-chars-long-1234567890"
+    ports:
+      - "54322:54322"
+
+volumes:
+  ringflow-pgdata:
