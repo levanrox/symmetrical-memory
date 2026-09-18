@@ -192,9 +192,9 @@ export default function AdminDashboardClient({
     // Instant optimistic update
     if (currentStatus === "running") {
       const additional = targetRing.timer_started_at
-        ? Math.max(0, Math.floor((now - new Date(targetRing.timer_started_at).getTime()) / 1000))
+        ? Math.max(0, now - new Date(targetRing.timer_started_at).getTime())
         : 0;
-      const newAccum = (targetRing.timer_accumulated_seconds || 0) + additional;
+      const newAccum = (targetRing.timer_accumulated_ms || 0) + additional;
       setRings((prev) =>
         prev.map((r) =>
           r.id === ringId
@@ -203,7 +203,7 @@ export default function AdminDashboardClient({
                 timer_status: "paused",
                 timer_started_at: null,
                 timer_paused_at: nowIso,
-                timer_accumulated_seconds: newAccum,
+                timer_accumulated_ms: newAccum,
               }
             : r
         )
@@ -240,7 +240,7 @@ export default function AdminDashboardClient({
               timer_status: "idle",
               timer_started_at: null,
               timer_paused_at: null,
-              timer_accumulated_seconds: 0,
+              timer_accumulated_ms: 0,
             }
           : r
       )
@@ -264,14 +264,14 @@ export default function AdminDashboardClient({
         if (shouldPause) {
           if (r.timer_status === "running") {
             const additional = r.timer_started_at
-              ? Math.max(0, Math.floor((now - new Date(r.timer_started_at).getTime()) / 1000))
+              ? Math.max(0, now - new Date(r.timer_started_at).getTime())
               : 0;
             return {
               ...r,
               timer_status: "paused",
               timer_started_at: null,
               timer_paused_at: nowIso,
-              timer_accumulated_seconds: (r.timer_accumulated_seconds || 0) + additional,
+              timer_accumulated_ms: (r.timer_accumulated_ms || 0) + additional,
             };
           }
           return r;
@@ -299,8 +299,9 @@ export default function AdminDashboardClient({
   // Calculate elapsed time vs expected time for each tatami
   const getRingTiming = (ring: any, ringAssignments: any[]) => {
     const timerStatus = ring.timer_status || "idle";
-    const accumulated = ring.timer_accumulated_seconds || 0;
-    const isStarted = timerStatus === "running" || timerStatus === "paused" || accumulated > 0;
+    const accumulatedMs = ring.timer_accumulated_ms || 0;
+    const accumulated = Math.floor(accumulatedMs / 1000);
+    const isStarted = timerStatus === "running" || timerStatus === "paused" || accumulatedMs > 0;
     const isRunning = timerStatus === "running";
     const isManuallyPaused = timerStatus === "paused";
 

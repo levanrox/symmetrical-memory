@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { getCategoryDraw } from "@/actions/draws";
+import { getAthleteDraw, getCategoryDraw } from "@/actions/draws";
 import { downloadCategoryDrawPdf } from "@/actions/drawPdfs";
 import { DrawBracket } from "./DrawBracket";
 
@@ -11,6 +11,10 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   onSelectMatch?: (match: any) => void;
+  /** Load the draw through one athlete's search result instead of as a whole tree. */
+  athleteId?: string | null;
+  /** Extra line under the title, e.g. "Showing <name>'s path". */
+  subtitle?: string;
 }
 
 export function DrawBracketModal({
@@ -19,6 +23,8 @@ export function DrawBracketModal({
   isOpen,
   onClose,
   onSelectMatch,
+  athleteId,
+  subtitle,
 }: Props) {
   const [loading, setLoading] = useState(true);
   const [drawData, setDrawData] = useState<any>(null);
@@ -30,7 +36,9 @@ export function DrawBracketModal({
     let mounted = true;
     setLoading(true);
 
-    getCategoryDraw(categoryId)
+    const request = athleteId ? getAthleteDraw(athleteId) : getCategoryDraw(categoryId);
+
+    request
       .then((data) => {
         if (mounted) {
           setDrawData(data);
@@ -45,7 +53,7 @@ export function DrawBracketModal({
     return () => {
       mounted = false;
     };
-  }, [categoryId, isOpen]);
+  }, [categoryId, isOpen, athleteId]);
 
   const handleDownloadPdf = async () => {
     try {
@@ -85,10 +93,13 @@ export function DrawBracketModal({
             </span>
             <div>
               <h2 className="font-bold text-base text-[#1B1815]">
-                {categoryName} — Digital Draw Bracket
+                {categoryName || drawData?.categoryName || "Draw bracket"}
               </h2>
               <p className="text-xs text-[#68645A]">
-                Real-time interactive tournament draw & bout resolution
+                {subtitle ||
+                  (athleteId
+                    ? "Showing this athlete's path, highlighted in the bracket"
+                    : "Live bracket with bout results")}
               </p>
             </div>
           </div>
@@ -110,6 +121,17 @@ export function DrawBracketModal({
               <span className="w-8 h-8 border-3 border-[#0E9C7C] border-t-transparent rounded-full animate-spin" />
               <p className="text-sm font-medium text-[#68645A]">Loading bracket tree...</p>
             </div>
+          ) : drawData?.locked ? (
+            <div className="h-full flex flex-col items-center justify-center text-center p-6">
+              <span className="material-symbols-outlined text-4xl text-[#8C877C] mb-2">
+                lock
+              </span>
+              <h3 className="font-bold text-base text-[#1B1815] mb-1">Bracket not published</h3>
+              <p className="text-xs text-[#68645A] max-w-sm mb-4">
+                The organiser has not opened the live bracket for spectators. Search for an
+                athlete to see their own path through this draw.
+              </p>
+            </div>
           ) : !drawData || !drawData.matches || drawData.matches.length === 0 ? (
             <div className="h-full flex flex-col items-center justify-center text-center p-6">
               <span className="material-symbols-outlined text-4xl text-[#8C877C] mb-2">
@@ -123,8 +145,9 @@ export function DrawBracketModal({
           ) : (
             <DrawBracket
               matches={drawData.matches}
-              categoryName={categoryName}
-              tournamentSize={drawData.draw.tournamentSize}
+              categoryName={categoryName || drawData.categoryName || "Draw"}
+              tournamentSize={drawData.draw?.tournamentSize}
+              highlightAthleteId={drawData.highlightAthleteId ?? athleteId ?? null}
               onDownloadPdf={handleDownloadPdf}
               isDownloadingPdf={isDownloadingPdf}
               onSelectMatch={

@@ -3,12 +3,13 @@
 import { db } from "@/db";
 import { rings, moderatorRequests } from "@/db/schema";
 import { eq, and } from "drizzle-orm";
-import { createClient } from "@/utils/supabase/server";
 import { revalidatePath } from "next/cache";
 import { ensureAdmin, ensureAdminOwnsTournament } from "./admin";
 import { ensureOrganiser } from "./organiser";
 
 import { generateAccessCode } from "@/lib/utils";
+import { elapsedMs as elapsedFor, normalizeClock } from "@/lib/matchClock";
+import { persistRingClock, readRingClockRow } from "@/lib/ringClockStore";
 
 export async function addRing(tournamentId: string) {
   await ensureAdminOwnsTournament(tournamentId);
@@ -73,39 +74,26 @@ export async function deleteRing(ringId: string, tournamentId: string) {
   revalidatePath(`/admin/event/${tournamentId}/rings`);
 }
 
+/**
+ * Admin floor controls for the tatami clock. They write through the same
+ * millisecond store as the moderator desk, so the arena display never sees a
+ * second, drifting version of the same clock.
+ */
 export async function startRingTimer(ringId: string, tournamentId: string) {
   await ensureAdmin();
-  const supabase = await createClient();
-  const now = new Date().toISOString();
 
-  let query = supabase
-    .from("rings")
-    .select("timer_status, timer_accumulated_seconds")
-    .eq("id", ringId);
+  const row = await readRingClockRow(ringId);
+  if (!row) return { success: false, error: "Ring not found" };
 
-  if (tournamentId) {
-    query = query.eq("tournament_id", tournamentId);
-  }
+  const clock = normalizeClock(row);
+  if (clock.status === "running") return { success: true };
 
-  const { data: ring } = await query.single();
-  if (!ring) return { success: false, error: "Ring not found" };
-
-  const accumulated = ring.timer_accumulated_seconds || 0;
-
-  const { error } = await supabase
-    .from("rings")
-    .update({
-      timer_status: "running",
-      timer_started_at: now,
-      timer_paused_at: null,
-      timer_accumulated_seconds: accumulated,
-    })
-    .eq("id", ringId);
-
-  if (error) {
-    console.error("Error starting ring timer:", error);
-    return { success: false, error: error.message };
-  }
+  await persistRingClock(ringId, {
+    status: "running",
+    durationMs: clock.durationMs,
+    accumulatedMs: elapsedFor(clock, Date.now()),
+    startedAt: new Date(),
+  });
 
   revalidatePath(`/admin/event/${tournamentId}/dashboard`);
   revalidatePath(`/organiser/event/${tournamentId}/dashboard`);
@@ -114,44 +102,18 @@ export async function startRingTimer(ringId: string, tournamentId: string) {
 
 export async function pauseRingTimer(ringId: string, tournamentId: string) {
   await ensureAdmin();
-  const supabase = await createClient();
-  const now = Date.now();
-  const nowIso = new Date(now).toISOString();
 
-  let query = supabase
-    .from("rings")
-    .select("timer_status, timer_started_at, timer_accumulated_seconds")
-    .eq("id", ringId);
+  const row = await readRingClockRow(ringId);
+  if (!row) return { success: false, error: "Ring not found" };
 
-  if (tournamentId) {
-    query = query.eq("tournament_id", tournamentId);
-  }
+  const clock = normalizeClock(row);
 
-  const { data: ring } = await query.single();
-
-  if (!ring) return { success: false };
-
-  let additionalSeconds = 0;
-  if (ring.timer_status === "running" && ring.timer_started_at) {
-    additionalSeconds = Math.max(0, Math.floor((now - new Date(ring.timer_started_at).getTime()) / 1000));
-  }
-
-  const newAccumulated = (ring.timer_accumulated_seconds || 0) + additionalSeconds;
-
-  const { error } = await supabase
-    .from("rings")
-    .update({
-      timer_status: "paused",
-      timer_started_at: null,
-      timer_paused_at: nowIso,
-      timer_accumulated_seconds: newAccumulated,
-    })
-    .eq("id", ringId);
-
-  if (error) {
-    console.error("Error pausing ring timer:", error);
-    return { success: false, error: error.message };
-  }
+  await persistRingClock(ringId, {
+    status: "paused",
+    durationMs: clock.durationMs,
+    accumulatedMs: elapsedFor(clock, Date.now()),
+    startedAt: null,
+  });
 
   revalidatePath(`/admin/event/${tournamentId}/dashboard`);
   revalidatePath(`/organiser/event/${tournamentId}/dashboard`);
@@ -164,27 +126,16 @@ export async function resumeRingTimer(ringId: string, tournamentId: string) {
 
 export async function resetRingTimer(ringId: string, tournamentId: string) {
   await ensureAdmin();
-  const supabase = await createClient();
-  let updateQuery = supabase
-    .from("rings")
-    .update({
-      timer_status: "idle",
-      timer_started_at: null,
-      timer_paused_at: null,
-      timer_accumulated_seconds: 0,
-    })
-    .eq("id", ringId);
 
-  if (tournamentId) {
-    updateQuery = updateQuery.eq("tournament_id", tournamentId);
-  }
+  const row = await readRingClockRow(ringId);
+  if (!row) return { success: false, error: "Ring not found" };
 
-  const { error } = await updateQuery;
-
-  if (error) {
-    console.error("Error resetting ring timer:", error);
-    return { success: false, error: error.message };
-  }
+  await persistRingClock(ringId, {
+    status: "idle",
+    durationMs: normalizeClock(row).durationMs,
+    accumulatedMs: 0,
+    startedAt: null,
+  });
 
   revalidatePath(`/admin/event/${tournamentId}/dashboard`);
   revalidatePath(`/organiser/event/${tournamentId}/dashboard`);
@@ -215,45 +166,35 @@ export async function setAllRingTimers(tournamentId: string, pause: boolean) {
     throw new Error("Unauthorized to set ring timers");
   }
 
-  const supabase = await createClient();
-  const now = Date.now();
-  const nowIso = new Date(now).toISOString();
+  const tournamentRings = await db
+    .select({ id: rings.id })
+    .from(rings)
+    .where(eq(rings.tournamentId, tournamentId));
 
-  const { data: rings } = await supabase
-    .from("rings")
-    .select("id, timer_status, timer_started_at, timer_accumulated_seconds")
-    .eq("tournament_id", tournamentId);
+  if (tournamentRings.length === 0) return { success: true };
 
-  if (!rings || rings.length === 0) return { success: true };
+  for (const { id } of tournamentRings) {
+    const row = await readRingClockRow(id);
+    if (!row) continue;
 
-  for (const ring of rings) {
+    const clock = normalizeClock(row);
+
     if (pause) {
-      if (ring.timer_status === "running") {
-        let additional = 0;
-        if (ring.timer_started_at) {
-          additional = Math.max(0, Math.floor((now - new Date(ring.timer_started_at).getTime()) / 1000));
-        }
-        await supabase
-          .from("rings")
-          .update({
-            timer_status: "paused",
-            timer_started_at: null,
-            timer_paused_at: nowIso,
-            timer_accumulated_seconds: (ring.timer_accumulated_seconds || 0) + additional,
-          })
-          .eq("id", ring.id);
-      }
+      if (clock.status !== "running") continue;
+      await persistRingClock(id, {
+        status: "paused",
+        durationMs: clock.durationMs,
+        accumulatedMs: elapsedFor(clock, Date.now()),
+        startedAt: null,
+      });
     } else {
-      if (ring.timer_status !== "running") {
-        await supabase
-          .from("rings")
-          .update({
-            timer_status: "running",
-            timer_started_at: nowIso,
-            timer_paused_at: null,
-          })
-          .eq("id", ring.id);
-      }
+      if (clock.status === "running") continue;
+      await persistRingClock(id, {
+        status: "running",
+        durationMs: clock.durationMs,
+        accumulatedMs: elapsedFor(clock, Date.now()),
+        startedAt: new Date(),
+      });
     }
   }
 

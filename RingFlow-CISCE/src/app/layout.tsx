@@ -37,6 +37,8 @@ const ibmPlexMono = IBM_Plex_Mono({
 export const viewport = {
   width: "device-width",
   initialScale: 1,
+  // Lets the arena scoreboard reach the edges of a TV without sitting under a notch.
+  viewportFit: "cover" as const,
 };
 
 export const metadata: Metadata = {

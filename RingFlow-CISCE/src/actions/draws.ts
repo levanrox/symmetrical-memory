@@ -14,8 +14,63 @@ import {
 import { generateDraw, resolveDraw } from "@/engine/draw-engine";
 import type { DrawGraph, Participant } from "@/engine/draw-engine/types";
 import { getRuleset, WKF_KATA_2026, WKF_KUMITE_2026 } from "@/engine/rules-engine";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
+import { moderatorRequests, tournaments } from "@/db/schema";
+import { ensureAdmin } from "./admin";
+import { ensureOrganiser } from "./organiser";
+
+/**
+ * Staff (moderator, organiser, admin) may always open a full bracket. The
+ * public may only open one when the admin enabled public draws — or when they
+ * reached it through their own athlete's search result, which is scoped to a
+ * single name they already know.
+ */
+async function isStaffViewer(): Promise<boolean> {
+  const cookieStore = await cookies();
+
+  if (cookieStore.get("admin_session")?.value || cookieStore.get("admin_dev_id")?.value) {
+    try {
+      await ensureAdmin();
+      return true;
+    } catch {}
+  }
+
+  if (cookieStore.get("org_token")?.value) {
+    try {
+      await ensureOrganiser();
+      return true;
+    } catch {}
+  }
+
+  const modToken = cookieStore.get("mod_token")?.value;
+  if (modToken) {
+    const [approved] = await db
+      .select({ id: moderatorRequests.id })
+      .from(moderatorRequests)
+      .where(
+        and(
+          eq(moderatorRequests.sessionToken, modToken),
+          eq(moderatorRequests.status, "approved")
+        )
+      )
+      .limit(1);
+    if (approved) return true;
+  }
+
+  return false;
+}
+
+async function publicDrawsEnabledForCategory(categoryId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ showPublicDraws: tournaments.showPublicDraws })
+    .from(categories)
+    .innerJoin(tournaments, eq(tournaments.id, categories.tournamentId))
+    .where(eq(categories.id, categoryId));
+
+  return row?.showPublicDraws !== false;
+}
 
 export interface BracketSlotView {
   position: number;
@@ -257,8 +312,31 @@ export async function generateAllTournamentDraws(
 /**
  * Fetches and resolves the full digital draw tree for a category with live match states and athlete names
  */
-export async function getCategoryDraw(categoryId: string) {
+export async function getCategoryDraw(
+  categoryId: string,
+  options?: { athleteId?: string | null }
+) {
   if (!categoryId) return null;
+
+  const staff = await isStaffViewer();
+  if (!staff) {
+    const allowed = options?.athleteId ? true : await publicDrawsEnabledForCategory(categoryId);
+    if (!allowed) {
+      return {
+        locked: true,
+        draw: null,
+        categoryName: null,
+        matches: [] as BracketMatchView[],
+        podium: [],
+        highlightAthleteId: null as string | null,
+      };
+    }
+  }
+
+  const [category] = await db
+    .select({ name: categories.name })
+    .from(categories)
+    .where(eq(categories.id, categoryId));
 
   const [draw] = await db
     .select()
@@ -368,11 +446,35 @@ export async function getCategoryDraw(categoryId: string) {
   }
 
   return {
+    locked: false,
     draw,
-    categoryName: graph.categoryId,
+    categoryName: category?.name ?? graph.categoryId,
     matches: Object.values(matchesMap),
     podium: resolved.podium,
+    highlightAthleteId: options?.athleteId ?? null,
   };
+}
+
+/**
+ * The draw as one athlete's family sees it: the same bracket, with that
+ * athlete highlighted and everyone else dimmed. Available to the public even
+ * when general draw viewing is switched off, because it only reveals a name
+ * the searcher already typed.
+ */
+export async function getAthleteDraw(athleteId: string) {
+  if (!athleteId) return null;
+
+  const [athlete] = await db
+    .select({ id: athletes.id, name: athletes.name, categoryId: athletes.categoryId })
+    .from(athletes)
+    .where(eq(athletes.id, athleteId));
+
+  if (!athlete?.categoryId) return null;
+
+  const draw = await getCategoryDraw(athlete.categoryId, { athleteId });
+  if (!draw) return null;
+
+  return { ...draw, athleteName: athlete.name, highlightAthleteId: athleteId };
 }
 
 export async function lockCategoryDraw(categoryId: string) {

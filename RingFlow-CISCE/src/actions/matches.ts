@@ -15,6 +15,7 @@ import {
 } from "@/db/schema";
 import { resolveDraw } from "@/engine/draw-engine";
 import type { DrawGraph } from "@/engine/draw-engine/types";
+import { normalizeClock } from "@/lib/matchClock";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 
@@ -72,7 +73,10 @@ export async function getRingActiveBout(ringId: string, matchId?: string) {
       category: cat,
       hasDraw: false,
       currentMatch: null,
+      nextBout: null,
       matches: [],
+      clock: normalizeClock(ring),
+      serverNow: Date.now(),
     };
   }
 
@@ -140,6 +144,12 @@ export async function getRingActiveBout(ringId: string, matchId?: string) {
       null;
   }
 
+  // 6. The bout after the current one, for the arena "next up" strip.
+  const nextBout =
+    enrichedMatches
+      .filter((m) => m.isReady && m.id !== targetMatch?.id)
+      .sort((a, b) => a.matchNo - b.matchNo)[0] || null;
+
   return {
     tournament: tournament || null,
     ring,
@@ -147,7 +157,10 @@ export async function getRingActiveBout(ringId: string, matchId?: string) {
     category: cat,
     hasDraw: true,
     currentMatch: targetMatch,
+    nextBout,
     matches: enrichedMatches,
+    clock: normalizeClock(ring),
+    serverNow: Date.now(),
   };
 }
 
@@ -201,32 +214,6 @@ export async function updateLiveMatchState(
       status: "LIVE",
     })
     .where(eq(matches.id, matchId));
-
-  try {
-    revalidatePath(`/scoreboard/${ringId}`);
-  } catch {}
-
-  return { success: true };
-}
-
-export async function updateRingTimerState(
-  ringId: string,
-  timerState: {
-    timerStatus: string;
-    timerAccumulatedSeconds?: number;
-    timerStartedAt?: Date | null;
-    timerPausedAt?: Date | null;
-  }
-) {
-  await db
-    .update(rings)
-    .set({
-      timerStatus: timerState.timerStatus,
-      timerAccumulatedSeconds: timerState.timerAccumulatedSeconds ?? 0,
-      timerStartedAt: timerState.timerStartedAt ?? null,
-      timerPausedAt: timerState.timerPausedAt ?? null,
-    })
-    .where(eq(rings.id, ringId));
 
   try {
     revalidatePath(`/scoreboard/${ringId}`);

@@ -18,6 +18,7 @@ interface Tournament {
   city?: string;
   status?: string;
   show_public_draws?: boolean;
+  show_public_scoreboard?: boolean;
 }
 
 interface Ring {
@@ -92,7 +93,14 @@ export default function PublicEventClient({
   const [viewingPdf, setViewingPdf] = useState<{ url: string; title: string } | null>(null);
   const [viewingBracket, setViewingBracket] = useState<{ categoryId: string; categoryName: string } | null>(null);
   const [activeBouts, setActiveBouts] = useState<Record<string, any>>({});
+  const [viewingAthleteDraw, setViewingAthleteDraw] = useState<{
+    athleteId: string;
+    categoryId: string;
+    athleteName: string;
+    categoryName: string;
+  } | null>(null);
   const isPublicDrawsEnabled = tournament.show_public_draws === true;
+  const isPublicScoreboardEnabled = tournament.show_public_scoreboard === true;
 
   // Poll active running bouts across all tournament tatamis
   useEffect(() => {
@@ -412,17 +420,24 @@ export default function PublicEventClient({
     docUrl: string | null,
     categoryName: string
   ) => {
-    if (docUrl) {
-      setIsSearchOpen(false);
-      setViewingPdf({
-        url: docUrl,
-        title: `${athlete.name} · ${categoryName}`,
+    setIsSearchOpen(false);
+
+    // Their own path through the draw answers "where am I?" better than anything else.
+    if (athlete.category_id) {
+      setViewingAthleteDraw({
+        athleteId: athlete.id,
+        categoryId: athlete.category_id,
+        athleteName: athlete.name,
+        categoryName: categoryName || "Category",
       });
       return;
     }
 
-    // Only if there is no PDF or draws disabled, close search and scroll to ring
-    setIsSearchOpen(false);
+    if (docUrl) {
+      setViewingPdf({ url: docUrl, title: `${athlete.name} · ${categoryName}` });
+      return;
+    }
+
     if (ringId) {
       const card = matCardsRef.current[ringId];
       if (card) {
@@ -430,6 +445,25 @@ export default function PublicEventClient({
         triggerFlash(ringId, 1600);
       }
     }
+  };
+
+  /** Wrap the part of the text the spectator actually typed. */
+  const renderHighlighted = (text: string, query: string) => {
+    const needle = query.trim().replace(/^#/, "");
+    if (!text || needle.length < 1) return text;
+
+    const index = text.toLowerCase().indexOf(needle.toLowerCase());
+    if (index === -1) return text;
+
+    return (
+      <>
+        {text.slice(0, index)}
+        <mark className="rounded bg-[#FDE68A] px-0.5 text-[#1B1815]">
+          {text.slice(index, index + needle.length)}
+        </mark>
+        {text.slice(index + needle.length)}
+      </>
+    );
   };
 
   const selectMatch = (matId: string | null) => {
@@ -625,9 +659,11 @@ export default function PublicEventClient({
                     <div className="spectator-result-top">
                       <div className="spectator-result-name-group">
                         <span className="spectator-result-chest mono">
-                          #{a.chest_number || "-"}
+                          #{renderHighlighted(a.chest_number || "-", searchQuery)}
                         </span>
-                        <span className="spectator-result-name">{a.name}</span>
+                        <span className="spectator-result-name">
+                          {renderHighlighted(a.name, searchQuery)}
+                        </span>
                       </div>
                       <span className={`spectator-status ${meta.cls}`}>
                         <span className="dot"></span>
@@ -641,6 +677,26 @@ export default function PublicEventClient({
                         <span className="spectator-result-division">
                           {displayCategoryName}
                         </span>
+                        {a.category_id && (
+                          <button
+                            type="button"
+                            className="spectator-pdf-chip"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIsSearchOpen(false);
+                              setViewingAthleteDraw({
+                                athleteId: a.id,
+                                categoryId: a.category_id!,
+                                athleteName: a.name,
+                                categoryName: displayCategoryName,
+                              });
+                            }}
+                            title={`Show only ${a.name} in the draw`}
+                          >
+                            <span className="material-symbols-outlined text-[14px] text-[#0E9C7C]">account_tree</span>
+                            <span className="spectator-draws-link">My draw</span>
+                          </button>
+                        )}
                         {isPublicDrawsEnabled && a.category_id && (
                           <button
                             type="button"
@@ -653,10 +709,10 @@ export default function PublicEventClient({
                                 categoryName: displayCategoryName,
                               });
                             }}
-                            title="View interactive elimination bracket tree"
+                            title="View the whole elimination bracket"
                           >
-                            <span className="material-symbols-outlined text-[14px] text-[#0E9C7C]">account_tree</span>
-                            <span className="spectator-draws-link">Bracket Tree</span>
+                            <span className="material-symbols-outlined text-[14px] text-[#68645A]">account_tree</span>
+                            <span className="spectator-draws-link">Full draw</span>
                           </button>
                         )}
                         {docUrl && (
@@ -912,15 +968,17 @@ export default function PublicEventClient({
                               </button>
                             )}
 
-                            <Link
-                              href={`/scoreboard/${ring.id}`}
-                              target="_blank"
-                              className="py-1.5 px-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 font-bold text-xs flex items-center justify-center gap-1.5 transition"
-                              title="Open live arena scoreboard"
-                            >
-                              <span className="material-symbols-outlined text-[15px]">tv</span>
-                              <span>Scoreboard</span>
-                            </Link>
+                            {isPublicScoreboardEnabled && (
+                              <Link
+                                href={`/scoreboard/${ring.id}`}
+                                target="_blank"
+                                className="py-1.5 px-3 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700 font-bold text-xs flex items-center justify-center gap-1.5 transition"
+                                title="Open the arena scoreboard"
+                              >
+                                <span className="material-symbols-outlined text-[15px]">tv</span>
+                                <span>Scoreboard</span>
+                              </Link>
+                            )}
                           </div>
                         </div>
                       );
@@ -931,23 +989,36 @@ export default function PublicEventClient({
                         <p className="spectator-standby-msg">
                           Mat is clear. Ready for the next scheduled division.
                         </p>
-                        <div className="flex justify-end">
-                          <Link
-                            href={`/scoreboard/${ring.id}`}
-                            target="_blank"
-                            className="py-1 px-2.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 font-bold text-xs flex items-center gap-1 transition"
-                          >
-                            <span className="material-symbols-outlined text-[14px]">tv</span>
-                            <span>Scoreboard</span>
-                          </Link>
-                        </div>
+                        {isPublicScoreboardEnabled && (
+                          <div className="flex justify-end">
+                            <Link
+                              href={`/scoreboard/${ring.id}`}
+                              target="_blank"
+                              className="py-1 px-2.5 rounded-lg bg-neutral-800 hover:bg-neutral-700 text-neutral-300 border border-neutral-700 font-bold text-xs flex items-center gap-1 transition"
+                            >
+                              <span className="material-symbols-outlined text-[14px]">tv</span>
+                              <span>Scoreboard</span>
+                            </Link>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
 
                   {/* Foot / Next Queue */}
                   <div className="spectator-mat-card__foot">
-                    {nextAssignment?.categories?.name ? (
+                    {activeBouts[ring.id]?.nextBout ? (
+                      <>
+                        <span className="spectator-next-label">NEXT</span>
+                        <span className="spectator-next-value">
+                          <span className="text-[#DC2626] font-black">AKA</span>{" "}
+                          {activeBouts[ring.id].nextBout.aka?.name || "TBD"}{" "}
+                          <span className="text-[#68645A]">vs</span>{" "}
+                          <span className="text-[#2563EB] font-black">AO</span>{" "}
+                          {activeBouts[ring.id].nextBout.ao?.name || "TBD"}
+                        </span>
+                      </>
+                    ) : nextAssignment?.categories?.name ? (
                       <>
                         <span className="spectator-next-label">NEXT</span>
                         <span className="spectator-next-value">
@@ -1010,6 +1081,18 @@ export default function PublicEventClient({
           categoryName={viewingBracket.categoryName}
           isOpen={Boolean(viewingBracket)}
           onClose={() => setViewingBracket(null)}
+        />
+      )}
+
+      {/* One athlete's path through the draw, reached from search */}
+      {viewingAthleteDraw && (
+        <DrawBracketModal
+          categoryId={viewingAthleteDraw.categoryId}
+          categoryName={viewingAthleteDraw.categoryName}
+          athleteId={viewingAthleteDraw.athleteId}
+          subtitle={`Showing ${viewingAthleteDraw.athleteName} in ${viewingAthleteDraw.categoryName}`}
+          isOpen={Boolean(viewingAthleteDraw)}
+          onClose={() => setViewingAthleteDraw(null)}
         />
       )}
     </div>

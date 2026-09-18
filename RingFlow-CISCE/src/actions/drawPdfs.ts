@@ -24,7 +24,7 @@ export async function downloadCategoryDrawPdf(categoryId: string) {
     .where(eq(tournaments.id, cat.tournamentId));
 
   const drawData = await getCategoryDraw(categoryId);
-  if (!drawData) {
+  if (!drawData || !drawData.draw) {
     throw new Error("No draw has been generated for this category yet.");
   }
 
@@ -70,7 +70,7 @@ export async function downloadAllCategoryDrawPdfs(tournamentId: string) {
   for (const cat of allCats) {
     try {
       const drawData = await getCategoryDraw(cat.id);
-      if (!drawData || drawData.matches.length === 0) continue;
+      if (!drawData || !drawData.draw || drawData.matches.length === 0) continue;
 
       const pdfBytes = await generateCategoryDrawPdfBytes({
         tournamentName: tournament.name,

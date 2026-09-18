@@ -12,6 +12,8 @@ interface Props {
   onSelectMatch?: (match: BracketMatchView) => void;
   activeMatchId?: string | null;
   compact?: boolean;
+  /** When set (public athlete search), that athlete is emphasised and the rest dimmed. */
+  highlightAthleteId?: string | null;
 }
 
 export function DrawBracket({
@@ -23,6 +25,7 @@ export function DrawBracket({
   onSelectMatch,
   activeMatchId,
   compact,
+  highlightAthleteId,
 }: Props) {
   const [zoom, setZoom] = useState(1);
   const [selectedMatch, setSelectedMatch] = useState<BracketMatchView | null>(null);
@@ -69,7 +72,7 @@ export function DrawBracket({
           <div className="flex items-center bg-[#F5F3EC] rounded-lg p-1 border border-[#E1DDCF]">
             <button
               onClick={handleZoomOut}
-              className="p-1 text-[#68645A] hover:text-[#1B1815] rounded hover:bg-white transition-colors cursor-pointer"
+              className="flex min-h-[40px] min-w-[40px] items-center justify-center p-1 text-[#68645A] hover:text-[#1B1815] rounded hover:bg-white transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
               title="Zoom Out"
             >
               <span className="material-symbols-outlined text-[18px]">zoom_out</span>
@@ -79,14 +82,14 @@ export function DrawBracket({
             </span>
             <button
               onClick={handleZoomIn}
-              className="p-1 text-[#68645A] hover:text-[#1B1815] rounded hover:bg-white transition-colors cursor-pointer"
+              className="flex min-h-[40px] min-w-[40px] items-center justify-center p-1 text-[#68645A] hover:text-[#1B1815] rounded hover:bg-white transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
               title="Zoom In"
             >
               <span className="material-symbols-outlined text-[18px]">zoom_in</span>
             </button>
             <button
               onClick={handleResetZoom}
-              className="p-1 text-[#68645A] hover:text-[#1B1815] rounded hover:bg-white transition-colors ml-1 cursor-pointer"
+              className="flex min-h-[40px] min-w-[40px] items-center justify-center p-1 ml-1 text-[#68645A] hover:text-[#1B1815] rounded hover:bg-white transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
               title="Reset Zoom"
             >
               <span className="material-symbols-outlined text-[18px]">restart_alt</span>
@@ -132,6 +135,9 @@ export function DrawBracket({
                   const akaWon = match.winnerId && match.aka.id && match.winnerId === match.aka.id;
                   const aoWon = match.winnerId && match.ao.id && match.winnerId === match.ao.id;
                   const isCurrentBout = activeMatchId === match.matchId;
+                  const akaHighlighted = Boolean(highlightAthleteId) && match.aka.id === highlightAthleteId;
+                  const aoHighlighted = Boolean(highlightAthleteId) && match.ao.id === highlightAthleteId;
+                  const containsHighlight = akaHighlighted || aoHighlighted;
 
                   return (
                     <div
@@ -141,7 +147,11 @@ export function DrawBracket({
                         if (onSelectMatch) onSelectMatch(match);
                       }}
                       className={`relative bg-white rounded-xl border transition-all cursor-pointer hover:shadow-lg ${
-                        isCurrentBout
+                        containsHighlight
+                          ? "border-[#DC2626] ring-2 ring-[#DC2626] shadow-md"
+                          : highlightAthleteId
+                          ? "border-[#E1DDCF] opacity-55 hover:opacity-90"
+                          : isCurrentBout
                           ? "border-[#0E9C7C] ring-2 ring-[#0E9C7C] shadow-md bg-emerald-50/15"
                           : selectedMatch?.matchId === match.matchId
                           ? "border-[#0E9C7C] ring-2 ring-[#0E9C7C]/30 shadow-sm"
@@ -175,13 +185,22 @@ export function DrawBracket({
                       <div
                         className={`flex items-center justify-between p-2.5 border-b border-[#E1DDCF] ${
                           akaWon ? "bg-emerald-50/60 font-bold" : ""
-                        }`}
+                        } ${akaHighlighted ? "bg-red-50" : ""}`}
                       >
                         <div className="flex items-center gap-2 min-w-0 pr-2">
                           <span className="w-2.5 h-2.5 rounded-full bg-[#E4483C] shrink-0" title="AKA (Red)" />
                           <div className="truncate">
-                            <p className="text-xs font-semibold text-[#1B1815] truncate">
+                            <p
+                              className={`text-xs truncate ${
+                                akaHighlighted ? "font-black text-[#B91C1C]" : "font-semibold text-[#1B1815]"
+                              }`}
+                            >
                               {match.aka.displayName}
+                              {akaHighlighted && (
+                                <span className="ml-1.5 rounded bg-[#DC2626] px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wide text-white">
+                                  Searched
+                                </span>
+                              )}
                             </p>
                             {match.aka.school && (
                               <p className="text-[10px] text-[#68645A] truncate">
@@ -201,13 +220,22 @@ export function DrawBracket({
                       <div
                         className={`flex items-center justify-between p-2.5 rounded-b-xl ${
                           aoWon ? "bg-emerald-50/60 font-bold" : ""
-                        }`}
+                        } ${aoHighlighted ? "bg-blue-50" : ""}`}
                       >
                         <div className="flex items-center gap-2 min-w-0 pr-2">
                           <span className="w-2.5 h-2.5 rounded-full bg-[#1D4ED8] shrink-0" title="AO (Blue)" />
                           <div className="truncate">
-                            <p className="text-xs font-semibold text-[#1B1815] truncate">
+                            <p
+                              className={`text-xs truncate ${
+                                aoHighlighted ? "font-black text-[#1D4ED8]" : "font-semibold text-[#1B1815]"
+                              }`}
+                            >
                               {match.ao.displayName}
+                              {aoHighlighted && (
+                                <span className="ml-1.5 rounded bg-[#2563EB] px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wide text-white">
+                                  Searched
+                                </span>
+                              )}
                             </p>
                             {match.ao.school && (
                               <p className="text-[10px] text-[#68645A] truncate">
@@ -235,7 +263,7 @@ export function DrawBracket({
                               e.stopPropagation();
                               onSelectMatch(match);
                             }}
-                            className={`px-2.5 py-1 rounded text-[10px] font-bold flex items-center gap-1 cursor-pointer transition-colors shadow-2xs ${
+                            className={`flex min-h-[36px] items-center gap-1 rounded px-2.5 py-1.5 text-[10px] font-bold cursor-pointer transition-colors shadow-2xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
                               isCurrentBout
                                 ? "bg-[#0E9C7C] text-white"
                                 : "bg-neutral-800 hover:bg-neutral-900 text-white"

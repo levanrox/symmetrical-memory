@@ -5,9 +5,11 @@ import { createClient } from "@/utils/supabase/client";
 import { useRouter } from "next/navigation";
 import { adjustMatchCount, finishCategory, setRingStatus, returnCategoryToQueue, logRingEvent, logoutModerator } from "@/actions/moderator";
 import { getRingActiveBout, setActiveBout } from "@/actions/matches";
+import { getRingClock } from "@/actions/clock";
+import { normalizeClock, type RingClock } from "@/lib/matchClock";
 import { getCategoryDraw } from "@/actions/draws";
 import { BoutScoringPad } from "@/components/moderator/BoutScoringPad";
-import { DrawBracket } from "@/components/draw/DrawBracket";
+import { BoutPickerModal } from "@/components/moderator/BoutPickerModal";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import MatchTimer from "@/components/moderator/MatchTimer";
 
@@ -28,7 +30,9 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
   const [boutData, setBoutData] = useState<any>(null);
   const [drawData, setDrawData] = useState<any>(null);
   const [selectedMatchId, setSelectedMatchId] = useState<string | null>(null);
-  const [selectionMode, setSelectionMode] = useState<"tree" | "roster">("tree");
+  // The bout list is a tool, not the desk: it opens as a full-view picker so the
+  // clock and the point buttons stay in reach on a phone.
+  const [showBoutSelector, setShowBoutSelector] = useState(false);
   const [activeMode, setActiveMode] = useState<"digital" | "counter">("digital");
   const [showBracketModal, setShowBracketModal] = useState(false);
   const router = useRouter();
@@ -53,6 +57,7 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
 
   const handleSelectBout = async (matchId: string) => {
     setSelectedMatchId(matchId);
+    setShowBoutSelector(false);
     await setActiveBout(ringId, matchId);
     await loadBoutData(matchId);
   };
@@ -85,6 +90,57 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
 
     return () => {
       supabase.removeChannel(channel);
+    };
+  }, [ringId, supabase]);
+
+  // Keep this desk's clock tied to the server: realtime push where available,
+  // a cheap single-row poll where it is not (local PostgREST has no realtime).
+  useEffect(() => {
+    const applyRingRow = (row: any) => {
+      setBoutData((prev: any) =>
+        prev
+          ? { ...prev, clock: normalizeClock(row), serverNow: Date.now() }
+          : prev
+      );
+    };
+
+    const channel = supabase
+      .channel(`mod_ring_${ringId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "rings", filter: `id=eq.${ringId}` },
+        (payload) => {
+          if (payload.new) applyRingRow(payload.new);
+        }
+      )
+      .subscribe();
+
+    const poll = setInterval(async () => {
+      const sentAt = Date.now();
+      try {
+        const res = await getRingClock(ringId);
+        const receivedAt = Date.now();
+        if (res.success && res.clock) {
+          setBoutData((prev: any) =>
+            prev
+              ? {
+                  ...prev,
+                  clock: res.clock,
+                  serverNow: res.serverNow,
+                  serverNowSentAt: sentAt,
+                  serverNowReceivedAt: receivedAt,
+                }
+              : prev
+          );
+        }
+      } catch {
+        /* transient — the next tick retries */
+      }
+    }, 1000);
+
+    return () => {
+      supabase.removeChannel(channel);
+      clearInterval(poll);
     };
   }, [ringId, supabase]);
 
@@ -277,7 +333,9 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
         </div>
       </div>
 
-      <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 sm:p-card-padding shadow-sm relative overflow-hidden mb-6 sm:mb-10">
+      {/* One DOM order for phones; explicit columns from lg up (status rail · desk · queue rail) */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-start lg:gap-8">
+      <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 sm:p-card-padding shadow-sm relative overflow-hidden mb-6 sm:mb-10 lg:col-span-3 lg:col-start-1 lg:row-start-1 lg:mb-0">
         <div className={`absolute top-0 left-0 w-1 h-full ${isPaused ? 'bg-error' : 'bg-secondary'}`}></div>
         <div className="flex justify-between items-start mb-4 gap-2">
           <div className="min-w-0">
@@ -322,13 +380,14 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
         </div>
       </div>
 
+      <div className="lg:col-span-6 lg:col-start-4 lg:row-span-2 lg:row-start-1">
       {/* Mode Switcher & Bracket Button (When digital draw exists) */}
       {boutData?.hasDraw && (
         <div className="flex flex-wrap items-center justify-between gap-3 mb-6 bg-white p-3 rounded-xl border border-[#E1DDCF] shadow-2xs">
           <div className="flex items-center gap-1 bg-[#F5F3EC] p-1 rounded-lg border border-[#E1DDCF]">
             <button
               onClick={() => setActiveMode("digital")}
-              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all cursor-pointer ${
+              className={`min-h-[44px] px-3 py-2 rounded-md text-xs font-bold transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:py-1.5 ${
                 activeMode === "digital"
                   ? "bg-[#0E9C7C] text-white shadow-xs"
                   : "text-[#68645A] hover:text-[#1B1815]"
@@ -338,7 +397,7 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
             </button>
             <button
               onClick={() => setActiveMode("counter")}
-              className={`px-3 py-1.5 rounded-md text-xs font-bold transition-all cursor-pointer ${
+              className={`min-h-[44px] px-3 py-2 rounded-md text-xs font-bold transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:py-1.5 ${
                 activeMode === "counter"
                   ? "bg-[#0E9C7C] text-white shadow-xs"
                   : "text-[#68645A] hover:text-[#1B1815]"
@@ -348,150 +407,45 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
             </button>
           </div>
 
-          <button
-            onClick={() => setShowBracketModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-white border border-[#0E9C7C] text-[#0E9C7C] hover:bg-emerald-50 rounded-lg text-xs font-bold transition-colors cursor-pointer"
-          >
-            <span className="material-symbols-outlined text-[16px]">account_tree</span>
-            View Category Bracket
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => setShowBoutSelector(true)}
+              className="flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-white px-3 py-2 text-xs font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[36px]"
+            >
+              <span className="material-symbols-outlined text-[16px]">grid_view</span>
+              Change bout
+            </button>
+
+            {(() => {
+              const nextReady = boutData.matches.find(
+                (m: any) => m.isReady && m.id !== boutData.currentMatch?.id
+              );
+              if (!nextReady) return null;
+              return (
+                <button
+                  onClick={() => void handleSelectBout(nextReady.id)}
+                  className="flex min-h-[44px] items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-extrabold text-amber-900 transition-colors hover:bg-amber-100 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 sm:min-h-[36px]"
+                >
+                  <span className="material-symbols-outlined text-[16px]">bolt</span>
+                  Next ready · Bout #{nextReady.matchNo}
+                </button>
+              );
+            })()}
+
+            <button
+              onClick={() => setShowBracketModal(true)}
+              className="flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#0E9C7C] bg-white px-3 py-2 text-xs font-bold text-[#0E9C7C] transition-colors hover:bg-emerald-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[36px]"
+            >
+              <span className="material-symbols-outlined text-[16px]">account_tree</span>
+              Category bracket
+            </button>
+          </div>
         </div>
       )}
 
       {/* Digital Bout Runner Mode */}
       {boutData?.hasDraw && activeMode === "digital" && (
         <div className="space-y-4 mb-8">
-          {/* Bout Selection: Interactive Visual Tree Bracket or Compact Roster */}
-          {boutData.matches && boutData.matches.length > 0 && (
-            <div className="bg-white p-4 rounded-2xl border border-[#E1DDCF] shadow-xs">
-              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
-                <div className="flex items-center gap-2">
-                  <span className="material-symbols-outlined text-[#0E9C7C] text-[20px]">account_tree</span>
-                  <div>
-                    <h3 className="text-xs font-black uppercase tracking-wider text-[#1B1815]">
-                      Tournament Bracket & Bout Selector
-                    </h3>
-                    <p className="text-[11px] text-[#68645A]">
-                      Click any bout card in the bracket tree to load it into the scoring desk below
-                    </p>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {/* View Mode Toggle (Visual Tree vs Quick Roster) */}
-                  <div className="flex items-center bg-[#F5F3EC] p-1 rounded-xl border border-[#E1DDCF]">
-                    <button
-                      type="button"
-                      onClick={() => setSelectionMode("tree")}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                        selectionMode === "tree"
-                          ? "bg-[#0E9C7C] text-white shadow-xs"
-                          : "text-[#68645A] hover:text-[#1B1815]"
-                      }`}
-                    >
-                      <span className="material-symbols-outlined text-[15px]">account_tree</span>
-                      Visual Tree
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSelectionMode("roster")}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
-                        selectionMode === "roster"
-                          ? "bg-[#0E9C7C] text-white shadow-xs"
-                          : "text-[#68645A] hover:text-[#1B1815]"
-                      }`}
-                    >
-                      <span className="material-symbols-outlined text-[15px]">view_agenda</span>
-                      List View
-                    </button>
-                  </div>
-
-                  {/* Quick Next Ready Bout Button */}
-                  {(() => {
-                    const nextReady = boutData.matches.find((m: any) => m.isReady);
-                    if (!nextReady || nextReady.id === boutData.currentMatch?.id) return null;
-                    return (
-                      <button
-                        type="button"
-                        onClick={() => handleSelectBout(nextReady.id)}
-                        className="px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors shadow-2xs"
-                      >
-                        <span className="material-symbols-outlined text-[15px]">bolt</span>
-                        Next Ready: Bout #{nextReady.matchNo}
-                      </button>
-                    );
-                  })()}
-                </div>
-              </div>
-
-              {/* Visual Draw Tree View */}
-              {selectionMode === "tree" && (
-                <div className="h-[440px] rounded-xl border border-[#E1DDCF] bg-[#FAF9F5] overflow-hidden">
-                  <DrawBracket
-                    matches={drawData?.matches || []}
-                    categoryName={activeAssignment.categories?.name || "Tournament Category"}
-                    tournamentSize={drawData?.draw?.tournamentSize}
-                    onSelectMatch={(m) => handleSelectBout(m.matchId)}
-                    activeMatchId={boutData.currentMatch?.id}
-                  />
-                </div>
-              )}
-
-              {/* Horizontal Scrollable Roster View */}
-              {selectionMode === "roster" && (
-                <div className="flex gap-2 overflow-x-auto pb-1.5 scrollbar-thin pt-1">
-                  {boutData.matches.map((m: any) => {
-                    const isSelected = m.id === boutData.currentMatch?.id;
-                    const isFinished = m.status === "CONFIRMED" || m.status === "BYE";
-                    const isLive = m.status === "LIVE";
-                    const isReady = m.isReady;
-
-                    return (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => handleSelectBout(m.id)}
-                        className={`shrink-0 px-3.5 py-2.5 rounded-xl border text-left transition-all cursor-pointer ${
-                          isSelected
-                            ? "bg-emerald-50 border-[#0E9C7C] ring-2 ring-[#0E9C7C]/30 shadow-2xs"
-                            : isFinished
-                            ? "bg-neutral-50 border-neutral-200 text-neutral-400 hover:border-neutral-300"
-                            : isReady
-                            ? "bg-white border-blue-300 hover:border-blue-500 shadow-2xs"
-                            : "bg-neutral-50/70 border-neutral-200 hover:border-neutral-300 text-neutral-600"
-                        }`}
-                      >
-                        <div className="flex items-center gap-1.5 mb-1">
-                          <span className={`text-[10px] font-black uppercase ${isSelected ? "text-[#0E9C7C]" : "text-neutral-500"}`}>
-                            Bout #{m.matchNo}
-                          </span>
-                          <span
-                            className={`px-1.5 py-0.2 rounded text-[9px] font-bold ${
-                              isFinished
-                                ? "bg-neutral-200 text-neutral-700"
-                                : isLive
-                                ? "bg-amber-100 text-amber-800 animate-pulse"
-                                : isReady
-                                ? "bg-emerald-100 text-emerald-800"
-                                : "bg-neutral-100 text-neutral-500"
-                            }`}
-                          >
-                            {m.status}
-                          </span>
-                        </div>
-                        <p className="text-xs font-bold text-neutral-900 truncate max-w-[170px]">
-                          {m.aka.name || "TBD"} vs {m.ao.name || "TBD"}
-                        </p>
-                        <p className="text-[10px] font-semibold text-neutral-500 truncate">
-                          {m.roundName}
-                        </p>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
 
           {/* Active Bout Scoring Pad with unified clock */}
           {boutData.currentMatch ? (
@@ -499,6 +453,12 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
               match={boutData.currentMatch}
               ringId={ringId}
               categoryName={activeAssignment.categories?.name || "Category"}
+              clock={normalizeClock(boutData.clock ?? boutData.ring)}
+              serverNow={boutData.serverNow}
+              serverNowSentAt={boutData.serverNowSentAt}
+              serverNowReceivedAt={boutData.serverNowReceivedAt}
+              sidesSwapped={boutData.ring?.sidesSwapped ?? false}
+              nextBout={boutData.nextBout}
               onBoutCompleted={() => {
                 // Instantly increment match count on client for immediate UI feedback
                 setAssignments((prev) =>
@@ -525,7 +485,12 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       {/* Manual Counter Mode (only shown when user toggles to Quick Counter) */}
       {(!boutData?.hasDraw || activeMode === "counter") && (
         <>
-          <MatchTimer ringId={ringId} isPaused={isPaused} />
+          <MatchTimer
+            ringId={ringId}
+            clock={normalizeClock(boutData?.clock ?? boutData?.ring)}
+            serverNow={boutData?.serverNow}
+            isPaused={isPaused}
+          />
 
       <section className="space-y-4 mb-10">
         <div className="flex items-center justify-between px-1">
@@ -599,8 +564,9 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
           {isPaused ? 'Resume Tatami' : 'Pause Tatami'}
         </button>
       </div>
+      </div>
 
-      <div className="mt-8 bg-surface-container-low p-4 rounded-xl border border-outline-variant flex flex-col gap-4">
+      <div className="mt-8 bg-surface-container-low p-4 rounded-xl border border-outline-variant flex flex-col gap-4 lg:col-span-3 lg:col-start-1 lg:row-start-2 lg:mt-0">
         <div className="flex items-center gap-4">
           <span className="material-symbols-outlined text-secondary opacity-50">visibility</span>
           <div className="flex-1">
@@ -620,12 +586,85 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
 
           <button
             onClick={handleEmergency}
-            className="flex items-center gap-1 text-error font-bold font-label-caps text-[10px] opacity-60 hover:opacity-100 hover:bg-error/10 px-2 py-1 rounded transition-colors"
+            className="flex min-h-[44px] items-center gap-1 text-error font-bold font-label-caps text-[10px] opacity-60 hover:opacity-100 hover:bg-error/10 px-3 py-2 rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error"
           >
             <span className="material-symbols-outlined text-[14px]">warning</span> EMERGENCY
           </button>
         </div>
       </div>
+
+      {/* Queue rail: what is coming on this tatami, and the arena screen link */}
+      <aside className="mt-8 space-y-4 lg:col-span-3 lg:col-start-10 lg:row-span-2 lg:row-start-1 lg:mt-0">
+        <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm">
+          <h3 className="font-label-caps text-label-caps tracking-widest text-on-surface-variant">UP NEXT</h3>
+          <div className="mt-3 space-y-2">
+            {assignments
+              .filter((a) => a.status === "pending")
+              .slice(0, 4)
+              .map((a) => (
+                <div key={a.id} className="rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2">
+                  <p className="truncate text-xs font-bold text-[#1B1815]">{a.categories?.name}</p>
+                  <p className="text-[11px] text-[#68645A]">
+                    {a.categories?.expected_matches ?? 0} matches
+                  </p>
+                </div>
+              ))}
+            {assignments.filter((a) => a.status === "pending").length === 0 && (
+              <p className="text-xs text-[#68645A]">Nothing queued after this category.</p>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm">
+          <h3 className="font-label-caps text-label-caps tracking-widest text-on-surface-variant">ON DECK</h3>
+          {boutData?.nextBout ? (
+            <div className="mt-3 rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] px-3 py-2">
+              <p className="text-[11px] font-black uppercase tracking-wider text-[#8C877C]">
+                Bout #{boutData.nextBout.matchNo} · {boutData.nextBout.roundName}
+              </p>
+              <p className="mt-1 truncate text-xs font-bold text-[#DC2626]">
+                AKA {boutData.nextBout.aka?.name || "TBD"}
+              </p>
+              <p className="truncate text-xs font-bold text-[#2563EB]">
+                AO {boutData.nextBout.ao?.name || "TBD"}
+              </p>
+            </div>
+          ) : (
+            <p className="mt-3 text-xs text-[#68645A]">No ready bout waiting.</p>
+          )}
+        </div>
+
+        <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm">
+          <h3 className="font-label-caps text-label-caps tracking-widest text-on-surface-variant">ARENA SCREEN</h3>
+          <p className="mt-2 text-xs text-[#68645A]">
+            Open the scoreboard on the TV in a new window, then press F for full screen.
+          </p>
+          <a
+            href={`/scoreboard/${ringId}`}
+            target="_blank"
+            rel="noreferrer"
+            className="mt-3 flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-[#0E9C7C] bg-[#E3F6F0] px-3 py-2 text-xs font-bold text-[#0B7C63] transition-colors hover:bg-[#d3f0e7] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
+          >
+            <span className="material-symbols-outlined text-[16px]">tv</span>
+            Open TV scoreboard
+          </a>
+        </div>
+      </aside>
+      </div>
+
+      {/* Bout picker: full view on a laptop, full sheet on a phone */}
+      {showBoutSelector && boutData?.matches && boutData.matches.length > 0 && (
+        <BoutPickerModal
+          isOpen={showBoutSelector}
+          onClose={() => setShowBoutSelector(false)}
+          categoryName={activeAssignment.categories?.name || "Tournament Category"}
+          bouts={boutData.matches}
+          drawMatches={drawData?.matches || []}
+          tournamentSize={drawData?.draw?.tournamentSize}
+          activeMatchId={boutData.currentMatch?.id}
+          onSelect={(matchId) => void handleSelectBout(matchId)}
+        />
+      )}
 
       {/* Modals */}
       {showAssistanceModal && (

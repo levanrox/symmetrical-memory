@@ -16,6 +16,7 @@ export async function updateTournamentSettings(
     venue: string;
     city: string;
     show_public_draws?: boolean;
+    show_public_scoreboard?: boolean;
   }
 ) {
   await ensureAdminOwnsTournament(tournamentId);
@@ -31,6 +32,7 @@ export async function updateTournamentSettings(
       venue: data.venue || null,
       city: data.city || null,
       showPublicDraws: data.show_public_draws ?? true,
+      showPublicScoreboard: data.show_public_scoreboard ?? false,
       updatedAt: new Date(),
     })
     .where(eq(tournaments.id, tournamentId));

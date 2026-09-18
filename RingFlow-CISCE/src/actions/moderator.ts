@@ -7,6 +7,7 @@ import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { ensureAdmin, ensureAdminOwnsTournament } from "./admin";
+import { secureCookieFlag } from "@/lib/serverCookies";
 import { normalizeAccessCode } from "@/lib/utils";
 
 export async function approveModeratorRequest(requestId: string, ringId: string, tournamentId: string) {
@@ -197,7 +198,7 @@ export async function checkModeratorStatus(requestId: string) {
       path: "/",
       maxAge: 86400, // 24 hours
       sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
+      secure: await secureCookieFlag(),
     });
   }
   

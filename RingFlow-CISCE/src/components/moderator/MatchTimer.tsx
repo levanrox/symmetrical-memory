@@ -1,457 +1,161 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
-
-const STORAGE_KEY_PREFIX = "ringflow_timer_duration_ms_";
-const DEFAULT_DURATION_MS = 3 * 60 * 1000; // 3 minutes in milliseconds
+import React, { useEffect, useState } from "react";
+import { MatchClock } from "@/components/match/MatchClock";
+import { useRingClockController } from "@/hooks/useRingClockController";
+import type { RingClock } from "@/lib/matchClock";
 
 interface MatchTimerProps {
   ringId: string;
-  isPaused: boolean; // ring is paused – timer auto-pauses too
+  clock: RingClock;
+  serverNow?: number;
+  /** Ring-level pause (the category assignment is paused). */
+  isPaused?: boolean;
 }
 
-type TimerState = "idle" | "running" | "paused_timer" | "finished";
+const PRESETS = [
+  { sec: 90, label: "1:30" },
+  { sec: 120, label: "2:00" },
+  { sec: 180, label: "3:00" },
+];
 
-// Synthesise a double-blast referee whistle programmatically using the Web Audio API
-const playBuzzerSound = () => {
-  if (typeof window === "undefined") return;
+/**
+ * The clock for tatamis that are running without a digital draw. It reads and
+ * writes the same persisted clock as the scoring desk and the arena screen, so
+ * switching modes never changes what the audience sees.
+ */
+export default function MatchTimer({ ringId, clock: initialClock, serverNow, isPaused }: MatchTimerProps) {
+  const clock = useRingClockController({
+    ringId,
+    initialClock,
+    initialServerNow: serverNow,
+  });
 
-  try {
-    const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-    if (!AudioContextClass) return;
-
-    const ctx = new AudioContextClass();
-
-    const playBlast = (startTime: number, duration: number) => {
-      const osc1 = ctx.createOscillator();
-      const osc2 = ctx.createOscillator();
-      const gainNode = ctx.createGain();
-
-      // Dual high frequencies create a beating vibrato effect simulating a real whistle
-      osc1.type = "sine";
-      osc1.frequency.setValueAtTime(1800, ctx.currentTime + startTime);
-
-      osc2.type = "sine";
-      osc2.frequency.setValueAtTime(1840, ctx.currentTime + startTime);
-
-      gainNode.gain.setValueAtTime(0, ctx.currentTime + startTime);
-      // Quick linear fade-in
-      gainNode.gain.linearRampToValueAtTime(0.2, ctx.currentTime + startTime + 0.05);
-      // Steady hold
-      gainNode.gain.setValueAtTime(0.2, ctx.currentTime + startTime + duration - 0.1);
-      // Exponential decay
-      gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + startTime + duration);
-
-      osc1.connect(gainNode);
-      osc2.connect(gainNode);
-      gainNode.connect(ctx.destination);
-
-      osc1.start(ctx.currentTime + startTime);
-      osc2.start(ctx.currentTime + startTime);
-
-      osc1.stop(ctx.currentTime + startTime + duration);
-      osc2.stop(ctx.currentTime + startTime + duration);
-    };
-
-    // Play two sets of referee double-blasts (let it ring twice!)
-    // First set
-    playBlast(0, 0.45);
-    playBlast(0.55, 0.75);
-
-    // Second set (after 1.8 seconds)
-    playBlast(1.8, 0.45);
-    playBlast(2.35, 0.75);
-    
-  } catch (e) {
-    console.error("Web Audio API error playing sound:", e);
-  }
-};
-
-export default function MatchTimer({ ringId, isPaused }: MatchTimerProps) {
-  const storageKey = `${STORAGE_KEY_PREFIX}${ringId}`;
-
-  // --- Initial client-side mounting tracking to prevent hydration mismatch ---
-  const [isMounted, setIsMounted] = useState(false);
-
-  // --- Persistent configured duration (milliseconds) ---
-  const [configuredDuration, setConfiguredDuration] = useState<number>(DEFAULT_DURATION_MS);
-
-  // --- Live timer state (milliseconds) ---
-  const [timeLeft, setTimeLeft] = useState<number>(DEFAULT_DURATION_MS);
-  const [timerState, setTimerState] = useState<TimerState>("idle");
-
-  // --- Settings panel state ---
-  const [showSettings, setShowSettings] = useState(false);
-  const [editMinutes, setEditMinutes] = useState<string>(
-    String(Math.floor(DEFAULT_DURATION_MS / 60000))
-  );
-  const [editSeconds, setEditSeconds] = useState<string>(
-    String(Math.floor((DEFAULT_DURATION_MS % 60000) / 1000)).padStart(2, "0")
-  );
-  const [editMilliseconds, setEditMilliseconds] = useState<string>(
-    String(DEFAULT_DURATION_MS % 1000).padStart(3, "0")
-  );
-
-  const prevIsPausedRef = useRef(isPaused);
-
-  // --- Gestures State ---
   const [isPressing, setIsPressing] = useState(false);
-  const longPressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasLongPressedRef = useRef(false);
+  const [longPressRef, setLongPressRef] = React.useState<ReturnType<typeof setTimeout> | null>(null);
+  const hasLongPressed = React.useRef(false);
 
-  // Sync configured duration from localStorage on mount (handles SSR/hydration)
-  useEffect(() => {
-    setIsMounted(true);
-    const stored = localStorage.getItem(storageKey);
-    const val = stored ? parseInt(stored, 10) : DEFAULT_DURATION_MS;
-    
-    setConfiguredDuration(val);
-    setTimeLeft(val);
-    setEditMinutes(String(Math.floor(val / 60000)));
-    setEditSeconds(String(Math.floor((val % 60000) / 1000)).padStart(2, "0"));
-    setEditMilliseconds(String(val % 1000).padStart(3, "0"));
-  }, [storageKey]);
-
-  // Clean up timeouts on unmount
   useEffect(() => {
     return () => {
-      if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
+      if (longPressRef) clearTimeout(longPressRef);
     };
-  }, []);
+  }, [longPressRef]);
 
-  // Auto-pause timer when ring is paused; resume when ring resumes
-  useEffect(() => {
-    if (prevIsPausedRef.current === isPaused) return;
-    prevIsPausedRef.current = isPaused;
+  const { remainingMs, running, pending, isLow, isExpired } = clock;
 
-    if (isPaused && timerState === "running") {
-      setTimerState("paused_timer");
-    } else if (!isPaused && timerState === "paused_timer") {
-      setTimerState("running");
-    }
-  }, [isPaused, timerState]);
-
-  // High-precision drift-free countdown interval running at ~30 FPS
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval>;
-    if (timerState === "running") {
-      const start = Date.now() - (configuredDuration - timeLeft);
-      interval = setInterval(() => {
-        const elapsed = Date.now() - start;
-        const remaining = configuredDuration - elapsed;
-        if (remaining <= 0) {
-          setTimeLeft(0);
-          setTimerState("finished");
-          playBuzzerSound(); // Trigger double whistle sound when time is up
-        } else {
-          setTimeLeft(remaining);
-        }
-      }, 33); // ~30fps for smooth milliseconds rendering
-    }
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [timerState, configuredDuration, timeLeft]);
-
-  const handleStart = useCallback(() => {
-    if (timerState === "idle" || timerState === "finished") {
-      setTimeLeft(configuredDuration);
-    }
-    setTimerState("running");
-  }, [timerState, configuredDuration]);
-
-  const handlePauseTimer = useCallback(() => {
-    setTimerState("paused_timer");
-  }, []);
-
-  const handleResetTimer = useCallback(() => {
-    setTimerState("idle");
-    setTimeLeft(configuredDuration);
-  }, [configuredDuration]);
-
-  // Pointer event handlers for tap-and-hold to Reset, short tap to Play/Pause
   const handlePointerDown = (e: React.PointerEvent) => {
     e.currentTarget.releasePointerCapture(e.pointerId);
-
-    hasLongPressedRef.current = false;
+    hasLongPressed.current = false;
     setIsPressing(true);
+    if (longPressRef) clearTimeout(longPressRef);
 
-    if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
-
-    longPressTimeoutRef.current = setTimeout(() => {
-      handleResetTimer();
-      hasLongPressedRef.current = true;
+    const timeout = setTimeout(() => {
+      hasLongPressed.current = true;
       setIsPressing(false);
-      
-      // Vibrate mobile device if supported
-      if (typeof window !== "undefined" && window.navigator && window.navigator.vibrate) {
-        window.navigator.vibrate(50);
+      if (typeof window !== "undefined" && window.navigator?.vibrate) {
+        window.navigator.vibrate(60);
       }
-    }, 850); // 850ms hold to reset
+      void clock.reset();
+    }, 850);
+    setLongPressRef(timeout);
   };
 
   const handlePointerUp = () => {
-    if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
+    if (longPressRef) clearTimeout(longPressRef);
     setIsPressing(false);
-
-    if (!hasLongPressedRef.current) {
-      // Short tap: Play/Pause toggler
-      if (isPaused && timerState !== "running") {
-        return;
-      }
-      if (timerState === "running") {
-        handlePauseTimer();
-      } else {
-        handleStart();
-      }
+    if (!hasLongPressed.current && !isPaused) {
+      void clock.toggle();
     }
-    hasLongPressedRef.current = false;
+    hasLongPressed.current = false;
   };
-
-  const handlePointerLeave = () => {
-    if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
-    setIsPressing(false);
-  };
-
-  const handleSaveConfig = useCallback(() => {
-    const mins = parseInt(editMinutes, 10) || 0;
-    const secs = parseInt(editSeconds, 10) || 0;
-    const ms = parseInt(editMilliseconds, 10) || 0;
-    const totalMs = Math.max(10, mins * 60 * 1000 + secs * 1000 + ms);
-    
-    if (timerState === "idle") {
-      // Save permanently
-      setConfiguredDuration(totalMs);
-      localStorage.setItem(storageKey, String(totalMs));
-      setTimeLeft(totalMs);
-    } else {
-      // Adjust session-only time
-      setTimeLeft(totalMs);
-      if (timerState === "finished") {
-        setTimerState("paused_timer"); // Let them resume with added time
-      }
-    }
-    
-    setShowSettings(false);
-  }, [editMinutes, editSeconds, editMilliseconds, timerState, storageKey]);
-
-  const handleResetConfig = useCallback(() => {
-    if (timerState === "idle") {
-      localStorage.removeItem(storageKey);
-      setConfiguredDuration(DEFAULT_DURATION_MS);
-      setTimeLeft(DEFAULT_DURATION_MS);
-      setEditMinutes(String(Math.floor(DEFAULT_DURATION_MS / 60000)));
-      setEditSeconds(String(Math.floor((DEFAULT_DURATION_MS % 60000) / 1000)).padStart(2, "0"));
-      setEditMilliseconds(String(DEFAULT_DURATION_MS % 1000).padStart(3, "0"));
-    } else {
-      // Reset the current active run to the default configured baseline
-      setTimeLeft(configuredDuration);
-      setTimerState("idle");
-      setEditMinutes(String(Math.floor(configuredDuration / 60000)));
-      setEditSeconds(String(Math.floor((configuredDuration % 60000) / 1000)).padStart(2, "0"));
-      setEditMilliseconds(String(configuredDuration % 1000).padStart(3, "0"));
-    }
-    setShowSettings(false);
-  }, [timerState, storageKey, configuredDuration]);
-
-  // Constraints helpers
-  const handleSecondsChange = (val: string) => {
-    const num = parseInt(val, 10);
-    if (isNaN(num)) { setEditSeconds(""); return; }
-    setEditSeconds(String(Math.min(59, Math.max(0, num))));
-  };
-
-  const handleMsChange = (val: string) => {
-    const num = parseInt(val, 10);
-    if (isNaN(num)) { setEditMilliseconds(""); return; }
-    setEditMilliseconds(String(Math.min(999, Math.max(0, num))));
-  };
-
-  // Formatting display (Minutes:Seconds.Milliseconds)
-  const displayMinutes = Math.floor(timeLeft / 60000);
-  const displaySeconds = Math.floor((timeLeft % 60000) / 1000);
-  const displayMs = timeLeft % 1000;
-  
-  const formattedTime = `${String(displayMinutes).padStart(2, "0")}:${String(displaySeconds).padStart(2, "0")}.${String(displayMs).padStart(3, "0")}`;
-  const progress = configuredDuration > 0 ? ((configuredDuration - timeLeft) / configuredDuration) * 100 : 0;
-
-  const isFinished = timerState === "finished";
-  const isRunning = timerState === "running";
-  const isTimerPaused = timerState === "paused_timer";
-  const isIdle = timerState === "idle";
-
-  const ringColor = isFinished
-    ? "text-error"
-    : isRunning
-    ? "text-secondary"
-    : isTimerPaused
-    ? "text-amber-600"
-    : "text-on-surface-variant";
-
-  const progressColor = isFinished
-    ? "bg-error"
-    : isRunning
-    ? "bg-secondary"
-    : isTimerPaused
-    ? "bg-amber-500"
-    : "bg-outline";
 
   return (
-    <section className="bg-surface-container-lowest border border-outline-variant rounded-xl shadow-sm overflow-hidden mb-10">
-      {/* Header */}
-      <div className="flex justify-between items-center px-5 pt-5 pb-3">
+    <section className="mb-8 overflow-hidden rounded-2xl border border-[#E1DDCF] bg-white shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#E1DDCF] px-4 py-3 sm:px-5">
         <div className="flex items-center gap-2">
-          <span className="material-symbols-outlined text-on-surface-variant text-[18px]">timer</span>
-          <h3 className="font-label-caps text-label-caps text-on-surface-variant tracking-widest">MATCH TIMER</h3>
-          {isRunning && (
-            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-secondary/10 text-secondary font-label-caps text-[9px] tracking-wider animate-pulse">
-              LIVE
-            </span>
-          )}
-          {isFinished && (
-            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-error/10 text-error font-label-caps text-[9px] tracking-wider animate-pulse">
-              TIME UP
-            </span>
-          )}
-          {isTimerPaused && (
-            <span className="px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-label-caps text-[9px] tracking-wider">
-              PAUSED
-            </span>
-          )}
+          <span className="material-symbols-outlined text-[18px] text-[#68645A]">timer</span>
+          <h3 className="font-label-caps text-label-caps tracking-widest text-[#68645A]">MATCH CLOCK</h3>
+          <span
+            aria-live="polite"
+            className={`rounded px-2 py-0.5 text-[10px] font-black uppercase tracking-wider ${
+              isPaused
+                ? "bg-[#F7E4E1] text-[#8E2E27]"
+                : running
+                  ? "bg-[#E3F6F0] text-[#0B7C63]"
+                  : "bg-[#ECE9DF] text-[#68645A]"
+            }`}
+          >
+            {isPaused ? "Tatami paused" : running ? "Running" : clock.clock.status === "finished" ? "Time up" : "Ready"}
+          </span>
         </div>
-        <button
-          onClick={() => {
-            setShowSettings((prev) => {
-              if (!prev) {
-                // If active/paused, load the remaining timeLeft into inputs
-                const targetTime = timerState === "idle" ? configuredDuration : timeLeft;
-                setEditMinutes(String(Math.floor(targetTime / 60000)));
-                setEditSeconds(String(Math.floor((targetTime % 60000) / 1000)).padStart(2, "0"));
-                setEditMilliseconds(String(targetTime % 1000).padStart(3, "0"));
-              }
-              return !prev;
-            });
-          }}
-          className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-surface-container text-on-surface-variant transition-colors"
-          title="Configure timer"
-        >
-          <span className="material-symbols-outlined text-[18px]">tune</span>
-        </button>
+
+        <div className="flex items-center gap-1 rounded-xl border border-[#E1DDCF] bg-[#F5F3EC] p-1">
+          {PRESETS.map(({ sec, label }) => (
+            <button
+              key={sec}
+              type="button"
+              onClick={() => void clock.applyDuration(sec * 1000)}
+              disabled={pending}
+              className={`min-h-[36px] rounded-lg px-2.5 py-1 text-xs font-bold transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+                clock.clock.durationMs === sec * 1000 ? "bg-[#0E9C7C] text-white" : "text-[#68645A] hover:text-[#1B1815]"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
 
-      {/* Settings Panel */}
-      {showSettings && (
-        <div className="mx-5 mb-4 p-4 bg-surface-container-low border border-outline-variant rounded-xl space-y-4">
-          <p className="font-label-caps text-[10px] text-on-surface-variant tracking-wider">
-            {timerState === "idle" ? "SET DEFAULT TIMER DURATION" : "EDIT ACTIVE SESSION TIMER"}
-          </p>
-          
-          <div className="flex items-center gap-2">
-            <div className="flex flex-col gap-1 flex-1">
-              <label className="font-label-caps text-[9px] text-on-surface-variant tracking-wider">MINUTES</label>
-              <input
-                type="number"
-                min={0}
-                max={99}
-                value={editMinutes}
-                onChange={(e) => setEditMinutes(e.target.value)}
-                className="w-full text-center bg-surface-container-lowest border border-outline-variant rounded-lg p-3 font-data-mono text-lg font-bold text-primary outline-none focus:border-secondary focus:ring-1 focus:ring-secondary"
-              />
-            </div>
-            <span className="font-data-mono text-xl text-on-surface-variant mt-4">:</span>
-            <div className="flex flex-col gap-1 flex-1">
-              <label className="font-label-caps text-[9px] text-on-surface-variant tracking-wider">SECONDS</label>
-              <input
-                type="number"
-                min={0}
-                max={59}
-                value={editSeconds}
-                onChange={(e) => handleSecondsChange(e.target.value)}
-                className="w-full text-center bg-surface-container-lowest border border-outline-variant rounded-lg p-3 font-data-mono text-lg font-bold text-primary outline-none focus:border-secondary focus:ring-1 focus:ring-secondary"
-              />
-            </div>
-            <span className="font-data-mono text-xl text-on-surface-variant mt-4">.</span>
-            <div className="flex flex-col gap-1 flex-1">
-              <label className="font-label-caps text-[9px] text-on-surface-variant tracking-wider">MILLIS</label>
-              <input
-                type="number"
-                min={0}
-                max={999}
-                value={editMilliseconds}
-                onChange={(e) => handleMsChange(e.target.value)}
-                className="w-full text-center bg-surface-container-lowest border border-outline-variant rounded-lg p-3 font-data-mono text-lg font-bold text-primary outline-none focus:border-secondary focus:ring-1 focus:ring-secondary"
-              />
-            </div>
-          </div>
+      <div className="flex flex-col items-center gap-4 px-4 py-6 sm:px-5">
+        <button
+          type="button"
+          onPointerDown={handlePointerDown}
+          onPointerUp={handlePointerUp}
+          onPointerLeave={() => {
+            if (longPressRef) clearTimeout(longPressRef);
+            setIsPressing(false);
+          }}
+          className={`cursor-pointer rounded-xl px-4 py-2 transition-transform select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${
+            isPressing ? "scale-95" : ""
+          } ${isLow ? "bg-[#FFF7E6]" : isExpired ? "bg-[#FDECEA]" : ""}`}
+          title="Tap to start or pause · hold to reset"
+        >
+          <MatchClock remainingMs={remainingMs} status={clock.clock.status} size="mod" tone="light" />
+        </button>
 
-          <div className="flex gap-2 pt-2 border-t border-outline-variant/30">
-            <button
-              onClick={handleSaveConfig}
-              className="flex-1 py-2.5 bg-primary text-white font-label-caps text-label-caps rounded-lg hover:opacity-90 active:scale-95 transition-all"
-            >
-              SAVE
-            </button>
-            <button
-              onClick={handleResetConfig}
-              title={timerState === "idle" ? "Restore default (3:00.000)" : "Reset session back to configured duration"}
-              className="px-4 py-2.5 border border-outline-variant text-on-surface-variant font-label-caps text-[10px] rounded-lg hover:bg-surface-container-high active:scale-95 transition-all flex items-center gap-1"
-            >
-              <span className="material-symbols-outlined text-[14px]">restart_alt</span>
-              RESET
-            </button>
-            <button
-              onClick={() => setShowSettings(false)}
-              className="px-4 py-2.5 border border-outline-variant text-on-surface-variant font-label-caps text-[10px] rounded-lg hover:bg-surface-container active:scale-95 transition-all"
-            >
-              CANCEL
-            </button>
-          </div>
-          
-          <p className="text-[10px] text-on-surface-variant opacity-60 font-body-sm">
-            {timerState === "idle" 
-              ? "This sets the default starting time for all future matches." 
-              : "This adjusts the remaining time for the current match only. A tap-and-hold reset on the clock will restore the default configured duration."}
-          </p>
-        </div>
-      )}
-
-      {/* Timer Display */}
-      <div className="px-5 pb-5 space-y-4">
-        {/* Big Clock */}
-        <div className="flex flex-col items-center justify-center py-4">
-          <span
-            onPointerDown={handlePointerDown}
-            onPointerUp={handlePointerUp}
-            onPointerLeave={handlePointerLeave}
-            className={`cursor-pointer select-none font-data-mono text-4xl sm:text-5xl font-black tracking-wider transition-all duration-300 ${ringColor} ${isFinished ? "animate-pulse" : ""} ${isPressing ? "scale-90 opacity-70" : ""} flex items-baseline`}
-            title="Tap to Play/Pause • Hold to Reset"
+        <div className="flex flex-wrap items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={() => void clock.toggle()}
+            disabled={pending || isPaused}
+            className={`flex min-h-[44px] items-center gap-1.5 rounded-xl px-5 py-2.5 text-xs font-black uppercase text-white shadow-sm transition-transform active:scale-95 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${
+              running ? "bg-amber-500 text-black" : "bg-[#0E9C7C]"
+            }`}
           >
-            {/* Prevent rendering text during hydration to avoid mismatch error */}
-            {isMounted ? (
-              <>
-                <span>{String(displayMinutes).padStart(2, "0")}:{String(displaySeconds).padStart(2, "0")}</span>
-                <span className="text-xl sm:text-2xl font-bold opacity-70 ml-0.5">.{String(displayMs).padStart(3, "0")}</span>
-              </>
-            ) : (
-              // Matching fallback matching server SSR render exactly
-              <>
-                <span>03:00</span>
-                <span className="text-xl sm:text-2xl font-bold opacity-70 ml-0.5">.000</span>
-              </>
-            )}
-          </span>
-          <span className="text-[9px] text-on-surface-variant font-label-caps opacity-50 tracking-wider mt-2 select-none pointer-events-none">
-            TAP TO PLAY/PAUSE • HOLD TO RESET
-          </span>
+            <span className="material-symbols-outlined text-[18px]">{running ? "pause" : "play_arrow"}</span>
+            {running ? "Pause" : "Start"}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void clock.reset()}
+            disabled={pending}
+            className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-[#E1DDCF] bg-white px-4 py-2.5 text-xs font-bold text-[#1B1815] transition-colors hover:bg-[#F5F3EC] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
+          >
+            <span className="material-symbols-outlined text-[16px]">restart_alt</span>
+            Reset
+          </button>
         </div>
 
-        {/* Progress bar */}
-        <div className="w-full bg-surface-container-high h-2 rounded-full overflow-hidden">
-          <div
-            className={`h-full transition-all duration-1000 ease-linear ${progressColor}`}
-            style={{ width: `${Math.min(100, progress)}%` }}
-          />
-        </div>
+        {clock.error && (
+          <p role="alert" className="text-xs font-semibold text-[#DC2626]">
+            {clock.error}
+          </p>
+        )}
+
+        <p className="text-center text-[11px] text-[#8C877C]">
+          Tap the clock to start or pause, hold it to reset. Both devices read this same clock.
+        </p>
       </div>
     </section>
   );

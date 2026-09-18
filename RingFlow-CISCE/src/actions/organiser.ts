@@ -2,12 +2,23 @@
 
 import { createClient } from "@/utils/supabase/server";
 import { db } from "@/db";
-import { tournaments } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import { organiserRequests, tournaments } from "@/db/schema";
+import { and, eq, isNotNull, ne, or, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { ensureAdminOwnsTournament } from "./admin";
 import { normalizeAccessCode, generateUnambiguousCode } from "@/lib/utils";
+import { secureCookieFlag } from "@/lib/serverCookies";
+
+async function setOrganiserCookie(token: string) {
+  const cookieStore = await cookies();
+  cookieStore.set("org_token", token, {
+    path: "/",
+    maxAge: 604800,
+    sameSite: "lax",
+    secure: await secureCookieFlag(),
+  });
+}
 
 /**
  * Organiser requests access to a tournament using a 6-character access code.
@@ -39,8 +50,6 @@ export async function requestOrganiserAccess(
     return { success: false, error: "Please enter your name." };
   }
 
-  const supabase = await createClient();
-
   // Try to resolve IP
   const headersList = await headers();
   const forwardedFor = headersList.get("x-forwarded-for");
@@ -56,87 +65,129 @@ export async function requestOrganiserAccess(
     ip: deviceInfo?.ip && deviceInfo.ip !== "Unknown" ? deviceInfo.ip : ip,
   };
 
-  // 1. Locate tournament by organiser_code using Drizzle ORM
-  const allTournaments = await db
+  // 1. Locate the tournament by organiser_code. Exact match first, then a
+  //    normalized pass (0/O, 1/I) over the tournaments that actually have a code.
+  type TournamentMatch = {
+    id: string;
+    name: string;
+    organiserCode: string | null;
+  };
+
+  const exactMatches: TournamentMatch[] = await db
     .select({
       id: tournaments.id,
       name: tournaments.name,
       organiserCode: tournaments.organiserCode,
-      status: tournaments.status,
     })
-    .from(tournaments);
+    .from(tournaments)
+    .where(sql`upper(${tournaments.organiserCode}) = ${cleanCode}`)
+    .limit(1);
 
-  const normInput = normalizeAccessCode(cleanCode);
-  const matchedTournament = allTournaments.find((t) => {
-    if (!t.organiserCode) return false;
-    return (
-      t.organiserCode.trim().toUpperCase() === cleanCode ||
-      normalizeAccessCode(t.organiserCode) === normInput
-    );
-  });
+  let matchedTournament: TournamentMatch | undefined = exactMatches[0];
 
   if (!matchedTournament) {
-    return { success: false, error: "Invalid organiser access code. Please check with the administrator." };
+    const normInput = normalizeAccessCode(cleanCode);
+    const codedTournaments = await db
+      .select({
+        id: tournaments.id,
+        name: tournaments.name,
+        organiserCode: tournaments.organiserCode,
+      })
+      .from(tournaments)
+      .where(
+        and(
+          isNotNull(tournaments.organiserCode),
+          ne(tournaments.organiserCode, "")
+        )
+      );
+
+    matchedTournament = codedTournaments.find(
+      (t) => t.organiserCode && normalizeAccessCode(t.organiserCode) === normInput
+    );
   }
 
-  const tournament = matchedTournament;
-  const canonicalCode = tournament.organiserCode || cleanCode;
+  if (!matchedTournament) {
+    const [{ count } = { count: 0 }] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(tournaments)
+      .where(and(isNotNull(tournaments.organiserCode), ne(tournaments.organiserCode, "")));
 
-  // 2. Insert into organiser_requests with status 'pending'
-  const { data: request, error: reqError } = await supabase
-    .from("organiser_requests")
-    .insert({
-      tournament_id: tournament.id,
-      access_code_used: canonicalCode,
-      status: "pending",
-      organiser_name: cleanName,
-      device_info: finalDeviceInfo,
-      expires_at: new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString(), // 48 hours
-    })
-    .select("id")
-    .single();
+    console.warn(
+      `[organiser] Access code rejected. ${count} tournament(s) currently have an organiser code configured.`
+    );
 
-  if (reqError || !request) {
-    console.error("Failed to create organiser request:", reqError);
-    return { success: false, error: "Failed to submit access request. Please try again." };
+    return {
+      success: false,
+      error:
+        count === 0
+          ? "No tournament has an organiser code yet. Ask the administrator to generate one in Event Settings."
+          : "Invalid organiser access code. Please check with the administrator.",
+    };
   }
 
-  return { success: true, requestId: request.id, tournamentName: tournament.name };
+  const canonicalCode = matchedTournament.organiserCode || cleanCode;
+
+  // 2. Create the pending request through the database connection, so this path
+  //    does not depend on the REST gateway exposing the table or its policies.
+  try {
+    const [request] = await db
+      .insert(organiserRequests)
+      .values({
+        tournamentId: matchedTournament.id,
+        accessCodeUsed: canonicalCode,
+        status: "pending",
+        organiserName: cleanName,
+        deviceInfo: finalDeviceInfo,
+        expiresAt: new Date(Date.now() + 48 * 60 * 60 * 1000), // 48 hours
+      })
+      .returning({ id: organiserRequests.id });
+
+    revalidatePath(`/admin/event/${matchedTournament.id}/settings`);
+
+    return {
+      success: true,
+      requestId: request.id,
+      tournamentName: matchedTournament.name,
+    };
+  } catch (err: any) {
+    console.error("[organiser] Failed to create access request:", err);
+    return {
+      success: false,
+      error: `Could not create the access request (${err?.message ?? "database error"}). Contact the administrator.`,
+    };
+  }
 }
 
 /**
  * Check request status from client waiting room polling or initial load.
  */
 export async function checkOrganiserStatus(requestId: string) {
-  const supabase = await createClient();
-  const { data: request } = await supabase
-    .from("organiser_requests")
-    .select("status, session_token, tournament_id, expires_at, organiser_name")
-    .eq("id", requestId)
-    .single();
+  const [request] = await db
+    .select({
+      status: organiserRequests.status,
+      sessionToken: organiserRequests.sessionToken,
+      tournamentId: organiserRequests.tournamentId,
+      expiresAt: organiserRequests.expiresAt,
+      organiserName: organiserRequests.organiserName,
+    })
+    .from(organiserRequests)
+    .where(eq(organiserRequests.id, requestId));
 
   if (!request) return { status: "not_found" };
 
-  if (request.expires_at && new Date(request.expires_at).getTime() < Date.now()) {
+  if (request.expiresAt && request.expiresAt.getTime() < Date.now()) {
     return { status: "expired" };
   }
 
   if (request.status === "approved") {
-    const tokenValue = request.session_token || requestId;
-    const cookieStore = await cookies();
-    cookieStore.set("org_token", tokenValue, {
-      path: "/",
-      maxAge: 604800,
-      sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-    });
+    await setOrganiserCookie(request.sessionToken || requestId);
   }
 
   return {
     status: request.status,
-    sessionToken: request.session_token,
-    tournamentId: request.tournament_id,
-    organiserName: request.organiser_name,
+    sessionToken: request.sessionToken,
+    tournamentId: request.tournamentId,
+    organiserName: request.organiserName,
   };
 }
 
@@ -145,17 +196,18 @@ export async function checkOrganiserStatus(requestId: string) {
  */
 export async function approveOrganiserRequest(requestId: string, tournamentId: string) {
   await ensureAdminOwnsTournament(tournamentId);
-  const supabase = await createClient();
 
   const sessionToken = crypto.randomUUID();
 
-  const { error: updateError } = await supabase
-    .from("organiser_requests")
-    .update({ status: "approved", session_token: sessionToken })
-    .eq("id", requestId)
-    .eq("tournament_id", tournamentId);
-
-  if (updateError) throw new Error(updateError.message);
+  await db
+    .update(organiserRequests)
+    .set({ status: "approved", sessionToken })
+    .where(
+      and(
+        eq(organiserRequests.id, requestId),
+        eq(organiserRequests.tournamentId, tournamentId)
+      )
+    );
 
   revalidatePath(`/admin/event/${tournamentId}/settings`);
   return { success: true };
@@ -166,15 +218,16 @@ export async function approveOrganiserRequest(requestId: string, tournamentId: s
  */
 export async function rejectOrganiserRequest(requestId: string, tournamentId: string) {
   await ensureAdminOwnsTournament(tournamentId);
-  const supabase = await createClient();
 
-  const { error: updateError } = await supabase
-    .from("organiser_requests")
-    .update({ status: "rejected" })
-    .eq("id", requestId)
-    .eq("tournament_id", tournamentId);
-
-  if (updateError) throw new Error(updateError.message);
+  await db
+    .update(organiserRequests)
+    .set({ status: "rejected" })
+    .where(
+      and(
+        eq(organiserRequests.id, requestId),
+        eq(organiserRequests.tournamentId, tournamentId)
+      )
+    );
 
   revalidatePath(`/admin/event/${tournamentId}/settings`);
   return { success: true };
@@ -185,15 +238,16 @@ export async function rejectOrganiserRequest(requestId: string, tournamentId: st
  */
 export async function revokeOrganiserSession(requestId: string, tournamentId: string) {
   await ensureAdminOwnsTournament(tournamentId);
-  const supabase = await createClient();
 
-  const { error: updateError } = await supabase
-    .from("organiser_requests")
-    .update({ status: "revoked", session_token: null })
-    .eq("id", requestId)
-    .eq("tournament_id", tournamentId);
-
-  if (updateError) throw new Error(updateError.message);
+  await db
+    .update(organiserRequests)
+    .set({ status: "revoked", sessionToken: null })
+    .where(
+      and(
+        eq(organiserRequests.id, requestId),
+        eq(organiserRequests.tournamentId, tournamentId)
+      )
+    );
 
   revalidatePath(`/admin/event/${tournamentId}/settings`);
   return { success: true };
@@ -210,11 +264,37 @@ export async function regenerateOrganiserCode(tournamentId: string) {
       .set({ organiserCode: newCode })
       .where(eq(tournaments.id, tournamentId));
   } catch (err: any) {
-    console.warn("Could not save organiserCode column to tournaments:", err?.message);
+    console.error("[organiser] Could not save the organiser code:", err);
+    return {
+      success: false,
+      error: `Could not save the organiser code: ${err?.message ?? "database error"}`,
+    };
   }
 
   revalidatePath(`/admin/event/${tournamentId}/settings`);
   return { success: true, organiser_code: newCode };
+}
+
+async function findApprovedOrganiserRequest(token: string) {
+  const [request] = await db
+    .select({
+      id: organiserRequests.id,
+      tournamentId: organiserRequests.tournamentId,
+      status: organiserRequests.status,
+      organiserName: organiserRequests.organiserName,
+      sessionToken: organiserRequests.sessionToken,
+      expiresAt: organiserRequests.expiresAt,
+    })
+    .from(organiserRequests)
+    .where(
+      or(
+        eq(organiserRequests.sessionToken, token),
+        eq(organiserRequests.id, token)
+      )
+    );
+
+  if (!request || request.status !== "approved") return null;
+  return request;
 }
 
 /**
@@ -257,14 +337,9 @@ export async function ensureOrganiserHasAccessToTournament(tournamentId: string)
     throw new Error("Not authenticated: Missing organiser session");
   }
 
-  const { data: request, error } = await supabase
-    .from("organiser_requests")
-    .select("id, tournament_id, status, organiser_name, session_token, expires_at, tournaments(name)")
-    .or(`session_token.eq.${orgToken},id.eq.${orgToken}`)
-    .eq("status", "approved")
-    .maybeSingle();
+  const request = await findApprovedOrganiserRequest(orgToken);
 
-  if (error || !request) {
+  if (!request) {
     try {
       cookieStore.delete("org_token");
       cookieStore.delete("org_name");
@@ -272,7 +347,7 @@ export async function ensureOrganiserHasAccessToTournament(tournamentId: string)
     throw new Error("Not authenticated: Invalid or revoked organiser session");
   }
 
-  if (request.expires_at && new Date(request.expires_at).getTime() < Date.now()) {
+  if (request.expiresAt && request.expiresAt.getTime() < Date.now()) {
     try {
       cookieStore.delete("org_token");
       cookieStore.delete("org_name");
@@ -280,28 +355,28 @@ export async function ensureOrganiserHasAccessToTournament(tournamentId: string)
     throw new Error("Not authenticated: Organiser session expired");
   }
 
-  if (request.tournament_id !== tournamentId) {
+  if (request.tournamentId !== tournamentId) {
     throw new Error("Not authenticated: Not authorized for this tournament");
   }
 
-  // If token in cookie was request id and session_token is available, sync cookie to session_token
-  if (request.session_token && orgToken !== request.session_token) {
+  // If the cookie held the request id, move it to the session token.
+  if (request.sessionToken && orgToken !== request.sessionToken) {
     try {
-      cookieStore.set("org_token", request.session_token, {
-        path: "/",
-        maxAge: 604800,
-        sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
-      });
-    } catch (_) {}
+      await setOrganiserCookie(request.sessionToken);
+    } catch {}
   }
+
+  const [tournament] = await db
+    .select({ id: tournaments.id, name: tournaments.name })
+    .from(tournaments)
+    .where(eq(tournaments.id, request.tournamentId));
 
   return {
     role: "organiser",
     id: request.id,
-    name: request.organiser_name,
-    tournamentId: request.tournament_id,
-    tournament: request.tournaments,
+    name: request.organiserName,
+    tournamentId: request.tournamentId,
+    tournament,
   };
 }
 
@@ -333,14 +408,9 @@ export async function ensureOrganiser() {
     throw new Error("Not authenticated");
   }
 
-  const { data: request } = await supabase
-    .from("organiser_requests")
-    .select("id, tournament_id, status, organiser_name, session_token, expires_at")
-    .or(`session_token.eq.${orgToken},id.eq.${orgToken}`)
-    .eq("status", "approved")
-    .maybeSingle();
+  const request = await findApprovedOrganiserRequest(orgToken);
 
-  if (!request || (request.expires_at && new Date(request.expires_at).getTime() < Date.now())) {
+  if (!request || (request.expiresAt && request.expiresAt.getTime() < Date.now())) {
     try {
       cookieStore.delete("org_token");
       cookieStore.delete("org_name");
@@ -348,23 +418,17 @@ export async function ensureOrganiser() {
     throw new Error("Not authenticated");
   }
 
-  // Synchronize cookie to session_token if needed
-  if (request.session_token && orgToken !== request.session_token) {
+  if (request.sessionToken && orgToken !== request.sessionToken) {
     try {
-      cookieStore.set("org_token", request.session_token, {
-        path: "/",
-        maxAge: 604800,
-        sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
-      });
-    } catch (_) {}
+      await setOrganiserCookie(request.sessionToken);
+    } catch {}
   }
 
   return {
     id: request.id,
-    name: request.organiser_name,
+    name: request.organiserName,
     role: "organiser",
-    tournamentId: request.tournament_id,
+    tournamentId: request.tournamentId,
   };
 }
 
@@ -377,16 +441,27 @@ export async function validateOrganiserSessionAction(token?: string) {
   const orgToken = token || cookieStore.get("org_token")?.value;
   if (!orgToken) return { valid: false, reason: "missing" };
 
-  const supabase = await createClient();
-  const { data: request, error } = await supabase
-    .from("organiser_requests")
-    .select("id, status, organiser_name, tournament_id, expires_at")
-    .or(`session_token.eq.${orgToken},id.eq.${orgToken}`)
-    .maybeSingle();
-
-  if (error) {
+  let request;
+  try {
+    const [row] = await db
+      .select({
+        id: organiserRequests.id,
+        status: organiserRequests.status,
+        organiserName: organiserRequests.organiserName,
+        tournamentId: organiserRequests.tournamentId,
+        expiresAt: organiserRequests.expiresAt,
+      })
+      .from(organiserRequests)
+      .where(
+        or(
+          eq(organiserRequests.sessionToken, orgToken),
+          eq(organiserRequests.id, orgToken)
+        )
+      );
+    request = row;
+  } catch (error: any) {
     // Network or temporary DB error: do NOT revoke session
-    return { valid: true, error: error.message };
+    return { valid: true, error: error?.message };
   }
 
   if (!request) {
@@ -405,7 +480,7 @@ export async function validateOrganiserSessionAction(token?: string) {
     return { valid: false, reason: "revoked", requestId: request.id };
   }
 
-  if (request.expires_at && new Date(request.expires_at).getTime() < Date.now()) {
+  if (request.expiresAt && request.expiresAt.getTime() < Date.now()) {
     try {
       cookieStore.delete("org_token");
       cookieStore.delete("org_name");
@@ -417,8 +492,8 @@ export async function validateOrganiserSessionAction(token?: string) {
     valid: true,
     requestId: request.id,
     status: request.status,
-    organiserName: request.organiser_name,
-    tournamentId: request.tournament_id,
+    organiserName: request.organiserName,
+    tournamentId: request.tournamentId,
   };
 }
 

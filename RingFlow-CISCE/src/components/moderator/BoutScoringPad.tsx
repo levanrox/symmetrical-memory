@@ -1,15 +1,25 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useCallback } from "react";
-import { confirmBoutResult, updateLiveMatchState, updateRingTimerState } from "@/actions/matches";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { confirmBoutResult, updateLiveMatchState } from "@/actions/matches";
+import { MatchClock } from "@/components/match/MatchClock";
+import { useRingClockController } from "@/hooks/useRingClockController";
+import type { RingClock } from "@/lib/matchClock";
+
+interface Competitor {
+  id?: string | null;
+  name: string;
+  school?: string;
+  chestNumber?: string | null;
+}
 
 interface Props {
   match: {
     id: string;
     matchNo: number;
     roundName: string;
-    aka: { id?: string | null; name: string; school?: string; chestNumber?: string | null };
-    ao: { id?: string | null; name: string; school?: string; chestNumber?: string | null };
+    aka: Competitor;
+    ao: Competitor;
     akaScore?: number;
     aoScore?: number;
     akaPenalties?: number;
@@ -18,13 +28,36 @@ interface Props {
   };
   ringId?: string;
   categoryName: string;
+  clock: RingClock;
+  serverNow?: number;
+  serverNowSentAt?: number;
+  serverNowReceivedAt?: number;
+  sidesSwapped?: boolean;
+  nextBout?: {
+    matchNo: number;
+    roundName: string;
+    aka: Competitor;
+    ao: Competitor;
+  } | null;
   onBoutCompleted: () => void;
   onClose?: () => void;
 }
 
-const DEFAULT_DURATION_MS = 3 * 60 * 1000; // 3:00.000 default
+const PRESETS = [
+  { sec: 90, label: "1:30" },
+  { sec: 120, label: "2:00" },
+  { sec: 180, label: "3:00" },
+];
 
-// Referee double-blast whistle synthesizer using Web Audio API
+const PENALTY_LEVELS = [
+  { level: 1, label: "1" },
+  { level: 2, label: "2" },
+  { level: 3, label: "3" },
+  { level: 4, label: "HC" },
+  { level: 5, label: "H" },
+];
+
+// Referee double-blast whistle, synthesised so the desk needs no audio asset.
 const playBuzzerSound = () => {
   if (typeof window === "undefined") return;
   try {
@@ -67,75 +100,69 @@ export function BoutScoringPad({
   match,
   ringId,
   categoryName,
+  clock: initialClock,
+  serverNow,
+  serverNowSentAt,
+  serverNowReceivedAt,
+  sidesSwapped: initialSidesSwapped,
+  nextBout,
   onBoutCompleted,
-  onClose,
 }: Props) {
-  // Score state
   const [akaPoints, setAkaPoints] = useState(match.akaScore ?? 0);
   const [aoPoints, setAoPoints] = useState(match.aoScore ?? 0);
   const [akaPenalties, setAkaPenalties] = useState(match.akaPenalties ?? 0);
   const [aoPenalties, setAoPenalties] = useState(match.aoPenalties ?? 0);
   const [senshu, setSenshu] = useState<"AKA" | "AO" | null>(match.senshu ?? null);
-  const [isSwapped, setIsSwapped] = useState(false);
 
-  // ─── Timer State ───────────────────────────────────────────────────────────
-  // Always start fresh — never read stale ring DB state.
-  // timerOriginRef is the wall-clock time when the CURRENT run segment started,
-  // anchored to include any prior elapsed time:
-  //   origin = Date.now() - elapsedAtPauseMs
-  // So: elapsed = Date.now() - origin  →  remaining = configuredDurationMs - elapsed
-  const [configuredDurationMs, setConfiguredDurationMs] = useState(DEFAULT_DURATION_MS);
-  const [timeLeftMs, setTimeLeftMs] = useState(DEFAULT_DURATION_MS);
-  const [timerRunning, setTimerRunning] = useState(false);
-  const timerOriginRef = useRef<number>(Date.now()); // updated on every START
-
-  // Settings & Edit Modal
-  const [showSettings, setShowSettings] = useState(false);
-  const [editMinutes, setEditMinutes] = useState(String(Math.floor(DEFAULT_DURATION_MS / 60000)));
-  const [editSeconds, setEditSeconds] = useState(String(Math.floor((DEFAULT_DURATION_MS % 60000) / 1000)).padStart(2, "0"));
-  const [editMilliseconds, setEditMilliseconds] = useState(String(DEFAULT_DURATION_MS % 1000).padStart(3, "0"));
-
-  // Gestures
-  const [isPressing, setIsPressing] = useState(false);
-  const longPressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasLongPressedRef = useRef(false);
-
-  // Confirmation & Decision Modals
   const [confirming, setConfirming] = useState(false);
   const [showFinishModal, setShowFinishModal] = useState(false);
   const [showHanteiModal, setShowHanteiModal] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [selectedWinnerSide, setSelectedWinnerSide] = useState<"AKA" | "AO" | null>(null);
   const [finishMethod, setFinishMethod] = useState<string>("POINTS");
-
-  // History stack for Undo
   const [history, setHistory] = useState<any[]>([]);
 
-  // Reset scores + timer completely when a NEW match is loaded
+  const [editMinutes, setEditMinutes] = useState("3");
+  const [editSeconds, setEditSeconds] = useState("00");
+  const [editMilliseconds, setEditMilliseconds] = useState("000");
+
+  const padRef = useRef<HTMLDivElement>(null);
+
+  const clock = useRingClockController({
+    ringId: ringId ?? "",
+    initialClock,
+    initialServerNow: serverNow,
+    initialServerNowSentAt: serverNowSentAt,
+    initialServerNowReceivedAt: serverNowReceivedAt,
+    initialSidesSwapped,
+    onElapsed: playBuzzerSound,
+  });
+
+  const { remainingMs, running, pending, isLow, isExpired, sidesSwapped } = clock;
+
+  // A brand new bout starts from the configured duration on every screen.
   useEffect(() => {
     setAkaPoints(match.akaScore ?? 0);
     setAoPoints(match.aoScore ?? 0);
     setAkaPenalties(match.akaPenalties ?? 0);
     setAoPenalties(match.aoPenalties ?? 0);
     setSenshu(match.senshu ?? null);
-    // Full timer reset for new match
-    setTimeLeftMs(configuredDurationMs);
-    setTimerRunning(false);
-    timerOriginRef.current = Date.now();
     setHistory([]);
     setShowFinishModal(false);
-    // Also reset DB timer state so scoreboard shows full duration
     if (ringId) {
-      updateRingTimerState(ringId, {
-        timerStatus: "idle",
-        timerAccumulatedSeconds: 0,
-        timerStartedAt: null,
-        timerPausedAt: null,
-      }).catch(() => {});
+      void clock.reset();
     }
-  }, [match.id]); // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [match.id]);
 
-  // Sync with live score in DB
-  const syncTimerRef = useRef<NodeJS.Timeout | null>(null);
+  useEffect(() => {
+    const total = clock.clock.durationMs;
+    setEditMinutes(String(Math.floor(total / 60000)));
+    setEditSeconds(String(Math.floor((total % 60000) / 1000)).padStart(2, "0"));
+    setEditMilliseconds(String(total % 1000).padStart(3, "0"));
+  }, [clock.clock.durationMs]);
+
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const syncLiveState = useCallback(
     (aP: number, oP: number, aPen: number, oPen: number, sen: "AKA" | "AO" | null) => {
       if (!ringId) return;
@@ -153,139 +180,51 @@ export function BoutScoringPad({
     [match.id, ringId]
   );
 
-  // ─── High-Precision Countdown (~30 FPS, drift-free) ────────────────────────
-  // Uses timerOriginRef so deps are ONLY [timerRunning, configuredDurationMs].
-  // This prevents the interval from being torn down & recreated every 33ms.
-  useEffect(() => {
-    if (!timerRunning) return;
-
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - timerOriginRef.current;
-      const remaining = configuredDurationMs - elapsed;
-      if (remaining <= 0) {
-        setTimeLeftMs(0);
-        setTimerRunning(false);
-        playBuzzerSound();
-        if (ringId) {
-          updateRingTimerState(ringId, {
-            timerStatus: "finished",
-            timerAccumulatedSeconds: Math.floor(configuredDurationMs / 1000),
-            timerStartedAt: null,
-          }).catch(() => {});
-        }
-      } else {
-        setTimeLeftMs(remaining);
-      }
-    }, 33);
-
-    return () => clearInterval(interval);
-  }, [timerRunning, configuredDurationMs, ringId]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Clean up long-press timeout on unmount
   useEffect(() => {
     return () => {
-      if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
     };
   }, []);
 
-  // Keyboard shortcut listener (Spacebar or F1 toggles Start/Stop)
+  // Space / F1 control the clock from anywhere on the desk.
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-        return;
-      }
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       if (e.code === "Space" || e.key === "F1") {
         e.preventDefault();
-        setTimerRunning((r) => {
-          const next = !r;
-          if (ringId) {
-            if (next) {
-              // STARTING: set origin so elapsed = configuredDuration - timeLeftMs
-              timerOriginRef.current = Date.now() - (configuredDurationMs - timeLeftMs);
-              updateRingTimerState(ringId, {
-                timerStatus: "running",
-                timerAccumulatedSeconds: Math.floor((configuredDurationMs - timeLeftMs) / 1000),
-                timerStartedAt: new Date(timerOriginRef.current),
-                timerPausedAt: null,
-              }).catch(() => {});
-            } else {
-              // PAUSING: compute elapsed from origin (accurate, not lagging 33ms)
-              const elapsedMs = Date.now() - timerOriginRef.current;
-              updateRingTimerState(ringId, {
-                timerStatus: "paused",
-                timerAccumulatedSeconds: Math.floor(Math.min(elapsedMs, configuredDurationMs) / 1000),
-                timerStartedAt: null,
-                timerPausedAt: new Date(),
-              }).catch(() => {});
-            }
-          }
-          return next;
-        });
+        void clock.toggle();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [ringId, configuredDurationMs, timeLeftMs]);
+  }, [clock]);
 
-  // Gesture Controls for Timer: tap to start/pause, long-press to reset
+  // Tap the clock to start/pause, hold to reset.
+  const longPressTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasLongPressedRef = useRef(false);
+  const [isPressing, setIsPressing] = useState(false);
+
   const handlePointerDown = (e: React.PointerEvent) => {
     e.currentTarget.releasePointerCapture(e.pointerId);
     hasLongPressedRef.current = false;
     setIsPressing(true);
-
     if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
 
     longPressTimeoutRef.current = setTimeout(() => {
-      // Long press: RESET to full configured duration
-      setTimerRunning(false);
-      setTimeLeftMs(configuredDurationMs);
-      timerOriginRef.current = Date.now();
       hasLongPressedRef.current = true;
       setIsPressing(false);
-
-      if (typeof window !== "undefined" && window.navigator && window.navigator.vibrate) {
+      if (typeof window !== "undefined" && window.navigator?.vibrate) {
         window.navigator.vibrate(60);
       }
-
-      if (ringId) {
-        updateRingTimerState(ringId, {
-          timerStatus: "idle",
-          timerAccumulatedSeconds: 0,
-          timerStartedAt: null,
-          timerPausedAt: null,
-        }).catch(() => {});
-      }
+      void clock.reset();
     }, 850);
   };
 
   const handlePointerUp = () => {
     if (longPressTimeoutRef.current) clearTimeout(longPressTimeoutRef.current);
     setIsPressing(false);
-
     if (!hasLongPressedRef.current) {
-      const next = !timerRunning;
-      setTimerRunning(next);
-      if (ringId) {
-        if (next) {
-          // STARTING: anchor timerOriginRef so elapsed = configuredDuration - timeLeftMs
-          timerOriginRef.current = Date.now() - (configuredDurationMs - timeLeftMs);
-          updateRingTimerState(ringId, {
-            timerStatus: "running",
-            timerAccumulatedSeconds: Math.floor((configuredDurationMs - timeLeftMs) / 1000),
-            timerStartedAt: new Date(timerOriginRef.current),
-            timerPausedAt: null,
-          }).catch(() => {});
-        } else {
-          // PAUSING: read elapsed from timerOriginRef (exact, not lagging 33ms)
-          const elapsedMs = Date.now() - timerOriginRef.current;
-          updateRingTimerState(ringId, {
-            timerStatus: "paused",
-            timerAccumulatedSeconds: Math.floor(Math.min(elapsedMs, configuredDurationMs) / 1000),
-            timerStartedAt: null,
-            timerPausedAt: new Date(),
-          }).catch(() => {});
-        }
-      }
+      void clock.toggle();
     }
     hasLongPressedRef.current = false;
   };
@@ -295,72 +234,18 @@ export function BoutScoringPad({
     setIsPressing(false);
   };
 
-  // Fine-grained adjustments (+/- ms or s)
-  const handleAdjustMs = (deltaMs: number) => {
-    setTimeLeftMs((prev) => {
-      const next = Math.max(0, prev + deltaMs);
-      // Shift the origin so the running interval reflects the new time immediately
-      timerOriginRef.current = Date.now() - (configuredDurationMs - next);
-      const newElapsedMs = configuredDurationMs - next;
-      if (ringId) {
-        if (timerRunning) {
-          updateRingTimerState(ringId, {
-            timerStatus: "running",
-            timerAccumulatedSeconds: Math.floor(newElapsedMs / 1000),
-            timerStartedAt: new Date(timerOriginRef.current),
-          }).catch(() => {});
-        } else {
-          updateRingTimerState(ringId, {
-            timerStatus: "paused",
-            timerAccumulatedSeconds: Math.floor(newElapsedMs / 1000),
-          }).catch(() => {});
-        }
-      }
-      return next;
-    });
-  };
-
-  // Save Configured Duration from Settings Modal
-  const handleSaveTimerSettings = () => {
+  const saveClockSettings = () => {
     const mins = parseInt(editMinutes, 10) || 0;
     const secs = parseInt(editSeconds, 10) || 0;
     const ms = parseInt(editMilliseconds, 10) || 0;
-    const totalMs = Math.max(10, mins * 60 * 1000 + secs * 1000 + ms);
-
-    setConfiguredDurationMs(totalMs);
-    setTimeLeftMs(totalMs);
-    setTimerRunning(false);
+    void clock.applyDuration(Math.max(1000, mins * 60000 + secs * 1000 + ms));
     setShowSettings(false);
-
-    if (ringId) {
-      updateRingTimerState(ringId, {
-        timerStatus: "idle",
-        timerAccumulatedSeconds: 0,
-      }).catch(() => {});
-    }
-  };
-
-  const handleSetPreset = (totalSec: number) => {
-    const totalMs = totalSec * 1000;
-    setConfiguredDurationMs(totalMs);
-    setTimeLeftMs(totalMs);
-    setTimerRunning(false);
-    setEditMinutes(String(Math.floor(totalSec / 60)));
-    setEditSeconds(String(totalSec % 60).padStart(2, "0"));
-    setEditMilliseconds("000");
-
-    if (ringId) {
-      updateRingTimerState(ringId, {
-        timerStatus: "idle",
-        timerAccumulatedSeconds: 0,
-      }).catch(() => {});
-    }
   };
 
   const recordState = () => {
     setHistory((prev) => [
       ...prev,
-      { akaPoints, aoPoints, akaPenalties, aoPenalties, senshu, timeLeftMs },
+      { akaPoints, aoPoints, akaPenalties, aoPenalties, senshu },
     ]);
   };
 
@@ -425,7 +310,6 @@ export function BoutScoringPad({
     setAkaPenalties(last.akaPenalties);
     setAoPenalties(last.aoPenalties);
     setSenshu(last.senshu);
-    if (last.timeLeftMs !== undefined) setTimeLeftMs(last.timeLeftMs);
     setHistory((prev) => prev.slice(0, prev.length - 1));
     syncLiveState(last.akaPoints, last.aoPoints, last.akaPenalties, last.aoPenalties, last.senshu);
   };
@@ -438,24 +322,15 @@ export function BoutScoringPad({
       setAkaPenalties(0);
       setAoPenalties(0);
       setSenshu(null);
-      setTimeLeftMs(configuredDurationMs);
-      setTimerRunning(false);
       syncLiveState(0, 0, 0, 0, null);
+      void clock.reset();
     }
   };
 
-  // Time format: MM:SS.mmm
-  const displayMinutes = Math.floor(timeLeftMs / 60000);
-  const displaySeconds = Math.floor((timeLeftMs % 60000) / 1000);
-  const displayMs = Math.floor(timeLeftMs % 1000);
-  const formattedTime = `${String(displayMinutes).padStart(2, "0")}:${String(displaySeconds).padStart(2, "0")}.${String(displayMs).padStart(3, "0")}`;
-
-  // 8-Point Difference check (WKF Kumite Rule)
   const pointDiff = Math.abs(akaPoints - aoPoints);
   const hasEightPointLead = pointDiff >= 8;
   const eightPointLeader = akaPoints > aoPoints ? "AKA" : "AO";
 
-  // Confirm match winner and advance
   const handleConfirmWinner = async (winnerSide: "AKA" | "AO", method = finishMethod) => {
     const winnerId = winnerSide === "AKA" ? match.aka.id : match.ao.id;
     if (!winnerId) {
@@ -474,17 +349,24 @@ export function BoutScoringPad({
         senshu,
         method,
       });
-
       setShowFinishModal(false);
       onBoutCompleted();
-    } catch (err: any) {
-      alert(`Failed to confirm match: ${err.message}`);
+    } catch (err) {
+      alert(`Failed to confirm match: ${err instanceof Error ? err.message : "unknown error"}`);
     } finally {
       setConfirming(false);
     }
   };
 
-  // Competitor Card Render
+  const statusLabel =
+    clock.clock.status === "running"
+      ? "Running"
+      : clock.clock.status === "paused"
+        ? "Paused"
+        : clock.clock.status === "finished"
+          ? "Time up"
+          : "Ready";
+
   const renderCompetitor = (side: "AKA" | "AO") => {
     const isAka = side === "AKA";
     const ath = isAka ? match.aka : match.ao;
@@ -492,34 +374,38 @@ export function BoutScoringPad({
     const penalties = isAka ? akaPenalties : aoPenalties;
     const hasSenshu = senshu === side;
 
-    const bgBadge = isAka ? "bg-[#DC2626]" : "bg-[#2563EB]";
-    const borderCol = isAka ? "border-[#DC2626]" : "border-[#2563EB]";
-    const textCol = isAka ? "text-[#DC2626]" : "text-[#2563EB]";
-    const shadowCol = isAka ? "shadow-red-500/10" : "shadow-blue-500/10";
+    const accentText = isAka ? "text-[#DC2626]" : "text-[#2563EB]";
+    const accentBorder = isAka ? "border-[#DC2626]" : "border-[#2563EB]";
+    const accentBadge = isAka ? "bg-[#DC2626] text-white" : "bg-[#2563EB] text-white";
+    const scoreButton = isAka
+      ? "bg-[#DC2626] hover:bg-[#B91C1C]"
+      : "bg-[#2563EB] hover:bg-[#1D4ED8]";
 
     return (
-      <div className={`flex flex-col bg-white rounded-2xl border-2 ${borderCol} p-4 sm:p-5 shadow-sm ${shadowCol}`}>
-        {/* Top Header */}
-        <div className="flex items-center justify-between gap-2 mb-3">
+      <section
+        aria-label={`${isAka ? "Aka, red" : "Ao, blue"} competitor`}
+        className={`flex flex-col rounded-2xl border-2 bg-white p-4 shadow-sm sm:p-5 ${accentBorder}`}
+      >
+        <div className="mb-3 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <span className={`px-3 py-1 rounded-full text-white font-black text-xs tracking-wider uppercase ${bgBadge}`}>
+            <span className={`rounded-md px-3 py-1 text-xs font-black uppercase tracking-wider ${accentBadge}`}>
               {isAka ? "AKA (RED)" : "AO (BLUE)"}
             </span>
             {ath.chestNumber && (
-              <span className="px-2 py-0.5 rounded bg-neutral-100 text-neutral-700 text-[10px] font-bold font-mono">
+              <span className="rounded bg-[#F5F3EC] px-2 py-0.5 font-data-mono text-[11px] font-bold text-[#3D3A33]">
                 #{ath.chestNumber}
               </span>
             )}
           </div>
 
-          {/* Senshu Badge */}
           <button
             type="button"
             onClick={() => handleToggleSenshu(side)}
-            className={`px-3 py-1 rounded-full text-xs font-extrabold uppercase transition-all cursor-pointer border ${
+            aria-pressed={hasSenshu}
+            className={`min-h-[36px] rounded-md border px-3 py-1 text-xs font-extrabold uppercase transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${
               hasSenshu
-                ? "bg-amber-400 text-amber-950 border-amber-500 shadow-xs ring-2 ring-amber-400/40"
-                : "bg-neutral-100 text-neutral-400 border-neutral-200 hover:text-neutral-700"
+                ? "border-amber-500 bg-amber-400 text-amber-950"
+                : "border-[#E1DDCF] bg-white text-[#8C877C] hover:text-[#1B1815]"
             }`}
             title="First uncontested point advantage"
           >
@@ -527,107 +413,78 @@ export function BoutScoringPad({
           </button>
         </div>
 
-        {/* Competitor Name & School */}
-        <div className="mb-4">
-          <h3 className="text-xl sm:text-2xl font-black text-[#1B1815] tracking-tight truncate">
+        <div className="mb-4 min-w-0">
+          <h3 className="truncate text-xl font-black tracking-tight text-[#1B1815] sm:text-2xl">
             {ath.name || "Competitor TBD"}
           </h3>
-          <p className="text-xs font-semibold text-[#68645A] truncate uppercase">
+          <p className="truncate text-xs font-semibold uppercase text-[#68645A]">
             {ath.school || "Club / Academy"}
           </p>
         </div>
 
-        {/* Giant Score Box */}
-        <div className={`w-full py-4 rounded-xl border-2 ${borderCol} bg-neutral-50 flex items-center justify-center mb-4`}>
-          <span className={`font-mono font-black text-6xl sm:text-7xl ${textCol}`}>
+        <div className={`mb-4 flex w-full items-center justify-center rounded-xl border-2 bg-[#FAF9F5] py-3 sm:py-4 ${accentBorder}`}>
+          <span className={`font-data-mono text-6xl font-black tabular-nums sm:text-7xl ${accentText}`}>
             {points}
           </span>
         </div>
 
-        {/* Points Controls (+1 Yuko, +2 Waza-ari, +3 Ippon) */}
-        <div className="grid grid-cols-3 gap-2 mb-3">
-          <button
-            type="button"
-            onClick={() => handleScore(side, 1)}
-            className={`py-3.5 rounded-xl font-black text-sm uppercase text-white shadow-2xs active:scale-95 transition-all cursor-pointer min-h-[44px] ${
-              isAka ? "bg-red-600 hover:bg-red-700" : "bg-blue-600 hover:bg-blue-700"
-            }`}
-          >
-            +1 Yuko
-          </button>
-          <button
-            type="button"
-            onClick={() => handleScore(side, 2)}
-            className={`py-3.5 rounded-xl font-black text-sm uppercase text-white shadow-2xs active:scale-95 transition-all cursor-pointer min-h-[44px] ${
-              isAka ? "bg-red-700 hover:bg-red-800" : "bg-blue-700 hover:bg-blue-800"
-            }`}
-          >
-            +2 Waza-ari
-          </button>
-          <button
-            type="button"
-            onClick={() => handleScore(side, 3)}
-            className={`py-3.5 rounded-xl font-black text-sm uppercase text-white shadow-2xs active:scale-95 transition-all cursor-pointer min-h-[44px] ${
-              isAka ? "bg-red-800 hover:bg-red-900" : "bg-blue-800 hover:bg-blue-900"
-            }`}
-          >
-            +3 Ippon
-          </button>
+        <div className="mb-2 grid grid-cols-3 gap-2">
+          {[
+            { delta: 1, label: "+1", sub: "Yuko" },
+            { delta: 2, label: "+2", sub: "Waza-ari" },
+            { delta: 3, label: "+3", sub: "Ippon" },
+          ].map(({ delta, label, sub }) => (
+            <button
+              key={delta}
+              type="button"
+              onClick={() => handleScore(side, delta)}
+              className={`min-h-[56px] rounded-xl px-1 py-2 font-black text-white shadow-2xs transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${scoreButton}`}
+            >
+              <span className="block text-base leading-none">{label}</span>
+              <span className="mt-0.5 block text-[10px] font-bold uppercase tracking-wide opacity-90">
+                {sub}
+              </span>
+            </button>
+          ))}
         </div>
 
-        {/* Correction Controls (-1, -2, -3) */}
-        <div className="grid grid-cols-3 gap-2 mb-4">
-          <button
-            type="button"
-            onClick={() => handleScore(side, -1)}
-            disabled={points <= 0}
-            className="py-2 rounded-lg border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-600 font-bold text-xs active:scale-95 transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed min-h-[38px]"
-          >
-            -1 Yuko
-          </button>
-          <button
-            type="button"
-            onClick={() => handleScore(side, -2)}
-            disabled={points < 2}
-            className="py-2 rounded-lg border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-600 font-bold text-xs active:scale-95 transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed min-h-[38px]"
-          >
-            -2 Waza-ari
-          </button>
-          <button
-            type="button"
-            onClick={() => handleScore(side, -3)}
-            disabled={points < 3}
-            className="py-2 rounded-lg border border-neutral-200 bg-white hover:bg-neutral-50 text-neutral-600 font-bold text-xs active:scale-95 transition-all cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed min-h-[38px]"
-          >
-            -3 Ippon
-          </button>
+        <div className="grid grid-cols-3 gap-2">
+          {[
+            { delta: -1, label: "-1" },
+            { delta: -2, label: "-2" },
+            { delta: -3, label: "-3" },
+          ].map(({ delta, label }) => (
+            <button
+              key={delta}
+              type="button"
+              onClick={() => handleScore(side, delta)}
+              disabled={points + delta < 0}
+              className="min-h-[40px] rounded-lg border border-[#E1DDCF] bg-white text-xs font-bold text-[#68645A] transition-colors hover:bg-[#F5F3EC] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
+            >
+              {label}
+            </button>
+          ))}
         </div>
 
-        {/* WKF Warnings Row (1, 2, 3, HC, H) */}
-        <div className="mt-auto pt-3 border-t border-neutral-100">
-          <span className="text-[10px] font-black tracking-wider text-neutral-400 uppercase block mb-2">
-            WKF WARNINGS & PENALTIES
+        <div className="mt-4 border-t border-[#E1DDCF] pt-3">
+          <span className="mb-2 block text-[10px] font-black uppercase tracking-wider text-[#8C877C]">
+            WKF warnings
           </span>
           <div className="grid grid-cols-5 gap-1.5">
-            {[
-              { level: 1, label: "1" },
-              { level: 2, label: "2" },
-              { level: 3, label: "3" },
-              { level: 4, label: "HC" },
-              { level: 5, label: "H (DQ)" },
-            ].map(({ level, label }) => {
+            {PENALTY_LEVELS.map(({ level, label }) => {
               const isActive = penalties >= level;
               return (
                 <button
                   key={level}
                   type="button"
                   onClick={() => handleSetPenalty(side, level)}
-                  className={`py-2.5 rounded-lg font-black text-xs transition-all cursor-pointer border min-h-[40px] ${
+                  aria-pressed={isActive}
+                  className={`min-h-[44px] rounded-lg border text-xs font-black transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${
                     isActive
                       ? level === 5
-                        ? "bg-red-600 text-white border-red-700 ring-2 ring-red-500/30"
-                        : "bg-amber-500 text-white border-amber-600 ring-1 ring-amber-500/20"
-                      : "bg-neutral-100 hover:bg-neutral-200 text-neutral-600 border-neutral-200"
+                        ? "border-red-700 bg-red-600 text-white"
+                        : "border-amber-600 bg-amber-500 text-white"
+                      : "border-[#E1DDCF] bg-[#F5F3EC] text-[#68645A] hover:bg-[#ECE9DF]"
                   }`}
                 >
                   {label}
@@ -636,144 +493,107 @@ export function BoutScoringPad({
             })}
           </div>
         </div>
-      </div>
+      </section>
     );
   };
 
+  // No overflow clipping on the container below: it would create a scroll
+  // context and break the sticky clock bar.
   return (
-    <div className="bg-[#FAF9F5] border border-[#E1DDCF] rounded-2xl shadow-sm overflow-hidden">
-      {/* Top Banner with High-Precision Millisecond Timer */}
-      <div className="bg-[#1B1815] text-white px-4 sm:px-6 py-4 border-b border-neutral-800">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
+    <div ref={padRef} className="rounded-2xl border border-[#E1DDCF] bg-[#FAF9F5] shadow-sm">
+      {/* Clock bar — sticky so the time is never scrolled away from the operator */}
+      <div className="sticky top-16 z-30 rounded-t-2xl border-b border-[#2A2622] bg-[#1B1815] px-3 py-3 text-white sm:px-5">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <span className="px-2.5 py-0.5 rounded-full bg-[#0E9C7C] text-white text-[10px] font-black uppercase tracking-wider">
+              <span className="rounded-full bg-[#0E9C7C] px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider">
                 Bout #{match.matchNo}
               </span>
-              <span className="text-xs font-bold text-neutral-400 uppercase">
+              <span className="truncate text-xs font-bold uppercase text-neutral-400">
                 {match.roundName}
               </span>
             </div>
-            <h2 className="text-lg font-bold text-white tracking-tight mt-0.5">
+            <h2 className="mt-0.5 truncate text-sm font-bold text-white sm:text-base">
               {categoryName}
             </h2>
           </div>
 
-          {/* Center High-Precision Timer Controls */}
           <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            {/* Interactive Clock Box: Tap to Play/Pause, Hold 850ms to Reset */}
             <div
               onPointerDown={handlePointerDown}
               onPointerUp={handlePointerUp}
               onPointerLeave={handlePointerLeave}
-              className={`flex items-center bg-black/60 border rounded-xl px-4 py-2 select-none cursor-pointer transition-all ${
-                isPressing ? "scale-95 bg-neutral-900 border-neutral-500" : "hover:border-neutral-500"
-              } ${
-                timeLeftMs <= 15000 && timeLeftMs > 0
-                  ? "border-amber-500/80"
-                  : timeLeftMs === 0
-                  ? "border-red-600/80 bg-red-950/20"
-                  : "border-neutral-700"
-              }`}
-              title="Tap to Start/Pause · Hold down to Reset"
+              role="button"
+              tabIndex={0}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void clock.toggle();
+              }}
+              className={`cursor-pointer rounded-xl border px-3 py-2 transition-all select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+                isPressing ? "scale-95 border-neutral-500 bg-neutral-900" : "border-neutral-700 bg-black/60 hover:border-neutral-500"
+              } ${isLow ? "border-amber-500/80" : ""} ${isExpired ? "border-red-600/80 bg-red-950/20" : ""}`}
+              title="Tap to start or pause · hold to reset"
             >
-              <span
-                className={`font-mono text-2xl sm:text-4xl font-black tracking-wider ${
-                  timeLeftMs <= 15000 && timeLeftMs > 0
-                    ? "text-amber-400"
-                    : timeLeftMs === 0
-                    ? "text-red-500 font-black"
-                    : "text-white"
-                }`}
-              >
-                {formattedTime}
-              </span>
+              <MatchClock
+                remainingMs={remainingMs}
+                status={clock.clock.status}
+                size="mod"
+                tone="dark"
+                offsetMs={clock.offsetMs}
+              />
             </div>
 
-            {/* Play/Pause Button */}
             <button
               type="button"
-              onClick={() => {
-                const next = !timerRunning;
-                setTimerRunning(next);
-                if (ringId) {
-                  updateRingTimerState(ringId, {
-                    timerStatus: next ? "running" : "paused",
-                    timerAccumulatedSeconds: Math.floor((configuredDurationMs - timeLeftMs) / 1000),
-                    timerStartedAt: next ? new Date() : null,
-                    timerPausedAt: next ? null : new Date(),
-                  }).catch(() => {});
-                }
-              }}
-              className={`px-4 py-2.5 rounded-xl font-black text-xs uppercase flex items-center gap-1.5 shadow-sm transition-all cursor-pointer min-h-[44px] ${
-                timerRunning
-                  ? "bg-amber-500 hover:bg-amber-600 text-black active:scale-95"
-                  : "bg-[#0E9C7C] hover:bg-[#0B7C63] text-white active:scale-95"
+              onClick={() => void clock.toggle()}
+              disabled={pending}
+              className={`flex min-h-[44px] items-center gap-1.5 rounded-xl px-4 py-2.5 text-xs font-black uppercase shadow-sm transition-transform active:scale-95 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 focus-visible:ring-offset-[#1B1815] ${
+                running ? "bg-amber-500 text-black hover:bg-amber-600" : "bg-[#0E9C7C] text-white hover:bg-[#0B7C63]"
               }`}
             >
               <span className="material-symbols-outlined text-[18px]">
-                {timerRunning ? "pause" : "play_arrow"}
+                {running ? "pause" : "play_arrow"}
               </span>
-              {timerRunning ? "Pause" : "Start"}
+              {running ? "Pause" : "Start"}
             </button>
 
-            {/* Quick +/- Seconds & Milliseconds Adjustments */}
-            <div className="flex items-center gap-1 bg-neutral-800/90 p-1 rounded-xl border border-neutral-700">
-              <button
-                type="button"
-                onClick={() => handleAdjustMs(1000)}
-                className="px-2 py-1.5 rounded-lg text-xs font-bold text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors min-h-[36px]"
-                title="Add 1 Second"
-              >
-                +1s
-              </button>
-              <button
-                type="button"
-                onClick={() => handleAdjustMs(-1000)}
-                className="px-2 py-1.5 rounded-lg text-xs font-bold text-neutral-300 hover:text-white hover:bg-neutral-700 transition-colors min-h-[36px]"
-                title="Deduct 1 Second"
-              >
-                -1s
-              </button>
-              <button
-                type="button"
-                onClick={() => handleAdjustMs(100)}
-                className="px-2 py-1.5 rounded-lg text-[11px] font-mono font-bold text-amber-300 hover:bg-neutral-700 transition-colors min-h-[36px]"
-                title="Fine-tune: Add 100 Milliseconds"
-              >
-                +100ms
-              </button>
-              <button
-                type="button"
-                onClick={() => handleAdjustMs(-100)}
-                className="px-2 py-1.5 rounded-lg text-[11px] font-mono font-bold text-amber-300 hover:bg-neutral-700 transition-colors min-h-[36px]"
-                title="Fine-tune: Deduct 100 Milliseconds"
-              >
-                -100ms
-              </button>
+            <div className="flex items-center gap-1 rounded-xl border border-neutral-700 bg-neutral-800/90 p-1">
+              {[
+                { delta: 1000, label: "+1s" },
+                { delta: -1000, label: "-1s" },
+                { delta: 100, label: "+.1" },
+                { delta: -100, label: "-.1" },
+              ].map(({ delta, label }) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => void clock.adjust(delta)}
+                  disabled={pending}
+                  className="min-h-[36px] min-w-[36px] rounded-lg px-2 py-1.5 font-data-mono text-[11px] font-bold text-neutral-300 transition-colors hover:bg-neutral-700 hover:text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                  title={`${delta > 0 ? "Add" : "Deduct"} ${Math.abs(delta)} milliseconds`}
+                >
+                  {label}
+                </button>
+              ))}
               <button
                 type="button"
                 onClick={() => setShowSettings(true)}
-                className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-neutral-700 transition-colors min-h-[36px] flex items-center justify-center"
-                title="Exact Time Settings (MM:SS.mmm)"
+                className="flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-neutral-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                title="Set an exact duration"
+                aria-label="Set an exact duration"
               >
-                <span className="material-symbols-outlined text-[18px]">settings</span>
+                <span className="material-symbols-outlined text-[18px]">tune</span>
               </button>
             </div>
 
-            {/* Standard Presets */}
-            <div className="hidden lg:flex items-center gap-1 bg-neutral-800/90 p-1 rounded-xl border border-neutral-700 text-xs">
-              {[
-                { sec: 90, label: "1:30" },
-                { sec: 120, label: "2:00" },
-                { sec: 180, label: "3:00" },
-              ].map(({ sec, label }) => (
+            <div className="hidden items-center gap-1 rounded-xl border border-neutral-700 bg-neutral-800/90 p-1 md:flex">
+              {PRESETS.map(({ sec, label }) => (
                 <button
                   key={sec}
                   type="button"
-                  onClick={() => handleSetPreset(sec)}
-                  className={`px-2 py-1 rounded-lg font-bold transition-colors cursor-pointer ${
-                    configuredDurationMs === sec * 1000
+                  onClick={() => void clock.applyDuration(sec * 1000)}
+                  disabled={pending}
+                  className={`min-h-[36px] rounded-lg px-2.5 py-1 text-xs font-bold transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+                    clock.clock.durationMs === sec * 1000
                       ? "bg-[#0E9C7C] text-white"
                       : "text-neutral-400 hover:text-white"
                   }`}
@@ -782,15 +602,29 @@ export function BoutScoringPad({
                 </button>
               ))}
             </div>
+
+            <span
+              className="hidden text-[11px] font-bold uppercase tracking-wider text-neutral-400 lg:inline"
+              aria-live="polite"
+            >
+              {statusLabel}
+            </span>
           </div>
         </div>
 
-        {/* 8-Point Superiority Banner */}
+        {clock.error && (
+          <p role="alert" className="mt-2 rounded-lg bg-red-950/60 px-3 py-1.5 text-xs font-semibold text-red-200">
+            {clock.error}
+          </p>
+        )}
+
         {hasEightPointLead && (
-          <div className="mt-3 bg-amber-500/20 border border-amber-500/50 rounded-xl px-4 py-2 flex items-center justify-between animate-pulse">
-            <div className="flex items-center gap-2 text-amber-300 font-bold text-xs uppercase tracking-wider">
+          <div className="mt-3 flex items-center justify-between rounded-xl border border-amber-500/50 bg-amber-500/20 px-4 py-2">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-300">
               <span className="material-symbols-outlined text-[18px]">gavel</span>
-              <span>8-Point Lead Superiority ({eightPointLeader} leads by {pointDiff} pts)</span>
+              <span>
+                8-point lead · {eightPointLeader} ahead by {pointDiff}
+              </span>
             </div>
             <button
               type="button"
@@ -799,247 +633,219 @@ export function BoutScoringPad({
                 setFinishMethod("8_POINT_LEAD");
                 setShowFinishModal(true);
               }}
-              className="px-3 py-1 bg-amber-500 hover:bg-amber-400 text-black text-xs font-black rounded-lg uppercase shadow-xs transition-all cursor-pointer"
+              className="min-h-[36px] rounded-lg bg-amber-500 px-3 py-1 text-xs font-black uppercase text-black transition-colors hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
             >
-              End Bout Now
+              End bout now
             </button>
           </div>
         )}
       </div>
 
-      {/* Main Scoring Arena Grid */}
-      <div className="p-4 sm:p-6 grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-        {isSwapped ? renderCompetitor("AO") : renderCompetitor("AKA")}
-        {isSwapped ? renderCompetitor("AKA") : renderCompetitor("AO")}
+      {/* Competitor grid: stacked on phones, side by side from tablet up */}
+      <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-2 sm:p-6">
+        {sidesSwapped ? renderCompetitor("AO") : renderCompetitor("AKA")}
+        {sidesSwapped ? renderCompetitor("AKA") : renderCompetitor("AO")}
       </div>
 
-      {/* Control Bar Actions (Swap, HT, Undo, Reset All, Confirm Result) */}
-      <div className="bg-[#F5F3EC] border-t border-[#E1DDCF] px-4 sm:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
+      {/* Next fighters, so the desk knows what is coming */}
+      {nextBout && (
+        <div className="mx-4 mb-4 flex items-center gap-2 rounded-xl border border-[#E1DDCF] bg-white px-4 py-2.5 text-xs sm:mx-6">
+          <span className="font-black uppercase tracking-wider text-[#8C877C]">On deck</span>
+          <span className="truncate font-bold text-[#1B1815]">
+            Bout #{nextBout.matchNo} · {nextBout.aka.name || "TBD"} vs {nextBout.ao.name || "TBD"}
+          </span>
+        </div>
+      )}
+
+      {/* Action bar — confirm sits in the thumb zone on phones */}
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-b-2xl border-t border-[#E1DDCF] bg-[#F5F3EC] px-4 py-3 sm:px-6">
         <div className="flex flex-wrap items-center gap-2">
-          {/* Swap Sides Button */}
           <button
             type="button"
-            onClick={() => setIsSwapped(!isSwapped)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-[#E1DDCF] hover:bg-neutral-50 text-[#1B1815] text-xs font-bold transition-colors cursor-pointer shadow-2xs min-h-[40px]"
-            title="Swap AKA/AO positions on screen"
+            onClick={() => void clock.setSwapped(!sidesSwapped)}
+            aria-pressed={sidesSwapped}
+            className={`flex min-h-[44px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${
+              sidesSwapped
+                ? "border-[#0E9C7C] bg-[#E3F6F0] text-[#0B7C63]"
+                : "border-[#E1DDCF] bg-white text-[#1B1815] hover:bg-[#FAF9F5]"
+            }`}
+            title="Mirror which side appears on the left of the arena screen"
           >
             <span className="material-symbols-outlined text-[16px]">swap_horiz</span>
-            Swap Sides
+            Swap sides {sidesSwapped ? "· AKA right" : "· AKA left"}
           </button>
 
-          {/* Hantei (Referee Flags) */}
           <button
             type="button"
             onClick={() => setShowHanteiModal(true)}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-[#E1DDCF] hover:bg-neutral-50 text-[#1B1815] text-xs font-bold transition-colors cursor-pointer shadow-2xs min-h-[40px]"
-            title="Referee Decision (Flags)"
+            className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-[#E1DDCF] bg-white px-3 py-2 text-xs font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
           >
             <span className="material-symbols-outlined text-[16px]">how_to_vote</span>
-            Hantei (HT)
+            Hantei
           </button>
 
-          {/* Undo Button */}
           <button
             type="button"
             onClick={handleUndo}
             disabled={history.length === 0}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-[#E1DDCF] hover:bg-neutral-50 text-[#1B1815] text-xs font-bold transition-colors cursor-pointer shadow-2xs disabled:opacity-40 disabled:cursor-not-allowed min-h-[40px]"
-            title="Undo last scoring action"
+            className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-[#E1DDCF] bg-white px-3 py-2 text-xs font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
           >
             <span className="material-symbols-outlined text-[16px]">undo</span>
             Undo
           </button>
 
-          {/* Reset All */}
           <button
             type="button"
             onClick={handleResetAll}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-white border border-red-200 text-red-600 hover:bg-red-50 text-xs font-bold transition-colors cursor-pointer shadow-2xs min-h-[40px]"
-            title="Reset match data"
+            className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2"
           >
             <span className="material-symbols-outlined text-[16px]">restart_alt</span>
             Reset
           </button>
         </div>
 
-        {/* Big Action: Confirm Bout Result & Advance Tree */}
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => {
-              let defaultSide: "AKA" | "AO" = "AKA";
-              if (akaPoints > aoPoints) defaultSide = "AKA";
-              else if (aoPoints > akaPoints) defaultSide = "AO";
-              else if (senshu) defaultSide = senshu;
+        <button
+          type="button"
+          onClick={() => {
+            let defaultSide: "AKA" | "AO" = "AKA";
+            if (akaPoints > aoPoints) defaultSide = "AKA";
+            else if (aoPoints > akaPoints) defaultSide = "AO";
+            else if (senshu) defaultSide = senshu;
 
-              setSelectedWinnerSide(defaultSide);
-              setFinishMethod(akaPoints !== aoPoints ? "POINTS" : senshu ? "SENSHU" : "HANTEI");
-              setShowFinishModal(true);
-            }}
-            disabled={confirming}
-            className="flex items-center gap-2 px-6 py-3 rounded-xl bg-[#0E9C7C] hover:bg-[#0B7C63] text-white font-extrabold text-sm uppercase shadow-sm transition-all cursor-pointer active:scale-95 disabled:opacity-50 min-h-[44px]"
-          >
-            <span className="material-symbols-outlined text-[18px]">verified</span>
-            Confirm Result & Advance Bracket
-          </button>
-        </div>
+            setSelectedWinnerSide(defaultSide);
+            setFinishMethod(akaPoints !== aoPoints ? "POINTS" : senshu ? "SENSHU" : "HANTEI");
+            setShowFinishModal(true);
+          }}
+          disabled={confirming}
+          className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-[#0E9C7C] px-6 py-3 text-sm font-extrabold uppercase text-white shadow-sm transition-transform active:scale-95 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 sm:w-auto"
+        >
+          <span className="material-symbols-outlined text-[18px]">verified</span>
+          Confirm result
+        </button>
       </div>
 
-      {/* Timer Configuration Modal (Minutes, Seconds & Milliseconds) */}
+      {/* Exact duration */}
       {showSettings && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-6 shadow-2xl border border-neutral-200">
-            <h3 className="font-extrabold text-lg text-neutral-900 mb-1">
-              Match Clock Setting
-            </h3>
-            <p className="text-xs text-neutral-500 mb-4">
-              Enter exact minutes, seconds, and milliseconds for the match countdown.
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-[#E1DDCF] bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-extrabold text-[#1B1815]">Set the bout clock</h3>
+            <p className="mb-4 text-xs text-[#68645A]">
+              This duration is used by the moderator desk and the arena screen together.
             </p>
 
-            <div className="grid grid-cols-3 gap-3 mb-5">
-              <div>
-                <label className="block text-[10px] font-black uppercase text-neutral-500 mb-1">
-                  Minutes
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="59"
-                  value={editMinutes}
-                  onChange={(e) => setEditMinutes(e.target.value)}
-                  className="w-full px-3 py-2 border border-neutral-300 rounded-xl font-mono font-bold text-center text-lg"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-black uppercase text-neutral-500 mb-1">
-                  Seconds
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="59"
-                  value={editSeconds}
-                  onChange={(e) => setEditSeconds(e.target.value)}
-                  className="w-full px-3 py-2 border border-neutral-300 rounded-xl font-mono font-bold text-center text-lg"
-                />
-              </div>
-
-              <div>
-                <label className="block text-[10px] font-black uppercase text-neutral-500 mb-1">
-                  Millisec
-                </label>
-                <input
-                  type="number"
-                  min="0"
-                  max="999"
-                  value={editMilliseconds}
-                  onChange={(e) => setEditMilliseconds(e.target.value)}
-                  className="w-full px-3 py-2 border border-neutral-300 rounded-xl font-mono font-bold text-center text-lg"
-                />
-              </div>
+            <div className="mb-5 grid grid-cols-3 gap-3">
+              {[
+                { label: "Minutes", value: editMinutes, set: setEditMinutes, max: 59 },
+                { label: "Seconds", value: editSeconds, set: setEditSeconds, max: 59 },
+                { label: "Millis", value: editMilliseconds, set: setEditMilliseconds, max: 999 },
+              ].map(({ label, value, set, max }) => (
+                <div key={label}>
+                  <label className="mb-1 block text-[10px] font-black uppercase text-[#68645A]">
+                    {label}
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    max={max}
+                    value={value}
+                    onChange={(e) => set(e.target.value)}
+                    className="w-full rounded-xl border border-[#E1DDCF] px-3 py-2 text-center font-data-mono text-base font-bold text-[#1B1815] focus:border-[#0E9C7C] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                  />
+                </div>
+              ))}
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-neutral-100">
+            <div className="flex items-center justify-end gap-2 border-t border-[#E1DDCF] pt-4">
               <button
                 type="button"
                 onClick={() => setShowSettings(false)}
-                className="px-4 py-2 rounded-xl border border-neutral-200 text-neutral-600 hover:bg-neutral-50 font-bold text-xs cursor-pointer"
+                className="min-h-[44px] rounded-xl border border-[#E1DDCF] px-4 py-2 text-xs font-bold text-[#68645A] hover:bg-[#F5F3EC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
               >
                 Cancel
               </button>
               <button
                 type="button"
-                onClick={handleSaveTimerSettings}
-                className="px-5 py-2 rounded-xl bg-[#0E9C7C] hover:bg-[#0B7C63] text-white font-black text-xs uppercase shadow-sm cursor-pointer"
+                onClick={saveClockSettings}
+                className="min-h-[44px] rounded-xl bg-[#0E9C7C] px-5 py-2 text-xs font-black uppercase text-white hover:bg-[#0B7C63] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
               >
-                Save Clock
+                Save clock
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Finish & Advance Confirmation Modal */}
+      {/* Confirm result */}
       {showFinishModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-neutral-200">
-            <h3 className="font-extrabold text-lg text-neutral-900 mb-1">
-              Confirm Bout #{match.matchNo} Result
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-[#E1DDCF] bg-white p-6 shadow-2xl">
+            <h3 className="text-lg font-extrabold text-[#1B1815]">
+              Confirm bout #{match.matchNo}
             </h3>
-            <p className="text-xs text-neutral-500 mb-4">
-              Select the winning competitor and decision method to advance the tournament bracket tree.
+            <p className="mb-4 text-xs text-[#68645A]">
+              Pick the winner and the decision method to advance the bracket.
             </p>
 
-            {/* Select Winner Cards */}
-            <div className="grid grid-cols-2 gap-3 mb-4">
-              <button
-                type="button"
-                onClick={() => setSelectedWinnerSide("AKA")}
-                className={`p-3.5 rounded-xl border-2 text-left transition-all cursor-pointer ${
-                  selectedWinnerSide === "AKA"
-                    ? "border-red-600 bg-red-50 ring-2 ring-red-500/20"
-                    : "border-neutral-200 hover:border-neutral-300 bg-white"
-                }`}
-              >
-                <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-red-600 text-white block w-max mb-1.5">
-                  AKA (Red)
-                </span>
-                <p className="font-extrabold text-sm text-neutral-900 truncate">
-                  {match.aka.name}
-                </p>
-                <p className="text-xs font-mono font-bold text-red-600 mt-1">
-                  {akaPoints} Points
-                </p>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setSelectedWinnerSide("AO")}
-                className={`p-3.5 rounded-xl border-2 text-left transition-all cursor-pointer ${
-                  selectedWinnerSide === "AO"
-                    ? "border-blue-600 bg-blue-50 ring-2 ring-blue-500/20"
-                    : "border-neutral-200 hover:border-neutral-300 bg-white"
-                }`}
-              >
-                <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase bg-blue-600 text-white block w-max mb-1.5">
-                  AO (Blue)
-                </span>
-                <p className="font-extrabold text-sm text-neutral-900 truncate">
-                  {match.ao.name}
-                </p>
-                <p className="text-xs font-mono font-bold text-blue-600 mt-1">
-                  {aoPoints} Points
-                </p>
-              </button>
+            <div className="mb-4 grid grid-cols-2 gap-3">
+              {(["AKA", "AO"] as const).map((side) => {
+                const isAka = side === "AKA";
+                const ath = isAka ? match.aka : match.ao;
+                const selected = selectedWinnerSide === side;
+                return (
+                  <button
+                    key={side}
+                    type="button"
+                    onClick={() => setSelectedWinnerSide(side)}
+                    className={`rounded-xl border-2 p-3.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+                      selected
+                        ? isAka
+                          ? "border-[#DC2626] bg-red-50"
+                          : "border-[#2563EB] bg-blue-50"
+                        : "border-[#E1DDCF] bg-white hover:border-[#8C877C]"
+                    }`}
+                  >
+                    <span
+                      className={`mb-1.5 block w-max rounded px-2 py-0.5 text-[10px] font-black uppercase text-white ${
+                        isAka ? "bg-[#DC2626]" : "bg-[#2563EB]"
+                      }`}
+                    >
+                      {isAka ? "Aka (red)" : "Ao (blue)"}
+                    </span>
+                    <p className="truncate text-sm font-extrabold text-[#1B1815]">{ath.name}</p>
+                    <p className={`mt-1 font-data-mono text-xs font-bold ${isAka ? "text-[#DC2626]" : "text-[#2563EB]"}`}>
+                      {isAka ? akaPoints : aoPoints} points
+                    </p>
+                  </button>
+                );
+              })}
             </div>
 
-            {/* Decision Method */}
             <div className="mb-5">
-              <label className="block text-xs font-bold text-neutral-700 mb-1 uppercase tracking-wider">
-                Decision Method
+              <label htmlFor="decision-method" className="mb-1 block text-xs font-bold uppercase tracking-wider text-[#3D3A33]">
+                Decision method
               </label>
               <select
+                id="decision-method"
                 value={finishMethod}
                 onChange={(e) => setFinishMethod(e.target.value)}
-                className="w-full px-3 py-2 rounded-xl border border-neutral-300 bg-white text-sm font-semibold text-neutral-800 focus:outline-none focus:ring-2 focus:ring-[#0E9C7C]"
+                className="w-full rounded-xl border border-[#E1DDCF] bg-white px-3 py-2 text-base font-semibold text-[#1B1815] focus:border-[#0E9C7C] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:text-sm"
               >
-                <option value="POINTS">Points Difference</option>
-                <option value="SENSHU">First Uncontested Point (Senshu)</option>
-                <option value="8_POINT_LEAD">8-Point Superiority Lead</option>
-                <option value="HANTEI">Hantei (Judges' Decision)</option>
-                <option value="KIKEN">Kiken (Injury / Forfeit)</option>
-                <option value="HANSOKU">Hansoku (Disqualification)</option>
-                <option value="SHIKKAKU">Shikkaku (Severe Misconduct DQ)</option>
+                <option value="POINTS">Points difference</option>
+                <option value="SENSHU">Senshu (first point)</option>
+                <option value="8_POINT_LEAD">8-point lead</option>
+                <option value="HANTEI">Hantei (judges)</option>
+                <option value="KIKEN">Kiken (injury / forfeit)</option>
+                <option value="HANSOKU">Hansoku (disqualification)</option>
+                <option value="SHIKKAKU">Shikkaku (severe misconduct)</option>
               </select>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-neutral-100">
+            <div className="flex items-center justify-end gap-2 border-t border-[#E1DDCF] pt-4">
               <button
                 type="button"
                 onClick={() => setShowFinishModal(false)}
                 disabled={confirming}
-                className="px-4 py-2 rounded-xl border border-neutral-200 text-neutral-600 hover:bg-neutral-50 font-bold text-xs cursor-pointer"
+                className="min-h-[44px] rounded-xl border border-[#E1DDCF] px-4 py-2 text-xs font-bold text-[#68645A] hover:bg-[#F5F3EC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
               >
                 Cancel
               </button>
@@ -1047,27 +853,25 @@ export function BoutScoringPad({
                 type="button"
                 onClick={() => selectedWinnerSide && handleConfirmWinner(selectedWinnerSide)}
                 disabled={!selectedWinnerSide || confirming}
-                className="px-5 py-2 rounded-xl bg-[#0E9C7C] hover:bg-[#0B7C63] text-white font-black text-xs uppercase shadow-sm cursor-pointer disabled:opacity-50"
+                className="min-h-[44px] rounded-xl bg-[#0E9C7C] px-5 py-2 text-xs font-black uppercase text-white hover:bg-[#0B7C63] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
               >
-                {confirming ? "Advancing..." : "Confirm & Advance"}
+                {confirming ? "Advancing…" : "Confirm & advance"}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Hantei (Referee Flags) Modal */}
+      {/* Hantei */}
       {showHanteiModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs animate-in fade-in">
-          <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-neutral-200">
-            <h3 className="font-extrabold text-base text-neutral-900 mb-1">
-              Hantei (Referee Flags Decision)
-            </h3>
-            <p className="text-xs text-neutral-500 mb-4">
-              When match ends tied and without Senshu, declare majority flag winner:
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-[#E1DDCF] bg-white p-5 shadow-2xl">
+            <h3 className="mb-1 text-base font-extrabold text-[#1B1815]">Hantei</h3>
+            <p className="mb-4 text-xs text-[#68645A]">
+              Tied bout without senshu: declare the majority flag winner.
             </p>
 
-            <div className="grid grid-cols-2 gap-3 mb-4">
+            <div className="mb-4 grid grid-cols-2 gap-3">
               <button
                 type="button"
                 onClick={() => {
@@ -1076,9 +880,9 @@ export function BoutScoringPad({
                   setShowHanteiModal(false);
                   setShowFinishModal(true);
                 }}
-                className="p-4 rounded-xl border-2 border-red-600 hover:bg-red-50 text-center font-black text-sm text-red-600 uppercase cursor-pointer transition-colors"
+                className="min-h-[56px] rounded-xl border-2 border-[#DC2626] p-4 text-center text-sm font-black uppercase text-[#DC2626] transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#DC2626]"
               >
-                🚩 AKA Flags
+                Aka flags
               </button>
               <button
                 type="button"
@@ -1088,9 +892,9 @@ export function BoutScoringPad({
                   setShowHanteiModal(false);
                   setShowFinishModal(true);
                 }}
-                className="p-4 rounded-xl border-2 border-blue-600 hover:bg-blue-50 text-center font-black text-sm text-blue-600 uppercase cursor-pointer transition-colors"
+                className="min-h-[56px] rounded-xl border-2 border-[#2563EB] p-4 text-center text-sm font-black uppercase text-[#2563EB] transition-colors hover:bg-blue-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#2563EB]"
               >
-                🚩 AO Flags
+                Ao flags
               </button>
             </div>
 
@@ -1098,7 +902,7 @@ export function BoutScoringPad({
               <button
                 type="button"
                 onClick={() => setShowHanteiModal(false)}
-                className="text-xs font-bold text-neutral-500 hover:text-neutral-800"
+                className="min-h-[44px] rounded-lg px-3 text-xs font-bold text-[#68645A] hover:text-[#1B1815] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
               >
                 Close
               </button>

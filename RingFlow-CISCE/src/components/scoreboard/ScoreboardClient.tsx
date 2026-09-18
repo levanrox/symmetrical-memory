@@ -1,0 +1,242 @@
+"use client";
+
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createClient } from "@/utils/supabase/client";
+import { getRingActiveBout } from "@/actions/matches";
+import { useMatchClock, type ClockSyncSample } from "@/hooks/useMatchClock";
+import { normalizeClock } from "@/lib/matchClock";
+import { BoutHeader } from "@/components/scoreboard/BoutHeader";
+import { ClockStage } from "@/components/scoreboard/ClockStage";
+import { FighterPanel } from "@/components/scoreboard/FighterPanel";
+import { NextBoutStrip } from "@/components/scoreboard/NextBoutStrip";
+
+interface Props {
+  ringId: string;
+  initialData: any;
+}
+
+const POLL_MS = 1000;
+const CHROME_HIDE_MS = 4000;
+const STALE_MS = 6000;
+
+/**
+ * The arena screen. It shows the bout, the fighters, the scores and the one
+ * clock everyone shares — and nothing else. Every number here comes from the
+ * same server state the moderator desk writes.
+ */
+export function ScoreboardClient({ ringId, initialData }: Props) {
+  const supabase = useMemo(() => createClient(), []);
+
+  const [data, setData] = useState<any>(initialData);
+  const [sync, setSync] = useState<ClockSyncSample | null>(() =>
+    initialData?.serverNow
+      ? { serverNow: initialData.serverNow, sentAt: Date.now(), receivedAt: Date.now() }
+      : null
+  );
+  const [lastSyncAt, setLastSyncAt] = useState(() => Date.now());
+  const [now, setNow] = useState(() => Date.now());
+  const [chromeVisible, setChromeVisible] = useState(true);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sentAtRef = useRef(Date.now());
+
+  const fetchBout = useCallback(async () => {
+    sentAtRef.current = Date.now();
+    try {
+      const res = await getRingActiveBout(ringId);
+      const receivedAt = Date.now();
+      if (res) {
+        setData(res);
+        if (typeof res.serverNow === "number") {
+          setSync({ serverNow: res.serverNow, sentAt: sentAtRef.current, receivedAt });
+        }
+        setLastSyncAt(receivedAt);
+      }
+    } catch (err) {
+      console.error("Scoreboard fetch error:", err);
+    }
+  }, [ringId]);
+
+  useEffect(() => {
+    fetchBout();
+    const interval = setInterval(fetchBout, POLL_MS);
+    return () => clearInterval(interval);
+  }, [fetchBout]);
+
+  // Instant clock/score state when websockets are available.
+  useEffect(() => {
+    const channel = supabase
+      .channel(`scoreboard_${ringId}`)
+      .on(
+        "postgres_changes",
+        { event: "UPDATE", schema: "public", table: "rings", filter: `id=eq.${ringId}` },
+        (payload) => {
+          if (!payload.new) return;
+          setData((prev: any) => (prev ? { ...prev, ring: { ...prev.ring, ...payload.new } } : prev));
+          setLastSyncAt(Date.now());
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [ringId, supabase]);
+
+  // Chrome (fullscreen button, status) fades out so the screen stays clean.
+  const revealChrome = useCallback(() => {
+    setChromeVisible(true);
+    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+    hideTimerRef.current = setTimeout(() => setChromeVisible(false), CHROME_HIDE_MS);
+  }, []);
+
+  useEffect(() => {
+    revealChrome();
+    const onActivity = () => revealChrome();
+    window.addEventListener("pointermove", onActivity);
+    window.addEventListener("pointerdown", onActivity);
+    window.addEventListener("keydown", onActivity);
+    return () => {
+      if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+      window.removeEventListener("pointermove", onActivity);
+      window.removeEventListener("pointerdown", onActivity);
+      window.removeEventListener("keydown", onActivity);
+    };
+  }, [revealChrome]);
+
+  const toggleFullscreen = useCallback(async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch (err) {
+      console.warn("Full screen is not available on this device", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    const onFullscreenChange = () => setIsFullscreen(Boolean(document.fullscreenElement));
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "f" || e.key === "F") {
+        void toggleFullscreen();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [toggleFullscreen]);
+
+  // Keep the arena TV awake for the length of the session.
+  useEffect(() => {
+    let sentinel: any = null;
+
+    const request = async () => {
+      try {
+        const wakeLock = (navigator as any).wakeLock;
+        if (wakeLock?.request) {
+          sentinel = await wakeLock.request("screen");
+        }
+      } catch {
+        /* not supported or denied — not a failure */
+      }
+    };
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") void request();
+    };
+
+    void request();
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      try {
+        sentinel?.release?.();
+      } catch {}
+    };
+  }, []);
+
+  // Drives the "reconnecting" pill without touching the clock.
+  useEffect(() => {
+    const tick = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(tick);
+  }, []);
+
+  const clock = useMemo(() => normalizeClock(data?.clock ?? data?.ring), [data?.clock, data?.ring]);
+  const { remainingMs, offsetMs } = useMatchClock(clock, sync);
+
+  const currentMatch = data?.currentMatch;
+  const category = data?.category;
+  const ring = data?.ring;
+
+  const isDecided = currentMatch?.status === "CONFIRMED";
+  const akaWon = isDecided && currentMatch?.winnerId && currentMatch.winnerId === currentMatch.aka?.id;
+  const aoWon = isDecided && currentMatch?.winnerId && currentMatch.winnerId === currentMatch.ao?.id;
+  const swapped = Boolean(ring?.sidesSwapped);
+
+  const aka = {
+    side: "AKA" as const,
+    fighter: currentMatch?.aka ?? { name: "TBD" },
+    score: currentMatch?.akaScore ?? 0,
+    penalties: currentMatch?.akaPenalties ?? 0,
+    hasSenshu: currentMatch?.senshu === "AKA",
+    isWinner: Boolean(akaWon),
+  };
+
+  const ao = {
+    side: "AO" as const,
+    fighter: currentMatch?.ao ?? { name: "TBD" },
+    score: currentMatch?.aoScore ?? 0,
+    penalties: currentMatch?.aoPenalties ?? 0,
+    hasSenshu: currentMatch?.senshu === "AO",
+    isWinner: Boolean(aoWon),
+  };
+
+  const left = swapped ? ao : aka;
+  const right = swapped ? aka : ao;
+
+  const connection = now - lastSyncAt > STALE_MS ? "reconnecting" : "live";
+
+  const nextCategoryName =
+    !data?.nextBout && data?.assignment?.status !== "running" ? category?.name ?? null : null;
+
+  return (
+    <div
+      className={`flex h-[100dvh] w-screen flex-col overflow-hidden bg-[#100E0D] text-[#F7F5F0] select-none ${
+        chromeVisible ? "" : "cursor-none"
+      }`}
+    >
+      <BoutHeader
+        tatamiName={ring?.name ?? "Tatami"}
+        categoryName={category?.name ?? "No category running"}
+        boutNo={currentMatch?.matchNo}
+        roundName={currentMatch?.roundName}
+        tournamentName={data?.tournament?.name ?? null}
+        connection={connection}
+        chromeVisible={chromeVisible}
+        isFullscreen={isFullscreen}
+        onToggleFullscreen={toggleFullscreen}
+      />
+
+      <main className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+        <FighterPanel {...left} mirrored={false} />
+        <ClockStage
+          remainingMs={remainingMs}
+          status={clock.status}
+          boutDecided={Boolean(isDecided)}
+          offsetMs={offsetMs}
+        />
+        <FighterPanel {...right} mirrored />
+      </main>
+
+      <NextBoutStrip nextBout={data?.nextBout ?? null} nextCategoryName={nextCategoryName} />
+    </div>
+  );
+}

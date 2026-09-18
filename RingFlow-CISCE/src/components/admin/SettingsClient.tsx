@@ -32,6 +32,7 @@ interface Tournament {
   city: string | null;
   organiser_code?: string | null;
   show_public_draws?: boolean;
+  show_public_scoreboard?: boolean;
 }
 
 interface Props {
@@ -50,6 +51,7 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
     venue: tournament.venue || "",
     city: tournament.city || "",
     show_public_draws: tournament.show_public_draws === true,
+    show_public_scoreboard: tournament.show_public_scoreboard === true,
   });
   
   const [organiserCode, setOrganiserCode] = useState(tournament.organiser_code || "------");
@@ -94,7 +96,21 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
       )
       .subscribe();
 
+    // Polling fallback: local deployments run PostgREST without websockets, so
+    // an incoming request must still show up for the admin to approve.
+    const poll = setInterval(async () => {
+      const { data } = await supabase
+        .from("organiser_requests")
+        .select("*")
+        .eq("tournament_id", tournament.id)
+        .order("created_at", { ascending: false })
+        .limit(20);
+
+      if (data) setRequests(data as OrganiserRequest[]);
+    }, 6000);
+
     return () => {
+      clearInterval(poll);
       supabase.removeChannel(channel);
     };
   }, [tournament.id, supabase]);
@@ -113,9 +129,11 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
     setLoadingAction("regen-code");
     try {
       const res = await regenerateOrganiserCode(tournament.id);
-      if (res?.organiser_code) {
+      if (res?.success && res.organiser_code) {
         setOrganiserCode(res.organiser_code);
         setShowOrganiserCode(true);
+      } else {
+        alert(res?.error || "Failed to regenerate code.");
       }
       router.refresh();
     } catch (err: any) {
@@ -298,8 +316,8 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
                     </label>
                   </div>
                   <p className="text-body-xs text-on-surface-variant max-w-xl">
-                    When enabled, athletes and parents searching their name in the live public event dashboard can view their category draw sheet PDF.
-                    When turned off, draw PDFs remain accessible only to Admin, Organiser, and Stagers.
+                    When enabled, spectators can open the full live bracket tree from the public floor.
+                    When turned off, they can still see their own athlete&apos;s path by searching that athlete&apos;s name.
                   </p>
                 </div>
 
@@ -316,6 +334,43 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
                   <span
                     className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
                       form.show_public_draws ? "translate-x-5" : "translate-x-0"
+                    }`}
+                  />
+                </button>
+              </div>
+
+              {/* Arena scoreboard access */}
+              <div className="pt-6 border-t border-outline-variant/60 flex items-center justify-between gap-4">
+                <div className="flex flex-col gap-1 pr-2">
+                  <div className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-[18px] text-secondary">tv</span>
+                    <label
+                      className="font-label-caps text-[11px] font-bold text-primary cursor-pointer select-none"
+                      onClick={() => setForm(f => ({ ...f, show_public_scoreboard: !f.show_public_scoreboard }))}
+                    >
+                      ALLOW THE ARENA SCOREBOARD ON ANY SCREEN
+                    </label>
+                  </div>
+                  <p className="text-body-xs text-on-surface-variant max-w-xl">
+                    The TV scoreboard link is never linked from public pages. Off by default: a moderator or
+                    admin session is required to open it. Turn this on to let a venue screen open the link
+                    without signing in.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={form.show_public_scoreboard}
+                  onClick={() => setForm(f => ({ ...f, show_public_scoreboard: !f.show_public_scoreboard }))}
+                  className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    form.show_public_scoreboard ? "bg-primary" : "bg-outline-variant"
+                  }`}
+                  title={form.show_public_scoreboard ? "Open scoreboard enabled" : "Scoreboard requires a sign-in"}
+                >
+                  <span
+                    className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                      form.show_public_scoreboard ? "translate-x-5" : "translate-x-0"
                     }`}
                   />
                 </button>
@@ -364,6 +419,11 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
                 <span className="font-data-mono text-3xl md:text-4xl font-black text-secondary tracking-widest select-all">
                   {showOrganiserCode ? organiserCode : "••••••"}
                 </span>
+                {organiserCode === "------" && (
+                  <span className="mt-1 text-[11px] font-semibold text-amber-700">
+                    No code saved for this event yet. Generate one so organisers can request access.
+                  </span>
+                )}
               </div>
 
               <div className="flex items-center gap-2 w-full sm:w-auto flex-wrap">

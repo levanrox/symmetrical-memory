@@ -24,23 +24,34 @@ export default function OrganiserWaitingRoom() {
     }
 
     setStatus("approved");
+    // A full navigation, not a client-side transition: this is a one-shot
+    // handoff out of the waiting room and must land even if the router's
+    // client transition is interrupted by the approval round trip.
     setTimeout(() => {
-      router.replace(`/organiser/event/${tournamentId}/dashboard`);
-    }, 1500);
+      window.location.replace(`/organiser/event/${tournamentId}/dashboard`);
+    }, 800);
   };
 
   useEffect(() => {
     // 1. Initial check
-    checkOrganiserStatus(id).then((res) => {
-      if (res.organiserName) {
-        localStorage.setItem("ringflow_organiser_name", res.organiserName);
-      }
-      if (res.status === "approved" && res.tournamentId) {
-        handleApproved(res.tournamentId, res.sessionToken || undefined);
-      } else if (res.status === "rejected") {
-        setStatus("rejected");
-      }
-    });
+    const checkStatus = () => {
+      checkOrganiserStatus(id).then((res) => {
+        if (res.organiserName) {
+          localStorage.setItem("ringflow_organiser_name", res.organiserName);
+        }
+        if (res.status === "approved" && res.tournamentId) {
+          handleApproved(res.tournamentId, res.sessionToken || undefined);
+        } else if (res.status === "rejected") {
+          setStatus("rejected");
+        }
+      });
+    };
+
+    checkStatus();
+
+    // Polling fallback: local deployments run without websockets, so approval
+    // must still be noticed without a manual refresh.
+    const pollInterval = setInterval(checkStatus, 6000);
 
     // 2. Realtime listener on organiser_requests
     const channel = supabase
@@ -68,6 +79,7 @@ export default function OrganiserWaitingRoom() {
       .subscribe();
 
     return () => {
+      clearInterval(pollInterval);
       supabase.removeChannel(channel);
     };
   }, [id, router, supabase]);

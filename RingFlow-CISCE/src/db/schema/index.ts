@@ -40,6 +40,7 @@ export const tournaments = pgTable('tournaments', {
   organiserCode: text('organiser_code'),
   stagerCodes: jsonb('stager_codes').default([]),
   showPublicDraws: boolean('show_public_draws').default(true),
+  showPublicScoreboard: boolean('show_public_scoreboard').notNull().default(false),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
     .notNull()
     .defaultNow(),
@@ -62,6 +63,12 @@ export const rings = pgTable(
     timerStartedAt: timestamp('timer_started_at', { withTimezone: true, mode: 'date' }),
     timerPausedAt: timestamp('timer_paused_at', { withTimezone: true, mode: 'date' }),
     timerAccumulatedSeconds: integer('timer_accumulated_seconds').notNull().default(0),
+    // Authoritative match clock (millisecond precision).
+    // timer_started_at = real UTC instant the CURRENT run segment began.
+    // timer_accumulated_ms = elapsed ms accumulated BEFORE that segment.
+    timerDurationMs: integer('timer_duration_ms').notNull().default(180000),
+    timerAccumulatedMs: integer('timer_accumulated_ms').notNull().default(0),
+    sidesSwapped: boolean('sides_swapped').notNull().default(false),
     currentMatchId: text('current_match_id'),
     matchDurationSeconds: integer('match_duration_seconds').notNull().default(180),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
@@ -155,6 +162,38 @@ export const moderatorRequests = pgTable('moderator_requests', {
     .notNull()
     .defaultNow(),
   expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }),
+});
+
+export const organiserRequests = pgTable('organiser_requests', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  tournamentId: uuid('tournament_id')
+    .notNull()
+    .references(() => tournaments.id, { onDelete: 'cascade' }),
+  accessCodeUsed: text('access_code_used').notNull(),
+  status: text('status').notNull().default('pending'), // 'pending' | 'approved' | 'rejected' | 'expired' | 'revoked'
+  sessionToken: uuid('session_token').unique(),
+  deviceInfo: jsonb('device_info').default({}),
+  organiserName: text('organiser_name'),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+    .notNull()
+    .defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+});
+
+export const stagerRequests = pgTable('stager_requests', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  tournamentId: uuid('tournament_id')
+    .notNull()
+    .references(() => tournaments.id, { onDelete: 'cascade' }),
+  accessCodeUsed: text('access_code_used').notNull(),
+  status: text('status').notNull().default('pending'),
+  sessionToken: uuid('session_token').unique(),
+  deviceInfo: jsonb('device_info').default({}),
+  stagerName: text('stager_name'),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+    .notNull()
+    .defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
 });
 
 export const eventLog = pgTable('event_log', {

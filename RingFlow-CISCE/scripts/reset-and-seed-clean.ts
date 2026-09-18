@@ -57,9 +57,12 @@ async function resetAndSeed() {
       venue: "Indira Gandhi Indoor Stadium",
       city: "New Delhi",
       status: "active",
+      // Without a code, organiser login can never match this tournament.
+      organiserCode: "ORG001",
     })
     .returning();
   console.log(`✅ Single tournament created: "${tournament.name}" (ID: ${tournament.id})`);
+  console.log(`   Organiser access code: ${tournament.organiserCode}`);
 
   // 4. Create 4 Tatami Rings
   console.log("\n🥋 4. Setting up Tatami Rings...");
