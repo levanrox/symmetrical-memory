@@ -1,7 +1,31 @@
 const http = require("http");
+const fs = require("fs");
+const path = require("path");
 
-const TARGET_PORT = 54322;
-const PROXY_PORT = 54321;
+// Load .env.local first so PGRST_SERVER_PORT here matches the port PostgREST
+// binds in docker-compose.yml. Values already in the environment win.
+function loadEnvLocal() {
+  try {
+    const file = path.resolve(process.cwd(), ".env.local");
+    if (!fs.existsSync(file)) return;
+    for (const line of fs.readFileSync(file, "utf-8").split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("#")) continue;
+      const eq = trimmed.indexOf("=");
+      if (eq === -1) continue;
+      const key = trimmed.slice(0, eq).trim();
+      const value = trimmed.slice(eq + 1).trim().replace(/^["']|["']$/g, "");
+      if (!process.env[key]) process.env[key] = value;
+    }
+  } catch {}
+}
+loadEnvLocal();
+
+// PostgREST binds PGRST_SERVER_PORT (default 54323, not the usual 54322, which
+// commonly collides with other local tooling).
+const TARGET_PORT = Number(process.env.PGRST_SERVER_PORT) || 54323;
+// This gateway is what the app points NEXT_PUBLIC_SUPABASE_URL at.
+const PROXY_PORT = Number(process.env.POSTGREST_GATEWAY_PORT) || 54321;
 
 const server = http.createServer((req, res) => {
   let targetPath = req.url;

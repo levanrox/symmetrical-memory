@@ -1,16 +1,53 @@
-version: "3.8"
+# RingFlow local services.
+#
+#   docker compose up -d postgrest    start the REST layer (the usual case)
+#   docker compose down               stop it (data volumes are kept)
+#
+# The app talks to PostgreSQL two ways: Drizzle connects directly (DATABASE_URL,
+# port 5432) and the Supabase JS client goes through PostgREST. PostgREST serves
+# at the root, but supabase-js requests /rest/v1/..., so the `gateway` script
+# (scripts/postgrest-gateway.cjs, port 54321) strips that prefix. NEXT_PUBLIC_SUPABASE_URL
+# must therefore point at the gateway (54321), never at PostgREST directly.
 
 services:
+  # PostgREST.
+  #
+  # Uses host networking so it can reach a PostgreSQL listening on the host's
+  # loopback (the native Ubuntu package does, and loopback is not reachable from
+  # the docker bridge). It binds 127.0.0.1:54323 rather than the usual 54322,
+  # which commonly collides with other local tooling. The gateway targets the
+  # same port, so change both together via PGRST_SERVER_PORT.
+  postgrest:
+    image: postgrest/postgrest:latest
+    container_name: ringflow-postgrest-svc
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      PGRST_DB_URI: "${PGRST_DB_URI:-postgres://event_suite:event_suite@127.0.0.1:5432/ringflow}"
+      PGRST_DB_SCHEMAS: "public"
+      PGRST_DB_ANON_ROLE: "event_suite"
+      PGRST_SERVER_HOST: "127.0.0.1"
+      PGRST_SERVER_PORT: "54323"
+      PGRST_JWT_SECRET: "test-anon-key-that-is-at-least-32-chars-long-1234567890"
+
+  # Optional self-contained database, only needed on machines without a native
+  # PostgreSQL. It publishes 5433 on the host so it can never collide with one
+  # that already owns 5432.
+  #
+  #   docker compose --profile docker-db up -d db postgrest
+  #   # then set PGRST_DB_URI and DATABASE_URL to port 5433 before starting:
+  #   PGRST_DB_URI=postgres://event_suite:event_suite@127.0.0.1:5433/ringflow
   db:
     image: postgres:16-alpine
     container_name: ringflow-db
     restart: unless-stopped
+    profiles: ["docker-db"]
     environment:
       POSTGRES_USER: event_suite
       POSTGRES_PASSWORD: event_suite
       POSTGRES_DB: ringflow
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - ringflow-pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,22 +55,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
-
-  postgrest:
-    image: postgrest/postgrest:latest
-    container_name: ringflow-postgrest-svc
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    environment:
-      PGRST_DB_URI: "postgres://event_suite:event_suite@db:5432/ringflow"
-      PGRST_DB_SCHEMAS: "public"
-      PGRST_DB_ANON_ROLE: "event_suite"
-      PGRST_SERVER_PORT: "54322"
-      PGRST_JWT_SECRET: "test-anon-key-that-is-at-least-32-chars-long-1234567890"
-    ports:
-      - "54322:54322"
 
 volumes:
   ringflow-pgdata:

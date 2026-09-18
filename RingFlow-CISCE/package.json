@@ -7,7 +7,8 @@
     "node": ">=22.0.0"
   },
   "scripts": {
-    "dev": "next dev",
+    "dev": "NODE_ENV=development next dev",
+    "dev:local": "docker compose up -d --wait postgrest && node scripts/dev-local.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
