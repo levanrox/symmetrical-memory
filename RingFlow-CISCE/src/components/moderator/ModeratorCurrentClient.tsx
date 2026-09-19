@@ -116,9 +116,28 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
     };
   }, [ringId, supabase]);
 
+  const refreshAssignments = React.useCallback(async () => {
+    try {
+      const { data } = await supabase
+        .from("category_assignments")
+        .select("*, categories(name, expected_matches)")
+        .eq("ring_id", ringId)
+        .in("status", ["pending", "running", "paused", "completed"])
+        .order("queue_order", { ascending: true });
+      if (data) {
+        setAssignments(data);
+      }
+    } catch (err) {
+      console.error("Failed to refresh assignments:", err);
+    }
+  }, [ringId, supabase]);
+
   // The desk follows every change on this mat immediately — bout swaps from the
-  // picker, scores, clock, and the queue behind it.
-  useLiveEvents({ ringId }, loadBoutData);
+  // picker, scores, clock, category reassignments, and the queue behind it.
+  useLiveEvents({ ringId }, () => {
+    loadBoutData();
+    refreshAssignments();
+  });
 
   // Keep this desk's clock tied to the server: realtime push where available,
   // a cheap single-row poll where it is not (local PostgREST has no realtime).
@@ -357,24 +376,17 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
 
   return (
     <div className="space-y-0">
-      <div className="flex justify-between items-center mb-6 sm:mb-8 gap-2">
-        <div className="min-w-0">
-          <h1 className="font-headline-lg text-2xl sm:text-headline-lg text-primary tracking-tight truncate">Tatami Controls</h1>
-          <p className="font-body-sm text-xs sm:text-body-sm text-on-surface-variant">Moderator Dashboard</p>
-        </div>
-        <div className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-full shadow-sm shrink-0 ${isPaused ? 'bg-error-container text-on-error-container border-error/20 border' : 'bg-success/10 text-emerald-700 border border-emerald-500/20'}`}>
-          {!isPaused && (
-            <span className="flex h-2 w-2 relative">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+      {/* Compact header — status badge inline */}
+      <div className="flex items-center justify-between gap-2 mb-4 sm:mb-6">
+        <div className="flex items-center gap-2 min-w-0">
+          <h1 className="font-headline-lg text-xl sm:text-2xl lg:text-headline-lg text-primary tracking-tight truncate">Tatami</h1>
+          <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full shrink-0 text-[10px] sm:text-xs ${isPaused ? 'bg-error-container text-on-error-container border-error/20 border' : 'bg-emerald-50 text-emerald-700 border border-emerald-500/20'}`}>
+            <span className="relative flex h-2 w-2">
+              {!isPaused && <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>}
+              <span className={`relative inline-flex rounded-full h-2 w-2 ${isPaused ? 'bg-error' : 'bg-emerald-500'}`}></span>
             </span>
-          )}
-          {isPaused && (
-            <span className="flex h-2 w-2 relative">
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-error"></span>
-            </span>
-          )}
-          <span className="font-label-caps text-xs sm:text-label-caps">{isPaused ? 'PAUSED' : 'LIVE'}</span>
+            <span className="font-label-caps">{isPaused ? 'PAUSED' : 'LIVE'}</span>
+          </div>
         </div>
       </div>
 
@@ -454,19 +466,28 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
         </div>
       )}
 
-      <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 sm:p-card-padding shadow-sm relative overflow-hidden mb-6 sm:mb-10 lg:col-span-3 lg:col-start-1 lg:row-start-2 lg:mb-0">
+      {/* Category card — compact on mobile, expanded on desktop */}
+      <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-3 sm:p-card-padding shadow-sm relative overflow-hidden mb-4 sm:mb-6 lg:col-span-3 lg:col-start-1 lg:row-start-2 lg:mb-0">
         <div className={`absolute top-0 left-0 w-1 h-full ${isPaused ? 'bg-error' : 'bg-secondary'}`}></div>
-        <div className="flex justify-between items-start mb-4 gap-2">
-          <div className="min-w-0">
-            <span className="font-label-caps text-[10px] sm:text-label-caps text-on-surface-variant block mb-1">CURRENT CATEGORY</span>
-            <h2 className="font-headline-sm text-lg sm:text-headline-sm text-primary truncate">{activeAssignment.categories?.name}</h2>
+        {/* Mobile: compact single-line banner */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <h2 className="font-headline-sm text-sm sm:text-lg lg:text-headline-sm text-primary truncate font-bold">{activeAssignment.categories?.name}</h2>
+              <span className="shrink-0 font-data-mono text-xs font-bold text-secondary">{currentCompleted}/{totalMatches}</span>
+              {isUpdatingMatch && <span className="inline-block w-3 h-3 border-2 border-secondary border-t-transparent rounded-full animate-spin"></span>}
+            </div>
+            {/* Progress bar — always visible, compact */}
+            <div className={`mt-1.5 w-full bg-surface-container-high h-1.5 sm:h-2 rounded-full overflow-hidden ${isUpdatingMatch ? 'animate-pulse' : ''}`}>
+              <div className={`${isPaused ? 'bg-error/40' : 'bg-secondary'} h-full transition-all duration-500 ease-out`} style={{ width: `${Math.min(100, percentage)}%` }}></div>
+            </div>
           </div>
           <div className="relative shrink-0">
-            <button onClick={() => setShowSettings(!showSettings)} className="w-10 h-10 rounded-full bg-surface-container hover:bg-surface-container-high flex items-center justify-center text-on-surface transition-colors">
-              <span className="material-symbols-outlined">settings</span>
+            <button onClick={() => setShowSettings(!showSettings)} className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-surface-container hover:bg-surface-container-high flex items-center justify-center text-on-surface transition-colors">
+              <span className="material-symbols-outlined text-[20px]">settings</span>
             </button>
             {showSettings && (
-              <div className="absolute top-12 right-0 bg-surface-container-lowest border border-outline-variant shadow-lg rounded-xl w-48 z-10 overflow-hidden">
+              <div className="absolute top-11 right-0 bg-surface-container-lowest border border-outline-variant shadow-lg rounded-xl w-48 z-10 overflow-hidden">
                 <button disabled={loading} onClick={() => setShowCompleteModal(true)} className="w-full text-left px-4 py-3 text-body-sm font-semibold hover:bg-surface-container flex items-center gap-2 disabled:opacity-50 text-secondary">
                   <span className="material-symbols-outlined text-xl" style={{ fontVariationSettings: '"FILL" 1' }}>check_circle</span>
                   Complete Category
@@ -479,87 +500,66 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
             )}
           </div>
         </div>
-
-        <div className="space-y-3 mt-6">
-          <div className="flex justify-between items-center font-body-sm text-body-sm">
-            <span className="font-semibold text-primary inline-flex items-center gap-1.5">
-              {currentCompleted} / {totalMatches} <span className="font-normal text-on-surface-variant">Completed</span>
-              {isUpdatingMatch && (
-                <span className="inline-block w-3.5 h-3.5 border-2 border-secondary border-t-transparent rounded-full animate-spin ml-1"></span>
-              )}
-            </span>
-            <span className="text-secondary font-bold">{percentage.toFixed(0)}% Complete</span>
-          </div>
-          <div className={`w-full bg-surface-container-high h-2.5 rounded-full overflow-hidden ${isUpdatingMatch ? 'animate-pulse' : ''}`}>
-            <div className={`${isPaused ? 'bg-error/40' : 'bg-secondary'} h-full transition-all duration-500 ease-out`} style={{ width: `${Math.min(100, percentage)}%` }}></div>
-          </div>
-          <div className="flex justify-between text-on-surface-variant font-label-caps text-label-caps pt-1">
-            <span>{percentage > 100 ? 0 : Math.max(0, totalMatches - currentCompleted)} REMAINING</span>
-          </div>
+        {/* Desktop: show remaining count */}
+        <div className="hidden sm:flex justify-between text-on-surface-variant font-label-caps text-label-caps pt-1.5">
+          <span>{percentage > 100 ? 0 : Math.max(0, totalMatches - currentCompleted)} REMAINING</span>
+          <span className="text-secondary font-bold">{percentage.toFixed(0)}%</span>
         </div>
       </div>
 
       <div className="lg:col-span-6 lg:col-start-4 lg:row-span-3 lg:row-start-1">
       {/* Phone/tablet controls. On a laptop these live in the left column, so the
           scoring pad starts at the top of the centre and needs no scrolling. */}
+      {/* Mobile/tablet controls toolbar — compact row */}
       {boutData?.hasDraw && (
-        <div className="mb-6 flex flex-wrap items-center justify-between gap-3 bg-white p-3 rounded-xl border border-[#E1DDCF] shadow-2xs lg:hidden">
-          <div className="flex items-center gap-1 bg-[#F5F3EC] p-1 rounded-lg border border-[#E1DDCF]">
+        <div className="mb-3 sm:mb-4 flex items-center gap-1.5 sm:gap-2 overflow-x-auto scrollbar-none lg:hidden">
+          {/* Mode toggle */}
+          <div className="flex shrink-0 items-center gap-0.5 bg-[#F5F3EC] p-0.5 rounded-lg border border-[#E1DDCF]">
             <button
               onClick={() => setActiveMode("digital")}
-              className={`min-h-[44px] px-3 py-2 rounded-md text-xs font-bold transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:py-1.5 ${
-                activeMode === "digital"
-                  ? "bg-[#0E9C7C] text-white shadow-xs"
-                  : "text-[#68645A] hover:text-[#1B1815]"
-              }`}
+              className={`min-h-[36px] px-2.5 py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-all cursor-pointer ${activeMode === "digital" ? "bg-[#0E9C7C] text-white shadow-xs" : "text-[#68645A]"}`}
             >
-              Digital Match Runner
+              Runner
             </button>
             <button
               onClick={() => setActiveMode("counter")}
-              className={`min-h-[44px] px-3 py-2 rounded-md text-xs font-bold transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:py-1.5 ${
-                activeMode === "counter"
-                  ? "bg-[#0E9C7C] text-white shadow-xs"
-                  : "text-[#68645A] hover:text-[#1B1815]"
-              }`}
+              className={`min-h-[36px] px-2.5 py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-all cursor-pointer ${activeMode === "counter" ? "bg-[#0E9C7C] text-white shadow-xs" : "text-[#68645A]"}`}
             >
-              Quick Counter
+              Counter
             </button>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={() => setShowBoutSelector(true)}
-              className="flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-white px-3 py-2 text-xs font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[36px]"
-            >
-              <span className="material-symbols-outlined text-[16px]">grid_view</span>
-              Change bout
-            </button>
+          <button
+            onClick={() => setShowBoutSelector(true)}
+            className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg border border-[#E1DDCF] bg-white px-2.5 py-1.5 text-[10px] sm:text-xs font-bold text-[#1B1815] cursor-pointer hover:bg-[#FAF9F5]"
+          >
+            <span className="material-symbols-outlined text-[14px]">grid_view</span>
+            Bout
+          </button>
 
-            {(() => {
-              const nextReady = boutData.matches.find(
-                (m: any) => m.isReady && m.id !== boutData.currentMatch?.id
-              );
-              if (!nextReady) return null;
-              return (
-                <button
-                  onClick={() => void handleSelectBout(nextReady.id)}
-                  className="flex min-h-[44px] items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-extrabold text-amber-900 transition-colors hover:bg-amber-100 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400 sm:min-h-[36px]"
-                >
-                  <span className="material-symbols-outlined text-[16px]">bolt</span>
-                  Next ready · Bout #{nextReady.matchNo}
-                </button>
-              );
-            })()}
+          {(() => {
+            const nextReady = boutData.matches.find(
+              (m: any) => m.isReady && m.id !== boutData.currentMatch?.id
+            );
+            if (!nextReady) return null;
+            return (
+              <button
+                onClick={() => void handleSelectBout(nextReady.id)}
+                className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[10px] sm:text-xs font-extrabold text-amber-900 cursor-pointer hover:bg-amber-100"
+              >
+                <span className="material-symbols-outlined text-[14px]">bolt</span>
+                Next #{nextReady.matchNo}
+              </button>
+            );
+          })()}
 
-            <button
-              onClick={() => setShowBracketModal(true)}
-              className="flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#0E9C7C] bg-white px-3 py-2 text-xs font-bold text-[#0E9C7C] transition-colors hover:bg-emerald-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[36px]"
-            >
-              <span className="material-symbols-outlined text-[16px]">account_tree</span>
-              Category bracket
-            </button>
-          </div>
+          <button
+            onClick={() => setShowBracketModal(true)}
+            className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg border border-[#0E9C7C] bg-white px-2.5 py-1.5 text-[10px] sm:text-xs font-bold text-[#0E9C7C] cursor-pointer hover:bg-emerald-50"
+          >
+            <span className="material-symbols-outlined text-[14px]">account_tree</span>
+            <span className="hidden sm:inline">Bracket</span>
+          </button>
         </div>
       )}
 
@@ -673,50 +673,49 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       </>
       )}
 
-      <div className="grid grid-cols-1 gap-4 pt-4 mb-10">
+      <div className="pt-3 mb-6 sm:pt-4 sm:mb-8">
         <button
           disabled={loading}
           onClick={handleTogglePause}
-          className={`w-full bg-surface-container-lowest border h-14 rounded-xl font-bold font-body-md flex items-center justify-center gap-2 transition-colors ${isPaused ? 'border-emerald-500 text-emerald-700 active:bg-emerald-50' : 'border-amber-500 text-amber-700 active:bg-amber-50'
-            }`}
+          className={`w-full bg-surface-container-lowest border min-h-[48px] sm:h-14 rounded-xl font-bold font-body-md text-sm flex items-center justify-center gap-2 transition-colors active:scale-[0.98] ${isPaused ? 'border-emerald-500 text-emerald-700 active:bg-emerald-50' : 'border-amber-500 text-amber-700 active:bg-amber-50'}`}
         >
-          <span className="material-symbols-outlined" style={{ fontVariationSettings: '"FILL" 1' }}>{isPaused ? 'play_circle' : 'pause_circle'}</span>
+          <span className="material-symbols-outlined text-[20px]" style={{ fontVariationSettings: '"FILL" 1' }}>{isPaused ? 'play_circle' : 'pause_circle'}</span>
           {isPaused ? 'Resume Tatami' : 'Pause Tatami'}
         </button>
       </div>
       </div>
 
-      <div className="mt-8 bg-surface-container-low p-4 rounded-xl border border-outline-variant flex flex-col gap-4 lg:col-span-3 lg:col-start-1 lg:row-start-3 lg:mt-0">
-        <div className="flex items-center gap-4">
-          <span className="material-symbols-outlined text-secondary opacity-50">visibility</span>
-          <div className="flex-1">
-            <h4 className="font-label-caps text-label-caps text-on-surface-variant opacity-70">CURRENTLY LIVE TO PUBLIC</h4>
-            <p className="font-body-sm text-body-sm text-on-surface">
-              Tatami Status: <span className={`${isPaused ? 'text-error' : 'text-emerald-600'} font-semibold uppercase`}>{isPaused ? 'Paused' : 'Active'} - {activeAssignment.categories?.name}</span>
-            </p>
-          </div>
+      {/* Status + assistance — compact card */}
+      <div className="mt-4 bg-surface-container-low p-3 sm:p-4 rounded-xl border border-outline-variant flex flex-col gap-3 lg:col-span-3 lg:col-start-1 lg:row-start-3 lg:mt-0">
+        <div className="flex items-center gap-3">
+          <span className="material-symbols-outlined text-secondary opacity-50 text-[18px]">visibility</span>
+          <p className="font-body-sm text-xs sm:text-body-sm text-on-surface flex-1 truncate">
+            <span className={`${isPaused ? 'text-error' : 'text-emerald-600'} font-semibold`}>{isPaused ? '⏸ Paused' : '● Live'}</span>
+            <span className="text-on-surface-variant"> · {activeAssignment.categories?.name}</span>
+          </p>
         </div>
-        <div className="flex flex-wrap justify-between items-center gap-2 pt-2 border-t border-outline-variant">
+        <div className="flex items-center gap-2 pt-2 border-t border-outline-variant">
           <button
             onClick={() => setShowAssistanceModal(true)}
-            className="flex items-center gap-2 text-primary font-bold font-label-caps text-xs hover:bg-primary/10 px-3 py-2 rounded transition-colors"
+            className="flex min-h-[40px] flex-1 items-center justify-center gap-1.5 text-primary font-bold text-[10px] sm:text-xs hover:bg-primary/10 rounded-lg transition-colors"
           >
-            <span className="material-symbols-outlined text-[16px]">support_agent</span> Request Assistance
+            <span className="material-symbols-outlined text-[16px]">support_agent</span>
+            <span>Assistance</span>
           </button>
-
           <button
             onClick={handleEmergency}
-            className="flex min-h-[44px] items-center gap-1 text-error font-bold font-label-caps text-[10px] opacity-60 hover:opacity-100 hover:bg-error/10 px-3 py-2 rounded transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-error"
+            className="flex min-h-[40px] items-center justify-center gap-1 text-error font-bold text-[10px] sm:text-xs hover:bg-error/10 px-3 rounded-lg transition-colors"
           >
-            <span className="material-symbols-outlined text-[14px]">warning</span> EMERGENCY
+            <span className="material-symbols-outlined text-[14px]">warning</span>
+            <span className="hidden sm:inline">Emergency</span>
           </button>
         </div>
       </div>
 
       {/* Queue rail: what is coming on this tatami, and the arena screen link */}
-      <aside className="mt-8 space-y-4 lg:col-span-3 lg:col-start-10 lg:row-span-3 lg:row-start-1 lg:mt-0">
-        {/* The next bout to run, first thing in the rail — "who is next" is the
-            question this side of the desk answers. */}
+      {/* Right sidebar — tighter cards */}
+      <aside className="mt-4 space-y-3 lg:col-span-3 lg:col-start-10 lg:row-span-3 lg:row-start-1 lg:mt-0">
+        {/* Next ready bout — prominent CTA */}
         {boutData?.hasDraw &&
           (() => {
             const nextReady = boutData.matches?.find(
@@ -726,68 +725,62 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
             return (
               <button
                 onClick={() => void handleSelectBout(nextReady.id)}
-                className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 text-sm font-extrabold text-amber-900 transition-colors hover:bg-amber-100 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+                className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 text-xs sm:text-sm font-extrabold text-amber-900 transition-colors hover:bg-amber-100 cursor-pointer"
               >
-                <span className="material-symbols-outlined text-[18px]">bolt</span>
-                Next ready · Bout #{nextReady.matchNo}
+                <span className="material-symbols-outlined text-[16px]">bolt</span>
+                Next · Bout #{nextReady.matchNo}
               </button>
             );
           })()}
 
-        <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm">
-          <h3 className="font-label-caps text-label-caps tracking-widest text-on-surface-variant">UP NEXT</h3>
-          <div className="mt-3 space-y-2">
+        {/* Combined Up Next + On Deck */}
+        <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-3 shadow-sm">
+          {/* On Deck (next bout) */}
+          {boutData?.nextBout && (
+            <div className="mb-3 pb-3 border-b border-outline-variant">
+              <h3 className="font-label-caps text-[10px] tracking-widest text-on-surface-variant mb-1.5">ON DECK</h3>
+              <div className="rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] px-2.5 py-2">
+                <p className="text-[10px] font-black uppercase tracking-wider text-[#8C877C]">
+                  #{boutData.nextBout.matchNo} · {boutData.nextBout.roundName}
+                </p>
+                <p className="mt-0.5 truncate text-[11px] font-bold text-[#DC2626]">
+                  {boutData.nextBout.aka?.name || "TBD"}
+                </p>
+                <p className="truncate text-[11px] font-bold text-[#2563EB]">
+                  {boutData.nextBout.ao?.name || "TBD"}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Queue preview */}
+          <h3 className="font-label-caps text-[10px] tracking-widest text-on-surface-variant mb-1.5">UP NEXT</h3>
+          <div className="space-y-1.5">
             {assignments
               .filter((a) => a.status === "pending")
-              .slice(0, 4)
+              .slice(0, 3)
               .map((a) => (
-                <div key={a.id} className="rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2">
-                  <p className="truncate text-xs font-bold text-[#1B1815]">{a.categories?.name}</p>
-                  <p className="text-[11px] text-[#68645A]">
-                    {a.categories?.expected_matches ?? 0} matches
-                  </p>
+                <div key={a.id} className="rounded-lg border border-outline-variant bg-[#FAF9F5] px-2.5 py-1.5">
+                  <p className="truncate text-[11px] font-bold text-[#1B1815]">{a.categories?.name}</p>
+                  <p className="text-[10px] text-[#68645A]">{a.categories?.expected_matches ?? 0} matches</p>
                 </div>
               ))}
             {assignments.filter((a) => a.status === "pending").length === 0 && (
-              <p className="text-xs text-[#68645A]">Nothing queued after this category.</p>
+              <p className="text-[11px] text-[#68645A]">Queue empty.</p>
             )}
           </div>
         </div>
 
-        <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm">
-          <h3 className="font-label-caps text-label-caps tracking-widest text-on-surface-variant">ON DECK</h3>
-          {boutData?.nextBout ? (
-            <div className="mt-3 rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] px-3 py-2">
-              <p className="text-[11px] font-black uppercase tracking-wider text-[#8C877C]">
-                Bout #{boutData.nextBout.matchNo} · {boutData.nextBout.roundName}
-              </p>
-              <p className="mt-1 truncate text-xs font-bold text-[#DC2626]">
-                AKA {boutData.nextBout.aka?.name || "TBD"}
-              </p>
-              <p className="truncate text-xs font-bold text-[#2563EB]">
-                AO {boutData.nextBout.ao?.name || "TBD"}
-              </p>
-            </div>
-          ) : (
-            <p className="mt-3 text-xs text-[#68645A]">No ready bout waiting.</p>
-          )}
-        </div>
-
-        <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm">
-          <h3 className="font-label-caps text-label-caps tracking-widest text-on-surface-variant">ARENA SCREEN</h3>
-          <p className="mt-2 text-xs text-[#68645A]">
-            Open the scoreboard on the TV in a new window, then press F for full screen.
-          </p>
-          <a
-            href={`/scoreboard/${ringId}`}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-3 flex min-h-[44px] items-center justify-center gap-1.5 rounded-xl border border-[#0E9C7C] bg-[#E3F6F0] px-3 py-2 text-xs font-bold text-[#0B7C63] transition-colors hover:bg-[#d3f0e7] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
-          >
-            <span className="material-symbols-outlined text-[16px]">tv</span>
-            Open TV scoreboard
-          </a>
-        </div>
+        {/* Arena screen link */}
+        <a
+          href={`/scoreboard/${ringId}`}
+          target="_blank"
+          rel="noreferrer"
+          className="flex min-h-[40px] items-center justify-center gap-1.5 rounded-xl border border-[#0E9C7C] bg-[#E3F6F0] px-3 py-2 text-xs font-bold text-[#0B7C63] transition-colors hover:bg-[#d3f0e7]"
+        >
+          <span className="material-symbols-outlined text-[16px]">tv</span>
+          Open TV scoreboard
+        </a>
       </aside>
       </div>
 

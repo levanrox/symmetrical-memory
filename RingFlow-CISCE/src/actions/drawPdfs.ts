@@ -7,11 +7,10 @@ import { staffRolesForTournament } from "@/lib/staffAccess";
 import { buildAllCategoryDrawPdfs, buildCategoryDrawPdf } from "@/lib/pdf/drawSheetFiles";
 
 /**
- * Draw sheets are working documents for the people running the floor — the
- * stager calls athletes in from them, the moderator runs the bouts. They are
- * not a public download: that is what the admin's public-draws switch is for.
+ * Draw sheets are confidential official tournament documents.
+ * Per strict tournament security rules, ONLY the tournament Admin is allowed to download them.
  */
-async function assertStaffForCategory(categoryId: string) {
+async function assertAdminForCategory(categoryId: string) {
   const [cat] = await db
     .select({ tournamentId: categories.tournamentId })
     .from(categories)
@@ -20,22 +19,22 @@ async function assertStaffForCategory(categoryId: string) {
   if (!cat) throw new Error("Category not found");
 
   const roles = await staffRolesForTournament(cat.tournamentId);
-  if (roles.length === 0) {
-    throw new Error("Not authorized to download draw sheets for this event");
+  if (!roles.includes("admin")) {
+    throw new Error("Access denied: Only tournament administrators can download draw sheets.");
   }
 }
 
-/** One category's official draw sheet, base64-encoded. Staff only. */
+/** One category's official draw sheet, base64-encoded. STRICTLY ADMIN ONLY. */
 export async function downloadCategoryDrawPdf(categoryId: string) {
-  await assertStaffForCategory(categoryId);
+  await assertAdminForCategory(categoryId);
   return buildCategoryDrawPdf(categoryId);
 }
 
-/** Every category's draw sheet in the tournament, zipped. Staff only. */
+/** Every category's draw sheet in the tournament, zipped. STRICTLY ADMIN ONLY. */
 export async function downloadAllCategoryDrawPdfs(tournamentId: string) {
   const roles = await staffRolesForTournament(tournamentId);
-  if (roles.length === 0) {
-    throw new Error("Not authorized to download draw sheets for this event");
+  if (!roles.includes("admin")) {
+    throw new Error("Access denied: Only tournament administrators can download draw sheets.");
   }
 
   return buildAllCategoryDrawPdfs(tournamentId);

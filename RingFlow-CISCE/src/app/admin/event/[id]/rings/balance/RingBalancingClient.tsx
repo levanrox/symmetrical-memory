@@ -12,6 +12,7 @@ import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
 import { SegmentedProgressBar } from "@/components/ui/SegmentedProgressBar";
 import HeaderSearchBar from "@/components/layout/HeaderSearchBar";
 import BuiltByCrux from "@/components/layout/BuiltByCrux";
+import { matchesCategorySearch } from "@/lib/searchUtils";
 
 type Category = {
   id: string;
@@ -483,7 +484,7 @@ export default function RingBalancingClient({
     if (destDroppableId === "unassigned") {
       const visibleAtDest = nextUnassigned
         .filter(cat => {
-          if (search && !cat.name.toLowerCase().includes(search.toLowerCase())) return false;
+          if (search && !matchesCategorySearch(cat, search)) return false;
           if (beltFilter && cat.belt !== beltFilter) return false;
           if (ageFilter && cat.age_bracket !== ageFilter) return false;
           if (sexFilter && cat.sex !== sexFilter) return false;
@@ -859,7 +860,7 @@ export default function RingBalancingClient({
   // Derive visible unassigned (only "idle" - not in any ring)
   const visibleUnassigned = unassigned
     .filter(cat => {
-      if (search && !cat.name.toLowerCase().includes(search.toLowerCase())) return false;
+      if (search && !matchesCategorySearch(cat, search)) return false;
       if (beltFilter && cat.belt !== beltFilter) return false;
       if (ageFilter && cat.age_bracket !== ageFilter) return false;
       if (sexFilter && cat.sex !== sexFilter) return false;
@@ -892,8 +893,8 @@ export default function RingBalancingClient({
   const sidebarCategoriesToShow = statusFilter === "idle"
     ? visibleUnassigned
     : statusFilter === "queue"
-      ? queuedCategories.filter(cat => search ? cat.name.toLowerCase().includes(search.toLowerCase()) : true)
-      : allCompletedCategories.filter(cat => search ? cat.name.toLowerCase().includes(search.toLowerCase()) : true);
+      ? queuedCategories.filter(cat => search ? matchesCategorySearch(cat, search) : true)
+      : allCompletedCategories.filter(cat => search ? matchesCategorySearch(cat, search) : true);
 
   const uniqueBelts = Array.from(new Set(initialCategories.map(c => c.belt).filter(Boolean)));
   const uniqueAges = Array.from(new Set(initialCategories.map(c => c.age_bracket).filter(Boolean)));

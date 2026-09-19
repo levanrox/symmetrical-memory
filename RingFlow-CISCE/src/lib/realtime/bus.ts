@@ -20,6 +20,13 @@ export interface LiveEvent {
   categoryId?: string;
   matchId?: string;
   sessionToken?: string;
+  akaScore?: number;
+  aoScore?: number;
+  akaPenalties?: number;
+  aoPenalties?: number;
+  senshu?: string | null;
+  status?: string;
+  data?: Record<string, any>;
 }
 
 const CHANNEL = "ringflow_events";
@@ -111,19 +118,36 @@ export function subscribeToLiveEvents(listener: (event: LiveEvent) => void): () 
   };
 }
 
+/**
+ * Instantly broadcast an event in-memory to all active SSE connections
+ * without waiting for database roundtrip.
+ */
+export function broadcastLiveEvent(event: LiveEvent): void {
+  try {
+    bus.emitter.emit("event", event);
+  } catch (err) {
+    console.error("[live] broadcast error:", err);
+  }
+}
+
 /** True when an event is relevant to a screen that scoped itself to these ids. */
 export function eventMatchesScope(
   event: LiveEvent,
   scope: { ringId?: string | null; tournamentId?: string | null; categoryId?: string | null; requestId?: string | null }
 ): boolean {
-  if (scope.ringId) return event.ringId === scope.ringId;
+  if (scope.ringId) {
+    if (event.ringId) return event.ringId === scope.ringId;
+    return false;
+  }
   if (scope.requestId) return event.id === scope.requestId;
-  if (scope.categoryId) return event.categoryId === scope.categoryId || event.id === scope.categoryId;
+  if (scope.categoryId) {
+    if (event.categoryId) return event.categoryId === scope.categoryId;
+    if (event.id && event.table === "categories") return event.id === scope.categoryId;
+    return false;
+  }
   if (scope.tournamentId) {
-    // A tournament screen cares about anything that names it. Rows that only
-    // carry a ring or category id are resolved by the screen's own queries, so
-    // they are forwarded too when no narrower scope was given.
     if (event.tournamentId) return event.tournamentId === scope.tournamentId;
+    // A tournament-wide screen also cares about general ring/category rows
     return true;
   }
   return true;

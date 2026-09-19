@@ -118,6 +118,7 @@ export function BoutScoringPad({
   const [showFinishModal, setShowFinishModal] = useState(false);
   const [showHanteiModal, setShowHanteiModal] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showCorrections, setShowCorrections] = useState(false);
   const [selectedWinnerSide, setSelectedWinnerSide] = useState<"AKA" | "AO" | null>(null);
   const [finishMethod, setFinishMethod] = useState<string>("POINTS");
   const [history, setHistory] = useState<any[]>([]);
@@ -162,29 +163,39 @@ export function BoutScoringPad({
     setEditMilliseconds(String(total % 1000).padStart(3, "0"));
   }, [clock.clock.durationMs]);
 
-  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [deskSidesSwapped, setDeskSidesSwapped] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        return localStorage.getItem("ringflow_desk_sides_swapped") === "true";
+      } catch {}
+    }
+    return false;
+  });
+
+  const toggleDeskSides = () => {
+    setDeskSidesSwapped((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("ringflow_desk_sides_swapped", String(next));
+      } catch {}
+      return next;
+    });
+  };
+
   const syncLiveState = useCallback(
     (aP: number, oP: number, aPen: number, oPen: number, sen: "AKA" | "AO" | null) => {
       if (!ringId) return;
-      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
-      syncTimerRef.current = setTimeout(() => {
-        updateLiveMatchState(match.id, ringId, {
-          akaScore: aP,
-          aoScore: oP,
-          akaPenalties: aPen,
-          aoPenalties: oPen,
-          senshu: sen,
-        }).catch((err) => console.error("Live state sync error:", err));
-      }, 400);
+      // Immediate push to server with zero artificial debounce delay (<5ms)
+      updateLiveMatchState(match.id, ringId, {
+        akaScore: aP,
+        aoScore: oP,
+        akaPenalties: aPen,
+        aoPenalties: oPen,
+        senshu: sen,
+      }).catch((err) => console.error("Live state sync error:", err));
     },
     [match.id, ringId]
   );
-
-  useEffect(() => {
-    return () => {
-      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
-    };
-  }, []);
 
   // Space / F1 control the clock from anywhere on the desk.
   useEffect(() => {
@@ -367,6 +378,103 @@ export function BoutScoringPad({
           ? "Time up"
           : "Ready";
 
+  /* ─────── Compact mobile competitor card (side-by-side layout) ─────── */
+  const renderCompactCompetitor = (side: "AKA" | "AO") => {
+    const isAka = side === "AKA";
+    const ath = isAka ? match.aka : match.ao;
+    const points = isAka ? akaPoints : aoPoints;
+    const penalties = isAka ? akaPenalties : aoPenalties;
+    const hasSenshu = senshu === side;
+
+    const accentText = isAka ? "text-[#DC2626]" : "text-[#2563EB]";
+    const accentBorder = isAka ? "border-[#DC2626]" : "border-[#2563EB]";
+    const accentBg = isAka ? "bg-[#DC2626]" : "bg-[#2563EB]";
+    const scoreButton = isAka
+      ? "bg-[#DC2626] hover:bg-[#B91C1C] active:bg-[#991B1B]"
+      : "bg-[#2563EB] hover:bg-[#1D4ED8] active:bg-[#1E40AF]";
+
+    return (
+      <section
+        aria-label={`${isAka ? "Aka, red" : "Ao, blue"} competitor`}
+        className={`flex flex-col rounded-xl border-2 bg-white p-2 ${accentBorder}`}
+      >
+        {/* Header: badge + senshu */}
+        <div className="mb-1.5 flex items-center justify-between gap-1">
+          <span className={`rounded px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider text-white ${accentBg}`}>
+            {isAka ? "AKA" : "AO"}
+          </span>
+          <button
+            type="button"
+            onClick={() => handleToggleSenshu(side)}
+            aria-pressed={hasSenshu}
+            className={`rounded px-1.5 py-0.5 text-[9px] font-extrabold transition-colors ${
+              hasSenshu
+                ? "bg-amber-400 text-amber-950"
+                : "bg-[#F5F3EC] text-[#8C877C]"
+            }`}
+          >
+            ★
+          </button>
+        </div>
+
+        {/* Name */}
+        <p className="truncate text-[11px] font-bold text-[#1B1815] leading-tight mb-1">
+          {ath.name || "TBD"}
+        </p>
+
+        {/* Score */}
+        <div className={`flex items-center justify-center rounded-lg border bg-[#FAF9F5] py-1.5 mb-1.5 ${accentBorder}`}>
+          <span className={`font-data-mono text-4xl font-black tabular-nums ${accentText}`}>
+            {points}
+          </span>
+        </div>
+
+        {/* +1 / +2 / +3 */}
+        <div className="grid grid-cols-3 gap-1 mb-1">
+          {[
+            { delta: 1, label: "+1" },
+            { delta: 2, label: "+2" },
+            { delta: 3, label: "+3" },
+          ].map(({ delta, label }) => (
+            <button
+              key={delta}
+              type="button"
+              onClick={() => handleScore(side, delta)}
+              className={`min-h-[48px] rounded-lg font-black text-white shadow-2xs transition-transform active:scale-90 ${scoreButton}`}
+            >
+              <span className="block text-sm leading-none">{label}</span>
+            </button>
+          ))}
+        </div>
+
+        {/* Penalties compact */}
+        <div className="grid grid-cols-5 gap-0.5">
+          {PENALTY_LEVELS.map(({ level, label }) => {
+            const isActive = penalties >= level;
+            return (
+              <button
+                key={level}
+                type="button"
+                onClick={() => handleSetPenalty(side, level)}
+                aria-pressed={isActive}
+                className={`min-h-[32px] rounded text-[9px] font-black transition-colors ${
+                  isActive
+                    ? level === 5
+                      ? "bg-red-600 text-white"
+                      : "bg-amber-500 text-white"
+                    : "bg-[#F5F3EC] text-[#8C877C]"
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+    );
+  };
+
+  /* ─────── Full-size desktop competitor card ─────── */
   const renderCompetitor = (side: "AKA" | "AO") => {
     const isAka = side === "AKA";
     const ath = isAka ? match.aka : match.ao;
@@ -378,8 +486,8 @@ export function BoutScoringPad({
     const accentBorder = isAka ? "border-[#DC2626]" : "border-[#2563EB]";
     const accentBadge = isAka ? "bg-[#DC2626] text-white" : "bg-[#2563EB] text-white";
     const scoreButton = isAka
-      ? "bg-[#DC2626] hover:bg-[#B91C1C]"
-      : "bg-[#2563EB] hover:bg-[#1D4ED8]";
+      ? "bg-[#DC2626] hover:bg-[#B91C1C] active:bg-[#991B1B]"
+      : "bg-[#2563EB] hover:bg-[#1D4ED8] active:bg-[#1E40AF]";
 
     return (
       <section
@@ -438,9 +546,9 @@ export function BoutScoringPad({
               key={delta}
               type="button"
               onClick={() => handleScore(side, delta)}
-              className={`min-h-[56px] rounded-xl px-1 py-2 font-black text-white shadow-2xs transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${scoreButton}`}
+              className={`min-h-[64px] rounded-xl px-1 py-2 font-black text-white shadow-2xs transition-transform active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${scoreButton}`}
             >
-              <span className="block text-base leading-none">{label}</span>
+              <span className="block text-lg leading-none">{label}</span>
               <span className="mt-0.5 block text-[10px] font-bold uppercase tracking-wide opacity-90">
                 {sub}
               </span>
@@ -502,23 +610,25 @@ export function BoutScoringPad({
   return (
     <div ref={padRef} className="rounded-2xl border border-[#E1DDCF] bg-[#FAF9F5] shadow-sm">
       {/* Clock bar — sticky so the time is never scrolled away from the operator */}
-      <div className="sticky top-16 z-30 rounded-t-2xl border-b border-[#2A2622] bg-[#1B1815] px-3 py-3 text-white sm:px-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="rounded-full bg-[#0E9C7C] px-2.5 py-0.5 text-[10px] font-black uppercase tracking-wider">
-                Bout #{match.matchNo}
+      <div className="sticky top-16 z-30 rounded-t-2xl border-b border-[#2A2622] bg-[#1B1815] px-3 py-2.5 text-white sm:px-5 sm:py-3">
+        {/* Row 1: bout info + clock + start/pause */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="min-w-0 shrink">
+            <div className="flex items-center gap-1.5">
+              <span className="rounded-full bg-[#0E9C7C] px-2 py-0.5 text-[9px] font-black uppercase tracking-wider sm:px-2.5 sm:text-[10px]">
+                #{match.matchNo}
               </span>
-              <span className="truncate text-xs font-bold uppercase text-neutral-400">
+              <span className="truncate text-[10px] font-bold uppercase text-neutral-400 sm:text-xs">
                 {match.roundName}
               </span>
             </div>
-            <h2 className="mt-0.5 truncate text-sm font-bold text-white sm:text-base">
+            <h2 className="mt-0.5 truncate text-xs font-bold text-white sm:text-sm md:text-base">
               {categoryName}
             </h2>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+          <div className="flex items-center gap-1.5 sm:gap-2.5">
+            {/* Tappable clock display */}
             <div
               onPointerDown={handlePointerDown}
               onPointerUp={handlePointerUp}
@@ -528,7 +638,7 @@ export function BoutScoringPad({
               onKeyDown={(e) => {
                 if (e.key === "Enter") void clock.toggle();
               }}
-              className={`cursor-pointer rounded-xl border px-3 py-2 transition-all select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+              className={`cursor-pointer rounded-lg border px-2 py-1.5 transition-all select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:rounded-xl sm:px-3 sm:py-2 ${
                 isPressing ? "scale-95 border-neutral-500 bg-neutral-900" : "border-neutral-700 bg-black/60 hover:border-neutral-500"
               } ${isLow ? "border-amber-500/80" : ""} ${isExpired ? "border-red-600/80 bg-red-950/20" : ""}`}
               title="Tap to start or pause · hold to reset"
@@ -542,74 +652,89 @@ export function BoutScoringPad({
               />
             </div>
 
+            {/* Start / Pause button */}
             <button
               type="button"
               onClick={() => void clock.toggle()}
               disabled={pending}
-              className={`flex min-h-[44px] items-center gap-1.5 rounded-xl px-4 py-2.5 text-xs font-black uppercase shadow-sm transition-transform active:scale-95 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 focus-visible:ring-offset-[#1B1815] ${
+              className={`flex min-h-[40px] items-center gap-1 rounded-lg px-3 py-2 text-[11px] font-black uppercase shadow-sm transition-transform active:scale-95 disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:gap-1.5 sm:rounded-xl sm:px-4 sm:py-2.5 sm:text-xs ${
                 running ? "bg-amber-500 text-black hover:bg-amber-600" : "bg-[#0E9C7C] text-white hover:bg-[#0B7C63]"
               }`}
             >
-              <span className="material-symbols-outlined text-[18px]">
+              <span className="material-symbols-outlined text-[16px] sm:text-[18px]">
                 {running ? "pause" : "play_arrow"}
               </span>
-              {running ? "Pause" : "Start"}
+              <span className="hidden xs:inline">{running ? "Pause" : "Start"}</span>
             </button>
 
-            <div className="flex items-center gap-1 rounded-xl border border-neutral-700 bg-neutral-800/90 p-1">
-              {[
-                { delta: 1000, label: "+1s" },
-                { delta: -1000, label: "-1s" },
-                { delta: 100, label: "+.1" },
-                { delta: -100, label: "-.1" },
-              ].map(({ delta, label }) => (
-                <button
-                  key={label}
-                  type="button"
-                  onClick={() => void clock.adjust(delta)}
-                  disabled={pending}
-                  className="min-h-[36px] min-w-[36px] rounded-lg px-2 py-1.5 font-data-mono text-[11px] font-bold text-neutral-300 transition-colors hover:bg-neutral-700 hover:text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-                  title={`${delta > 0 ? "Add" : "Deduct"} ${Math.abs(delta)} milliseconds`}
-                >
-                  {label}
-                </button>
-              ))}
-              <button
-                type="button"
-                onClick={() => setShowSettings(true)}
-                className="flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-neutral-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-                title="Set an exact duration"
-                aria-label="Set an exact duration"
-              >
-                <span className="material-symbols-outlined text-[18px]">tune</span>
-              </button>
-            </div>
-
-            <div className="hidden items-center gap-1 rounded-xl border border-neutral-700 bg-neutral-800/90 p-1 md:flex">
-              {PRESETS.map(({ sec, label }) => (
-                <button
-                  key={sec}
-                  type="button"
-                  onClick={() => void clock.applyDuration(sec * 1000)}
-                  disabled={pending}
-                  className={`min-h-[36px] rounded-lg px-2.5 py-1 text-xs font-bold transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
-                    clock.clock.durationMs === sec * 1000
-                      ? "bg-[#0E9C7C] text-white"
-                      : "text-neutral-400 hover:text-white"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            <span
-              className="hidden text-[11px] font-bold uppercase tracking-wider text-neutral-400 lg:inline"
-              aria-live="polite"
+            {/* Clock tools button — shows settings modal on mobile, inline on desktop */}
+            <button
+              type="button"
+              onClick={() => setShowSettings(true)}
+              className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg border border-neutral-700 bg-neutral-800/90 text-neutral-400 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] md:hidden"
+              title="Clock settings"
+              aria-label="Clock settings"
             >
-              {statusLabel}
-            </span>
+              <span className="material-symbols-outlined text-[18px]">tune</span>
+            </button>
           </div>
+        </div>
+
+        {/* Row 2 (md+ only): fine adjust buttons + presets + status */}
+        <div className="mt-2 hidden items-center justify-between gap-2 md:flex">
+          <div className="flex items-center gap-1 rounded-xl border border-neutral-700 bg-neutral-800/90 p-1">
+            {[
+              { delta: 1000, label: "+1s" },
+              { delta: -1000, label: "-1s" },
+              { delta: 100, label: "+.1" },
+              { delta: -100, label: "-.1" },
+            ].map(({ delta, label }) => (
+              <button
+                key={label}
+                type="button"
+                onClick={() => void clock.adjust(delta)}
+                disabled={pending}
+                className="min-h-[36px] min-w-[36px] rounded-lg px-2 py-1.5 font-data-mono text-[11px] font-bold text-neutral-300 transition-colors hover:bg-neutral-700 hover:text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                title={`${delta > 0 ? "Add" : "Deduct"} ${Math.abs(delta)} milliseconds`}
+              >
+                {label}
+              </button>
+            ))}
+            <button
+              type="button"
+              onClick={() => setShowSettings(true)}
+              className="flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-neutral-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+              title="Set an exact duration"
+              aria-label="Set an exact duration"
+            >
+              <span className="material-symbols-outlined text-[18px]">tune</span>
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1 rounded-xl border border-neutral-700 bg-neutral-800/90 p-1">
+            {PRESETS.map(({ sec, label }) => (
+              <button
+                key={sec}
+                type="button"
+                onClick={() => void clock.applyDuration(sec * 1000)}
+                disabled={pending}
+                className={`min-h-[36px] rounded-lg px-2.5 py-1 text-xs font-bold transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+                  clock.clock.durationMs === sec * 1000
+                    ? "bg-[#0E9C7C] text-white"
+                    : "text-neutral-400 hover:text-white"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <span
+            className="text-[11px] font-bold uppercase tracking-wider text-neutral-400"
+            aria-live="polite"
+          >
+            {statusLabel}
+          </span>
         </div>
 
         {clock.error && (
@@ -619,11 +744,11 @@ export function BoutScoringPad({
         )}
 
         {hasEightPointLead && (
-          <div className="mt-3 flex items-center justify-between rounded-xl border border-amber-500/50 bg-amber-500/20 px-4 py-2">
-            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-amber-300">
-              <span className="material-symbols-outlined text-[18px]">gavel</span>
+          <div className="mt-2 flex items-center justify-between rounded-xl border border-amber-500/50 bg-amber-500/20 px-3 py-2 sm:mt-3 sm:px-4">
+            <div className="flex items-center gap-2 text-[10px] font-bold uppercase tracking-wider text-amber-300 sm:text-xs">
+              <span className="material-symbols-outlined text-[16px] sm:text-[18px]">gavel</span>
               <span>
-                8-point lead · {eightPointLeader} ahead by {pointDiff}
+                8pt lead · {eightPointLeader} +{pointDiff}
               </span>
             </div>
             <button
@@ -633,97 +758,169 @@ export function BoutScoringPad({
                 setFinishMethod("8_POINT_LEAD");
                 setShowFinishModal(true);
               }}
-              className="min-h-[36px] rounded-lg bg-amber-500 px-3 py-1 text-xs font-black uppercase text-black transition-colors hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+              className="min-h-[32px] rounded-lg bg-amber-500 px-2.5 py-1 text-[10px] font-black uppercase text-black transition-colors hover:bg-amber-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 sm:min-h-[36px] sm:px-3 sm:text-xs"
             >
-              End bout now
+              End bout
             </button>
           </div>
         )}
       </div>
 
-      {/* Competitor grid: stacked on phones, side by side from tablet up */}
-      <div className="grid grid-cols-1 gap-3 p-3 md:grid-cols-2 sm:p-4">
-        {sidesSwapped ? renderCompetitor("AO") : renderCompetitor("AKA")}
-        {sidesSwapped ? renderCompetitor("AKA") : renderCompetitor("AO")}
+      {/* ── Competitor grid ────────────────────────────────────── */}
+      {/* Mobile: compact side-by-side panels. Tablet+: full cards. */}
+      <div className="grid grid-cols-2 gap-2 p-2 md:hidden">
+        {deskSidesSwapped ? renderCompactCompetitor("AO") : renderCompactCompetitor("AKA")}
+        {deskSidesSwapped ? renderCompactCompetitor("AKA") : renderCompactCompetitor("AO")}
+      </div>
+      <div className="hidden gap-3 p-3 md:grid md:grid-cols-2 sm:p-4">
+        {deskSidesSwapped ? renderCompetitor("AO") : renderCompetitor("AKA")}
+        {deskSidesSwapped ? renderCompetitor("AKA") : renderCompetitor("AO")}
+      </div>
+
+      {/* Corrections drawer — minus buttons accessible but not cluttering the main view on mobile */}
+      <div className="border-t border-[#E1DDCF] px-2 py-1.5 md:hidden">
+        <button
+          type="button"
+          onClick={() => setShowCorrections(!showCorrections)}
+          className="flex w-full items-center justify-center gap-1 rounded-lg py-1.5 text-[10px] font-bold uppercase tracking-wider text-[#8C877C] transition-colors hover:bg-[#ECE9DF]"
+        >
+          <span className="material-symbols-outlined text-[14px]">{showCorrections ? "expand_less" : "expand_more"}</span>
+          Score corrections
+        </button>
+        {showCorrections && (
+          <div className="mt-1 grid grid-cols-2 gap-2 pb-1">
+            {(["AKA", "AO"] as const).map((side) => {
+              const isAka = side === "AKA";
+              const points = isAka ? akaPoints : aoPoints;
+              return (
+                <div key={side} className="space-y-1">
+                  <span className={`text-[9px] font-black uppercase ${isAka ? "text-[#DC2626]" : "text-[#2563EB]"}`}>
+                    {side}
+                  </span>
+                  <div className="grid grid-cols-3 gap-1">
+                    {[-1, -2, -3].map((delta) => (
+                      <button
+                        key={delta}
+                        type="button"
+                        onClick={() => handleScore(side, delta)}
+                        disabled={points + delta < 0}
+                        className="min-h-[36px] rounded-lg border border-[#E1DDCF] bg-white text-[10px] font-bold text-[#68645A] disabled:opacity-30"
+                      >
+                        {delta}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Next fighters, so the desk knows what is coming */}
       {nextBout && (
-        <div className="mx-4 mb-4 flex items-center gap-2 rounded-xl border border-[#E1DDCF] bg-white px-4 py-2.5 text-xs sm:mx-6">
+        <div className="mx-2 mb-2 flex items-center gap-2 rounded-lg border border-[#E1DDCF] bg-white px-3 py-2 text-[10px] sm:mx-6 sm:mb-4 sm:rounded-xl sm:px-4 sm:py-2.5 sm:text-xs">
           <span className="font-black uppercase tracking-wider text-[#8C877C]">On deck</span>
           <span className="truncate font-bold text-[#1B1815]">
-            Bout #{nextBout.matchNo} · {nextBout.aka.name || "TBD"} vs {nextBout.ao.name || "TBD"}
+            #{nextBout.matchNo} · {nextBout.aka.name || "TBD"} vs {nextBout.ao.name || "TBD"}
           </span>
         </div>
       )}
 
-      {/* Action bar — always in reach: pinned to the bottom of the screen while
-          the pad scrolls, so Confirm result is never below the fold. */}
-      <div className="sticky bottom-0 z-30 flex flex-wrap items-center justify-between gap-2 rounded-b-2xl border-t border-[#E1DDCF] bg-[#F5F3EC]/95 px-3 py-2 backdrop-blur sm:px-4">
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void clock.setSwapped(!sidesSwapped)}
-            aria-pressed={sidesSwapped}
-            className={`flex min-h-[44px] items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${
-              sidesSwapped
-                ? "border-[#0E9C7C] bg-[#E3F6F0] text-[#0B7C63]"
-                : "border-[#E1DDCF] bg-white text-[#1B1815] hover:bg-[#FAF9F5]"
-            }`}
-            title="Mirror which side appears on the left of the arena screen"
-          >
-            <span className="material-symbols-outlined text-[16px]">swap_horiz</span>
-            Swap sides {sidesSwapped ? "· AKA right" : "· AKA left"}
-          </button>
+      {/* ── Action bar ────────────────────────────────────────── */}
+      {/* Pinned to bottom, scrollable row on mobile, full labels on tablet+ */}
+      <div className="sticky bottom-0 z-30 rounded-b-2xl border-t border-[#E1DDCF] bg-[#F5F3EC]/95 px-2 py-2 backdrop-blur sm:px-4">
+        <div className="flex items-center gap-2">
+          {/* Tools row — scrollable on mobile */}
+          <div className="flex flex-1 items-center gap-1.5 overflow-x-auto scrollbar-none sm:gap-2">
+            {/* Desk swap — icon only on mobile */}
+            <button
+              type="button"
+              onClick={toggleDeskSides}
+              aria-pressed={deskSidesSwapped}
+              className={`flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs ${
+                deskSidesSwapped
+                  ? "border-blue-300 bg-blue-50 text-blue-800"
+                  : "border-[#E1DDCF] bg-white text-[#1B1815]"
+              }`}
+              title="Swap desk button order"
+            >
+              <span className="material-symbols-outlined text-[16px]">touch_app</span>
+              <span className="hidden sm:inline">Desk: {deskSidesSwapped ? "AO ← → AKA" : "AKA ← → AO"}</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => setShowHanteiModal(true)}
-            className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-[#E1DDCF] bg-white px-3 py-2 text-xs font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
-          >
-            <span className="material-symbols-outlined text-[16px]">how_to_vote</span>
-            Hantei
-          </button>
+            {/* TV swap — icon only on mobile */}
+            <button
+              type="button"
+              onClick={() => void clock.setSwapped(!sidesSwapped)}
+              aria-pressed={sidesSwapped}
+              className={`flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs ${
+                sidesSwapped
+                  ? "border-[#0E9C7C] bg-[#E3F6F0] text-[#0B7C63]"
+                  : "border-[#E1DDCF] bg-white text-[#1B1815]"
+              }`}
+              title="Swap TV scoreboard sides"
+            >
+              <span className="material-symbols-outlined text-[16px]">tv</span>
+              <span className="hidden sm:inline">TV: {sidesSwapped ? "AO ← → AKA" : "AKA ← → AO"}</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={handleUndo}
-            disabled={history.length === 0}
-            className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-[#E1DDCF] bg-white px-3 py-2 text-xs font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
-          >
-            <span className="material-symbols-outlined text-[16px]">undo</span>
-            Undo
-          </button>
+            {/* Hantei */}
+            <button
+              type="button"
+              onClick={() => setShowHanteiModal(true)}
+              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border border-[#E1DDCF] bg-white px-2 py-1.5 text-[10px] font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs"
+            >
+              <span className="material-symbols-outlined text-[16px]">how_to_vote</span>
+              <span className="hidden xs:inline">Hantei</span>
+            </button>
 
+            {/* Undo */}
+            <button
+              type="button"
+              onClick={handleUndo}
+              disabled={history.length === 0}
+              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border border-[#E1DDCF] bg-white px-2 py-1.5 text-[10px] font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs"
+            >
+              <span className="material-symbols-outlined text-[16px]">undo</span>
+              <span className="hidden xs:inline">Undo</span>
+            </button>
+
+            {/* Reset */}
+            <button
+              type="button"
+              onClick={handleResetAll}
+              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-1.5 text-[10px] font-bold text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs"
+            >
+              <span className="material-symbols-outlined text-[16px]">restart_alt</span>
+              <span className="hidden xs:inline">Reset</span>
+            </button>
+          </div>
+
+          {/* Confirm — always visible, full width on small screens */}
           <button
             type="button"
-            onClick={handleResetAll}
-            className="flex min-h-[44px] items-center gap-1.5 rounded-xl border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2"
+            onClick={() => {
+              let defaultSide: "AKA" | "AO" = "AKA";
+              if (akaPoints > aoPoints) defaultSide = "AKA";
+              else if (aoPoints > akaPoints) defaultSide = "AO";
+              else if (senshu) defaultSide = senshu;
+
+              setSelectedWinnerSide(defaultSide);
+              setFinishMethod(akaPoints !== aoPoints ? "POINTS" : senshu ? "SENSHU" : "HANTEI");
+              setShowFinishModal(true);
+            }}
+            disabled={confirming}
+            className="flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[#0E9C7C] px-4 py-2.5 text-xs font-extrabold uppercase text-white shadow-sm transition-transform active:scale-95 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 sm:px-6 sm:text-sm"
           >
-            <span className="material-symbols-outlined text-[16px]">restart_alt</span>
-            Reset
+            <span className="material-symbols-outlined text-[16px] sm:text-[18px]">verified</span>
+            <span className="hidden sm:inline">Confirm result</span>
+            <span className="sm:hidden">Confirm</span>
           </button>
         </div>
-
-        <button
-          type="button"
-          onClick={() => {
-            let defaultSide: "AKA" | "AO" = "AKA";
-            if (akaPoints > aoPoints) defaultSide = "AKA";
-            else if (aoPoints > akaPoints) defaultSide = "AO";
-            else if (senshu) defaultSide = senshu;
-
-            setSelectedWinnerSide(defaultSide);
-            setFinishMethod(akaPoints !== aoPoints ? "POINTS" : senshu ? "SENSHU" : "HANTEI");
-            setShowFinishModal(true);
-          }}
-          disabled={confirming}
-          className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-[#0E9C7C] px-6 py-3 text-sm font-extrabold uppercase text-white shadow-sm transition-transform active:scale-95 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 sm:w-auto"
-        >
-          <span className="material-symbols-outlined text-[18px]">verified</span>
-          Confirm result
-        </button>
       </div>
+
+      {/* ── Modals ────────────────────────────────────────────── */}
 
       {/* Exact duration */}
       {showSettings && (
@@ -733,6 +930,54 @@ export function BoutScoringPad({
             <p className="mb-4 text-xs text-[#68645A]">
               This duration is used by the moderator desk and the arena screen together.
             </p>
+
+            {/* Quick presets — visible in modal on mobile */}
+            <div className="mb-4 flex items-center gap-1 rounded-xl border border-[#E1DDCF] bg-[#F5F3EC] p-1 md:hidden">
+              {PRESETS.map(({ sec, label }) => (
+                <button
+                  key={sec}
+                  type="button"
+                  onClick={() => {
+                    setEditMinutes(String(Math.floor(sec / 60)));
+                    setEditSeconds(String(sec % 60).padStart(2, "0"));
+                    setEditMilliseconds("000");
+                    void clock.applyDuration(sec * 1000);
+                  }}
+                  className={`flex-1 min-h-[40px] rounded-lg text-xs font-bold transition-colors ${
+                    clock.clock.durationMs === sec * 1000
+                      ? "bg-[#0E9C7C] text-white"
+                      : "text-[#68645A] hover:text-[#1B1815]"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* Fine adjust buttons — visible in modal on mobile */}
+            <div className="mb-4 md:hidden">
+              <span className="mb-1.5 block text-[10px] font-black uppercase tracking-wider text-[#8C877C]">
+                Fine adjust
+              </span>
+              <div className="grid grid-cols-4 gap-1.5">
+                {[
+                  { delta: 1000, label: "+1s" },
+                  { delta: -1000, label: "-1s" },
+                  { delta: 100, label: "+.1" },
+                  { delta: -100, label: "-.1" },
+                ].map(({ delta, label }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={() => void clock.adjust(delta)}
+                    disabled={pending}
+                    className="min-h-[40px] rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] font-data-mono text-xs font-bold text-[#3D3A33] transition-colors hover:bg-[#ECE9DF] disabled:opacity-50"
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
 
             <div className="mb-5 grid grid-cols-3 gap-3">
               {[

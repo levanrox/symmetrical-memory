@@ -18,6 +18,7 @@ import type { DrawGraph } from "@/engine/draw-engine/types";
 import { normalizeClock } from "@/lib/matchClock";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
+import { broadcastLiveEvent } from "@/lib/realtime/bus";
 
 export async function getRingActiveBout(ringId: string, matchId?: string) {
   // 1. Fetch ring info
@@ -97,8 +98,19 @@ export async function getRingActiveBout(ringId: string, matchId?: string) {
       )
     );
 
-  const allAthletes = await db.select().from(athletes);
-  const athleteMap = new Map(allAthletes.map((a) => [a.id, a]));
+  const relevantAthleteIds = Array.from(
+    new Set(allSlots.map((s) => s.athleteId).filter((id): id is string => Boolean(id)))
+  );
+
+  const relevantAthletes =
+    relevantAthleteIds.length > 0
+      ? await db
+          .select()
+          .from(athletes)
+          .where(inArray(athletes.id, relevantAthleteIds))
+      : [];
+
+  const athleteMap = new Map(relevantAthletes.map((a) => [a.id, a]));
 
   // Build structured matches list for moderator roster & switcher
   const enrichedMatches = allMatches.map((m) => {
@@ -189,6 +201,16 @@ export async function setActiveBout(ringId: string, matchId: string) {
     revalidatePath(`/scoreboard/${ringId}`);
   } catch {}
 
+  // Broadcast instantly so scoreboard and mod desk switch bouts with zero latency
+  broadcastLiveEvent({
+    table: "rings",
+    op: "UPDATE",
+    id: ringId,
+    ringId,
+    matchId,
+    data: { currentMatchId: matchId },
+  });
+
   return { success: true };
 }
 
@@ -218,6 +240,21 @@ export async function updateLiveMatchState(
   try {
     revalidatePath(`/scoreboard/${ringId}`);
   } catch {}
+
+  // Immediate zero-latency push directly to scoreboard and moderator SSE streams
+  broadcastLiveEvent({
+    table: "matches",
+    op: "UPDATE",
+    id: matchId,
+    matchId,
+    ringId,
+    akaScore: state.akaScore ?? 0,
+    aoScore: state.aoScore ?? 0,
+    akaPenalties: state.akaPenalties ?? 0,
+    aoPenalties: state.aoPenalties ?? 0,
+    senshu: state.senshu ?? null,
+    status: "LIVE",
+  });
 
   return { success: true };
 }
@@ -408,6 +445,22 @@ export async function confirmBoutResult(
         .update(rings)
         .set({ currentMatchId: null })
         .where(eq(rings.id, assignment.ringId));
+
+      broadcastLiveEvent({
+        table: "matches",
+        op: "UPDATE",
+        id: matchId,
+        matchId,
+        ringId: assignment.ringId,
+        categoryId,
+        status: "CONFIRMED",
+      });
+      broadcastLiveEvent({
+        table: "category_assignments",
+        op: "UPDATE",
+        ringId: assignment.ringId,
+        categoryId,
+      });
     }
   });
 

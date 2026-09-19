@@ -100,43 +100,6 @@ export default function AdminDashboardClient({
       })
       .subscribe();
 
-    // Secondary reconciliation function as fallback to Realtime
-    const syncData = async () => {
-      const ringIds = rings.map(r => r.id);
-      if (ringIds.length === 0) return;
-      
-      const { data: latestAssignments } = await supabase
-        .from("category_assignments")
-        .select("*, categories(name, expected_matches, athletes_count)")
-        .in("ring_id", ringIds)
-        .order("queue_order", { ascending: true });
-
-      if (latestAssignments && latestAssignments.length > 0) {
-        setAssignments(latestAssignments);
-      }
-
-      const { data: latestLogs } = await supabase
-        .from("event_log")
-        .select("*")
-        .eq("tournament_id", tournament.id)
-        .order("created_at", { ascending: false })
-        .limit(200);
-
-      if (latestLogs && latestLogs.length > 0) {
-        setLogs(latestLogs);
-      }
-
-      const { data: latestRings } = await supabase
-        .from("rings")
-        .select("*")
-        .eq("tournament_id", tournament.id)
-        .order("ring_order", { ascending: true });
-
-      if (latestRings && latestRings.length > 0) {
-        setRings(latestRings);
-      }
-    };
-
     // Reconcile every 45s in background instead of hammering DB every 5s
     const syncInterval = setInterval(syncData, 45000);
 
@@ -154,6 +117,43 @@ export default function AdminDashboardClient({
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
   }, [tournament.id, rings, supabase]);
+
+  // Secondary reconciliation function triggered by Live Events and fallback timer
+  const syncData = useCallback(async () => {
+    const ringIds = rings.map((r) => r.id);
+    if (ringIds.length === 0) return;
+
+    const { data: latestAssignments } = await supabase
+      .from("category_assignments")
+      .select("*, categories(name, expected_matches, athletes_count)")
+      .in("ring_id", ringIds)
+      .order("queue_order", { ascending: true });
+
+    if (latestAssignments && latestAssignments.length > 0) {
+      setAssignments(latestAssignments);
+    }
+
+    const { data: latestLogs } = await supabase
+      .from("event_log")
+      .select("*")
+      .eq("tournament_id", tournament.id)
+      .order("created_at", { ascending: false })
+      .limit(200);
+
+    if (latestLogs && latestLogs.length > 0) {
+      setLogs(latestLogs);
+    }
+
+    const { data: latestRings } = await supabase
+      .from("rings")
+      .select("*")
+      .eq("tournament_id", tournament.id)
+      .order("ring_order", { ascending: true });
+
+    if (latestRings && latestRings.length > 0) {
+      setRings(latestRings);
+    }
+  }, [rings, supabase, tournament.id]);
 
   // Calculate totals
   let totalMatches = 0;
@@ -185,8 +185,11 @@ export default function AdminDashboardClient({
     }
   }, [tournament.id]);
 
-  // Every mat reports in the moment a score, a bout or a clock changes.
-  useLiveEvents({ tournamentId: tournament.id }, loadActiveBouts);
+  // Every mat reports in the moment a score, a bout or a clock changes or category is assigned.
+  useLiveEvents({ tournamentId: tournament.id }, () => {
+    loadActiveBouts();
+    syncData();
+  });
 
   useEffect(() => {
     let cancelled = false;

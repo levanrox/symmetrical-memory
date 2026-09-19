@@ -20,11 +20,11 @@ export interface LiveScope {
 
 export function useLiveEvents(
   scope: LiveScope,
-  onChange: () => void,
+  onChange: (event?: any) => void,
   options?: { enabled?: boolean; debounceMs?: number }
 ): { connected: boolean } {
   const enabled = options?.enabled ?? true;
-  const debounceMs = options?.debounceMs ?? 150;
+  const debounceMs = options?.debounceMs ?? 0;
 
   const [connected, setConnected] = useState(false);
   const onChangeRef = useRef(onChange);
@@ -45,18 +45,30 @@ export function useLiveEvents(
     let debounceTimer: ReturnType<typeof setTimeout> | null = null;
     const source = new EventSource(`/api/live?${params.toString()}`);
 
-    const fire = () => {
+    const fire = (e?: MessageEvent) => {
+      let eventPayload: any = null;
+      if (e?.data) {
+        try {
+          eventPayload = JSON.parse(e.data);
+        } catch {}
+      }
+
+      if (debounceMs <= 0) {
+        onChangeRef.current(eventPayload);
+        return;
+      }
+
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(() => {
         debounceTimer = null;
-        onChangeRef.current();
+        onChangeRef.current(eventPayload);
       }, debounceMs);
     };
 
     source.addEventListener("open", () => setConnected(true));
     source.addEventListener("ready", () => setConnected(true));
     // A reconnected stream may have missed changes while it was down.
-    source.addEventListener("change", fire);
+    source.addEventListener("change", fire as EventListener);
     source.addEventListener("error", () => {
       setConnected(false);
       if (debounceTimer) clearTimeout(debounceTimer);

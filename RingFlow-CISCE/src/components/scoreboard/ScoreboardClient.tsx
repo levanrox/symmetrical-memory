@@ -20,8 +20,8 @@ interface Props {
 // every second, an idle one rarely changes, and a hidden tab barely at all.
 // The live feed below carries every change instantly; these cadences are the
 // safety net for a dropped stream.
-const RUNNING_POLL_MS = 1000;
-const IDLE_POLL_MS = 20000;
+const RUNNING_POLL_MS = 4000;
+const IDLE_POLL_MS = 25000;
 const HIDDEN_POLL_MS = 45000;
 const CHROME_HIDE_MS = 4000;
 const STALE_MS = 6000;
@@ -96,7 +96,52 @@ export function ScoreboardClient({ ringId, initialData }: Props) {
 
   // The arena screen follows the desk the moment anything changes: a score, a
   // bout swap, the clock, the next-fight strip.
-  useLiveEvents({ ringId }, fetchBout);
+  const handleLiveEvent = useCallback(
+    (event?: any) => {
+      // Direct zero-latency score & penalty mutation (<10ms)
+      if (
+        event?.table === "matches" &&
+        (typeof event.akaScore === "number" || typeof event.aoScore === "number")
+      ) {
+        setData((prev: any) => {
+          if (!prev?.currentMatch) return prev;
+          return {
+            ...prev,
+            currentMatch: {
+              ...prev.currentMatch,
+              akaScore: event.akaScore ?? prev.currentMatch.akaScore,
+              aoScore: event.aoScore ?? prev.currentMatch.aoScore,
+              akaPenalties: event.akaPenalties ?? prev.currentMatch.akaPenalties,
+              aoPenalties: event.aoPenalties ?? prev.currentMatch.aoPenalties,
+              senshu: event.senshu !== undefined ? event.senshu : prev.currentMatch.senshu,
+            },
+          };
+        });
+        setLastSyncAt(Date.now());
+        return;
+      }
+
+      if (event?.table === "rings" && event.data?.sidesSwapped !== undefined) {
+        setData((prev: any) => {
+          if (!prev?.ring) return prev;
+          return {
+            ...prev,
+            ring: {
+              ...prev.ring,
+              sidesSwapped: event.data.sidesSwapped,
+            },
+          };
+        });
+        setLastSyncAt(Date.now());
+        return;
+      }
+
+      void fetchBout();
+    },
+    [fetchBout]
+  );
+
+  useLiveEvents({ ringId }, handleLiveEvent, { debounceMs: 0 });
 
   // Instant clock/score state when websockets are available.
   useEffect(() => {

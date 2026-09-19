@@ -7,7 +7,6 @@ import { updateCategoryStagerStatus } from "@/actions/stager";
 import StagerStatusIndicator from "@/components/ui/StagerStatusIndicator";
 import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
-import { downloadCategoryDrawPdf } from "@/actions/drawPdfs";
 import { SegmentedProgressBar } from "@/components/ui/SegmentedProgressBar";
 import BuiltByCrux from "@/components/layout/BuiltByCrux";
 import HeaderSearchBar from "@/components/layout/HeaderSearchBar";
@@ -84,30 +83,6 @@ export default function StagerBalancingClient({
   // first, with the whole tournament one tap away.
   const [drawsScope, setDrawsScope] = useState<"queue" | "all">("queue");
   const [bracketCategory, setBracketCategory] = useState<{ id: string; name: string } | null>(null);
-  const [loadingDrawPdfFor, setLoadingDrawPdfFor] = useState<string | null>(null);
-
-  /** Opens a category's generated draw sheet in the PDF viewer. */
-  const openDrawSheet = async (cat: Category) => {
-    setLoadingDrawPdfFor(cat.id);
-    try {
-      const res = await downloadCategoryDrawPdf(cat.id);
-      if (!res.success || !res.base64) {
-        alert("No draw sheet available for this category yet.");
-        return;
-      }
-
-      const bytes = atob(res.base64);
-      const buffer = new Uint8Array(bytes.length);
-      for (let i = 0; i < bytes.length; i += 1) buffer[i] = bytes.charCodeAt(i);
-
-      const url = URL.createObjectURL(new Blob([buffer], { type: "application/pdf" }));
-      setViewingPdf({ url, title: `${cat.name} · Draw sheet` });
-    } catch (err: any) {
-      alert(err?.message || "Could not open the draw sheet.");
-    } finally {
-      setLoadingDrawPdfFor(null);
-    }
-  };
 
   /** Blob URLs we created must be released, or the tab leaks a file each time. */
   const closePdfViewer = () => {
@@ -937,19 +912,6 @@ export default function StagerBalancingClient({
                           >
                             <span className="material-symbols-outlined text-[15px]">account_tree</span>
                             Bracket
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => void openDrawSheet(cat)}
-                            disabled={loadingDrawPdfFor === cat.id}
-                            className="flex min-h-[36px] flex-1 items-center justify-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] px-2 text-[11px] font-bold text-[#3D3A33] transition-colors hover:bg-[#ECE9DF] disabled:opacity-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-                            title="Open the printable draw sheet"
-                          >
-                            <span className="material-symbols-outlined text-[15px]">
-                              {loadingDrawPdfFor === cat.id ? "progress_activity" : "picture_as_pdf"}
-                            </span>
-                            Sheet
                           </button>
                         </div>
                       </div>

@@ -123,108 +123,161 @@ export async function generateCategoryDrawPdfBytes(
       const boxHeight = Math.min(46, matchSlotHeight - 10);
       const boxY = matchCenterY - boxHeight / 2;
 
-      // Match Box Container
-      page.drawRectangle({
-        x: colX,
-        y: boxY,
-        width: colWidth,
-        height: boxHeight,
-        color: rgb(1, 1, 1),
-        borderColor: lineGray,
-        borderWidth: 1,
-      });
+    const isDecided = match.status === "CONFIRMED" || match.winnerId != null;
+    const isLive = match.status === "LIVE";
+    const akaWon = Boolean(match.winnerId && match.aka.id && match.winnerId === match.aka.id);
+    const aoWon = Boolean(match.winnerId && match.ao.id && match.winnerId === match.ao.id);
+    const showScore = isDecided || isLive;
 
-      // Match Header / No
-      page.drawRectangle({
-        x: colX,
-        y: boxY + boxHeight - 12,
-        width: colWidth,
-        height: 12,
-        color: cardBg,
-      });
+    // Match Box Container
+    page.drawRectangle({
+      x: colX,
+      y: boxY,
+      width: colWidth,
+      height: boxHeight,
+      color: rgb(1, 1, 1),
+      borderColor: isDecided ? emerald : lineGray,
+      borderWidth: isDecided ? 1.2 : 1,
+    });
 
-      page.drawText(`Match #${match.matchNo}`, {
-        x: colX + 6,
-        y: boxY + boxHeight - 9,
-        size: 7,
+    // Match Header / No / Status
+    page.drawRectangle({
+      x: colX,
+      y: boxY + boxHeight - 12,
+      width: colWidth,
+      height: 12,
+      color: isLive ? rgb(254 / 255, 243 / 255, 199 / 255) : cardBg,
+    });
+
+    const statusText = isLive ? "LIVE" : isDecided ? "DONE" : "";
+    page.drawText(`Match #${match.matchNo}${statusText ? ` · ${statusText}` : ""}`, {
+      x: colX + 6,
+      y: boxY + boxHeight - 9,
+      size: 7,
+      font: helveticaBold,
+      color: isLive ? rgb(180 / 255, 83 / 255, 9 / 255) : mutedInk,
+    });
+
+    // AKA color bar
+    page.drawRectangle({
+      x: colX + 2,
+      y: boxY + boxHeight / 2,
+      width: 3,
+      height: boxHeight / 2 - 12,
+      color: redAka,
+    });
+
+    // AKA name
+    const akaName = match.aka.displayName.slice(0, 18);
+    page.drawText(akaName, {
+      x: colX + 8,
+      y: boxY + boxHeight - 22,
+      size: 7.5,
+      font: akaWon ? helveticaBold : helvetica,
+      color: akaWon ? emerald : darkInk,
+    });
+
+    if (akaWon) {
+      page.drawText("WIN", {
+        x: colX + colWidth - 55,
+        y: boxY + boxHeight - 22,
+        size: 6.5,
         font: helveticaBold,
+        color: emerald,
+      });
+    }
+
+    if (match.aka.school) {
+      page.drawText(match.aka.school.slice(0, 20), {
+        x: colX + 8,
+        y: boxY + boxHeight - 29,
+        size: 6,
+        font: helvetica,
         color: mutedInk,
       });
+    }
 
-      // AKA row
-      page.drawRectangle({
-        x: colX + 2,
-        y: boxY + boxHeight / 2,
-        width: 3,
-        height: boxHeight / 2 - 12,
-        color: redAka,
-      });
+    // Divider line
+    page.drawLine({
+      start: { x: colX, y: boxY + boxHeight / 2 - 2 },
+      end: { x: colX + colWidth, y: boxY + boxHeight / 2 - 2 },
+      thickness: 0.5,
+      color: lineGray,
+    });
 
-      const akaName = match.aka.displayName.slice(0, 22);
-      page.drawText(akaName, {
-        x: colX + 8,
-        y: boxY + boxHeight - 22,
-        size: 8,
-        font: helveticaBold,
-        color: darkInk,
-      });
+    // AO color bar
+    page.drawRectangle({
+      x: colX + 2,
+      y: boxY + 2,
+      width: 3,
+      height: boxHeight / 2 - 4,
+      color: blueAo,
+    });
 
-      if (match.aka.school) {
-        page.drawText(match.aka.school.slice(0, 24), {
-          x: colX + 8,
-          y: boxY + boxHeight - 29,
-          size: 6.5,
-          font: helvetica,
-          color: mutedInk,
-        });
-      }
+    // AO name
+    const aoName = match.ao.displayName.slice(0, 18);
+    page.drawText(aoName, {
+      x: colX + 8,
+      y: boxY + boxHeight / 2 - 12,
+      size: 7.5,
+      font: aoWon ? helveticaBold : helvetica,
+      color: aoWon ? emerald : darkInk,
+    });
 
-      // Divider line
-      page.drawLine({
-        start: { x: colX, y: boxY + boxHeight / 2 - 2 },
-        end: { x: colX + colWidth, y: boxY + boxHeight / 2 - 2 },
-        thickness: 0.5,
-        color: lineGray,
-      });
-
-      // AO row
-      page.drawRectangle({
-        x: colX + 2,
-        y: boxY + 2,
-        width: 3,
-        height: boxHeight / 2 - 4,
-        color: blueAo,
-      });
-
-      const aoName = match.ao.displayName.slice(0, 22);
-      page.drawText(aoName, {
-        x: colX + 8,
+    if (aoWon) {
+      page.drawText("WIN", {
+        x: colX + colWidth - 55,
         y: boxY + boxHeight / 2 - 12,
-        size: 8,
+        size: 6.5,
         font: helveticaBold,
-        color: darkInk,
+        color: emerald,
+      });
+    }
+
+    if (match.ao.school) {
+      page.drawText(match.ao.school.slice(0, 20), {
+        x: colX + 8,
+        y: boxY + 4,
+        size: 6,
+        font: helvetica,
+        color: mutedInk,
+      });
+    }
+
+    // Score / Result Box on the right (shows points & Senshu)
+    const scoreBoxWidth = 26;
+    const scoreBoxX = colX + colWidth - scoreBoxWidth - 2;
+    page.drawRectangle({
+      x: scoreBoxX,
+      y: boxY + 3,
+      width: scoreBoxWidth,
+      height: boxHeight - 16,
+      color: cardBg,
+      borderColor: lineGray,
+      borderWidth: 0.5,
+    });
+
+    if (showScore) {
+      // AKA score
+      const akaScoreStr = `${match.senshu === "AKA" ? "S " : ""}${match.akaScore ?? 0}`;
+      page.drawText(akaScoreStr, {
+        x: scoreBoxX + 4,
+        y: boxY + boxHeight - 22,
+        size: 7.5,
+        font: helveticaBold,
+        color: akaWon ? emerald : darkInk,
       });
 
-      if (match.ao.school) {
-        page.drawText(match.ao.school.slice(0, 24), {
-          x: colX + 8,
-          y: boxY + 4,
-          size: 6.5,
-          font: helvetica,
-          color: mutedInk,
-        });
-      }
-
-      // Score / Result Box on the right
-      page.drawRectangle({
-        x: colX + colWidth - 22,
-        y: boxY + 3,
-        width: 19,
-        height: boxHeight - 16,
-        color: cardBg,
-        borderColor: lineGray,
-        borderWidth: 0.5,
+      // AO score
+      const aoScoreStr = `${match.senshu === "AO" ? "S " : ""}${match.aoScore ?? 0}`;
+      page.drawText(aoScoreStr, {
+        x: scoreBoxX + 4,
+        y: boxY + boxHeight / 2 - 12,
+        size: 7.5,
+        font: helveticaBold,
+        color: aoWon ? emerald : darkInk,
       });
+    }
     });
   });
 

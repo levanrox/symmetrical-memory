@@ -3,6 +3,7 @@ import { rings } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { normalizeClock, type ClockStatus, type RingClock } from "@/lib/matchClock";
+import { broadcastLiveEvent } from "@/lib/realtime/bus";
 
 /**
  * Raw persistence for the match clock. Authorization lives in the server
@@ -71,6 +72,9 @@ export function revalidateRingClock(ringId: string) {
   try {
     revalidatePath(`/scoreboard/${ringId}`);
     revalidatePath(`/moderator/ring/${ringId}/current`);
+  } catch {}
+  try {
+    broadcastLiveEvent({ table: "rings", op: "UPDATE", id: ringId, ringId });
   } catch {}
 }
 

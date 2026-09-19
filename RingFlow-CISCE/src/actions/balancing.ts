@@ -1,6 +1,7 @@
 "use server";
 
 import { createAdminClient } from "@/utils/supabase/admin";
+import { broadcastLiveEvent } from "@/lib/realtime/bus";
 import { ensureAdminOwnsTournament } from "./admin";
 
 export type AssignmentInput = {
@@ -200,6 +201,21 @@ export async function saveAssignments(
           };
         }
       }
+    }
+
+    // Broadcast immediately so Mod, Organiser, Stager receive updates with zero latency
+    broadcastLiveEvent({
+      table: "category_assignments",
+      op: "UPDATE",
+      tournamentId,
+    });
+    for (const rId of ringIds) {
+      broadcastLiveEvent({
+        table: "category_assignments",
+        op: "UPDATE",
+        ringId: rId,
+        tournamentId,
+      });
     }
 
     return { success: true };

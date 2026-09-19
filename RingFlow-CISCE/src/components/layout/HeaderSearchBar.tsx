@@ -44,6 +44,7 @@ export default function HeaderSearchBar({
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<SearchAthlete[]>([]);
+  const [categoryResults, setCategoryResults] = useState<any[]>([]);
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [cachedCategories, setCachedCategories] = useState<any[]>([]);
@@ -197,9 +198,12 @@ export default function HeaderSearchBar({
         }
 
         // 3. Category matches (e.g. u14_30-35kg, 30, 45, etc.)
-        const matchingCatIds = (categoriesToSearch || [])
-          .filter((cat) => matchesCategorySearch(cat, trimmed))
-          .map((cat) => cat.id);
+        const matchingCategories = (categoriesToSearch || []).filter((cat) =>
+          matchesCategorySearch(cat, trimmed)
+        );
+        setCategoryResults(matchingCategories.slice(0, 8));
+
+        const matchingCatIds = matchingCategories.map((cat) => cat.id);
 
         let catPromise = null;
         if (matchingCatIds.length > 0) {
@@ -208,7 +212,7 @@ export default function HeaderSearchBar({
             .select(columns)
             .eq("tournament_id", tournamentId)
             .in("category_id", matchingCatIds.slice(0, 50))
-            .limit(40);
+            .limit(30);
         }
 
         const [directRes, catRes] = await Promise.all([
@@ -240,6 +244,7 @@ export default function HeaderSearchBar({
       } catch (err) {
         console.error("Search fetch error:", err);
         setResults([]);
+        setCategoryResults([]);
       } finally {
         setIsLoading(false);
       }
@@ -249,9 +254,41 @@ export default function HeaderSearchBar({
     return () => clearTimeout(debounce);
   }, [query, tournamentId, cachedCategories]);
 
+  const handleSelectCategory = (cat: any) => {
+    setIsOpen(false);
+    if (cat.doc_url) {
+      setViewingPdf({
+        url: cat.doc_url,
+        title: cat.name || "Category",
+      });
+      return;
+    }
+
+    const assignment = cachedAssignments.find((a) => a.category_id === cat.id);
+    if (assignment?.ring_id) {
+      const el = document.getElementById(`ring-card-${assignment.ring_id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+        el.classList.add("ring-4", "ring-[#0E9C7C]");
+        setTimeout(() => el.classList.remove("ring-4", "ring-[#0E9C7C]"), 2500);
+      }
+    } else {
+      const catEl = document.getElementById(`cat-card-${cat.id}`);
+      if (catEl) {
+        catEl.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+        catEl.classList.add("ring-4", "ring-[#0E9C7C]");
+        setTimeout(() => catEl.classList.remove("ring-4", "ring-[#0E9C7C]"), 2500);
+      }
+    }
+  };
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim()) return;
+    if (categoryResults.length > 0) {
+      handleSelectCategory(categoryResults[0]);
+      return;
+    }
     if (results.length > 0) {
       handleSelectAthlete(results[0]);
       return;
@@ -277,19 +314,16 @@ export default function HeaderSearchBar({
     }
 
     setIsOpen(false);
-    if (role === "stager") {
-      if (athlete.category_id) {
-        const assignment = cachedAssignments.find((a) => a.category_id === athlete.category_id);
-        if (assignment?.ring_id) {
-          const el = document.getElementById(`ring-card-${assignment.ring_id}`);
-          if (el) {
-            el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
-            el.classList.add("ring-4", "ring-emerald-500/80");
-            setTimeout(() => el.classList.remove("ring-4", "ring-emerald-500/80"), 2500);
-          }
+    if (athlete.category_id) {
+      const assignment = cachedAssignments.find((a) => a.category_id === athlete.category_id);
+      if (assignment?.ring_id) {
+        const el = document.getElementById(`ring-card-${assignment.ring_id}`);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
+          el.classList.add("ring-4", "ring-[#0E9C7C]");
+          setTimeout(() => el.classList.remove("ring-4", "ring-[#0E9C7C]"), 2500);
         }
       }
-      return;
     }
   };
 
@@ -328,6 +362,7 @@ export default function HeaderSearchBar({
             onClick={() => {
               setQuery("");
               setResults([]);
+              setCategoryResults([]);
               setIsOpen(false);
               inputRef.current?.focus();
             }}
@@ -341,94 +376,175 @@ export default function HeaderSearchBar({
         )}
       </form>
 
-      {/* ─── Live Search Results Dropdown (Exact Public Spectator UI) ─── */}
+      {/* ─── Live Search Results Dropdown ─── */}
       {isOpen && (
         <div
-          className="spectator-search-results open !block absolute !left-0 !right-0 !w-full top-[calc(100%+6px)] !z-[99999] text-left shadow-2xl !transform-none"
+          className="spectator-search-results open !block absolute !left-0 !right-0 !w-full top-[calc(100%+6px)] !z-[99999] text-left shadow-2xl !transform-none max-h-[75vh] overflow-y-auto"
           style={{ left: 0, right: 0, width: "100%", transform: "none", zIndex: 99999 }}
           role="listbox"
         >
           {isLoading ? (
-            <div className="spectator-no-results">Searching athletes...</div>
-          ) : results.length === 0 ? (
-            <div className="spectator-no-results">No athletes match that search.</div>
+            <div className="spectator-no-results">Searching…</div>
+          ) : categoryResults.length === 0 && results.length === 0 ? (
+            <div className="spectator-no-results">No athletes or categories match that search.</div>
           ) : (
-            results.map((athlete) => {
-              const { status, matLabel } = getAthleteRingStatus(athlete.category_id);
-              const meta = statusMeta[status] || statusMeta.unscheduled;
-              const parts = matLabel.match(/(Tatami \d+)(.*)/);
-              const docUrl =
-                athlete.categories?.doc_url ||
-                cachedCategories.find((c) => c.id === athlete.category_id)?.doc_url;
-              const displayCategoryName =
-                athlete.categories?.name ||
-                cachedCategories.find((c) => c.id === athlete.category_id)?.name ||
-                "Uncategorized";
-
-              return (
-                <div
-                  key={athlete.id}
-                  onClick={() => handleSelectAthlete(athlete)}
-                  className="spectator-result-row"
-                  role="option"
-                >
-                  {/* Top Row: Chest & Athlete Name on Left, Status Badge on Right */}
-                  <div className="spectator-result-top">
-                    <div className="spectator-result-name-group">
-                      <span className="spectator-result-chest mono">
-                        #{athlete.chest_number || "-"}
-                      </span>
-                      <span className="spectator-result-name">{athlete.name}</span>
-                    </div>
-                    <span className={`spectator-status ${meta.cls}`}>
-                      <span className="dot"></span>
-                      {meta.label}
+            <>
+              {/* Category Results Section */}
+              {categoryResults.length > 0 && (
+                <div>
+                  <div className="px-3 py-1.5 bg-[#FAF9F5] border-b border-[#E1DDCF] flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-[#68645A]">
+                    <span className="flex items-center gap-1">
+                      <span className="material-symbols-outlined text-[14px]">account_tree</span>
+                      Categories ({categoryResults.length})
                     </span>
                   </div>
+                  {categoryResults.map((cat) => {
+                    const { status, matLabel } = getAthleteRingStatus(cat.id);
+                    const meta = statusMeta[status] || statusMeta.unscheduled;
+                    const docUrl = cat.doc_url;
 
-                  {/* Bottom Row: Category & View Draws on Left, Tatami Mat Info on Right */}
-                  <div className="spectator-result-bottom">
-                    <div className="spectator-result-category-wrap">
-                      <span className="spectator-result-division">
-                        {displayCategoryName}
-                      </span>
-                      {docUrl && (
-                        <button
-                          type="button"
-                          className="spectator-pdf-chip"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setIsOpen(false);
-                            setViewingPdf({
-                              url: docUrl,
-                              title: `${athlete.name} · ${displayCategoryName}`,
-                            });
-                          }}
-                          title="View category draws PDF"
-                        >
-                          <svg className="spectator-pdf-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                            <rect x="0.5" y="0.5" width="15" height="15" rx="3" fill="#68645A" stroke="#524F47" strokeWidth="0.5" />
-                            <text x="8" y="11" fill="#FFFFFF" fontSize="6.5" fontWeight="800" textAnchor="middle" fontFamily="system-ui, -apple-system, sans-serif" letterSpacing="0.2">PDF</text>
-                          </svg>
-                          <span className="spectator-draws-link">View Draws</span>
-                        </button>
-                      )}
-                    </div>
-
-                    <div className="spectator-result-mat">
-                      {parts ? (
-                        <>
-                          <strong>{parts[1]}</strong>
-                          {parts[2]}
-                        </>
-                      ) : (
-                        matLabel
-                      )}
-                    </div>
-                  </div>
+                    return (
+                      <div
+                        key={cat.id}
+                        onClick={() => handleSelectCategory(cat)}
+                        className="spectator-result-row cursor-pointer hover:bg-[#FAF9F5] transition-colors"
+                        role="option"
+                      >
+                        <div className="spectator-result-top">
+                          <div className="spectator-result-name-group">
+                            <span className="material-symbols-outlined text-[16px] text-[#0E9C7C] mr-1">
+                              category
+                            </span>
+                            <span className="spectator-result-name font-bold">{cat.name}</span>
+                          </div>
+                          <span className={`spectator-status ${meta.cls}`}>
+                            <span className="dot"></span>
+                            {meta.label}
+                          </span>
+                        </div>
+                        <div className="spectator-result-bottom">
+                          <div className="spectator-result-category-wrap">
+                            <span className="text-[11px] text-[#68645A]">
+                              {cat.athletes_count ?? 0} athletes · {cat.expected_matches ?? 0} expected bouts
+                            </span>
+                            {docUrl && (
+                              <button
+                                type="button"
+                                className="spectator-pdf-chip ml-2"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setIsOpen(false);
+                                  setViewingPdf({
+                                    url: docUrl,
+                                    title: cat.name || "Category",
+                                  });
+                                }}
+                                title="View category draws PDF"
+                              >
+                                <svg className="spectator-pdf-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                  <rect x="0.5" y="0.5" width="15" height="15" rx="3" fill="#68645A" stroke="#524F47" strokeWidth="0.5" />
+                                  <text x="8" y="11" fill="#FFFFFF" fontSize="6.5" fontWeight="800" textAnchor="middle" fontFamily="system-ui, -apple-system, sans-serif" letterSpacing="0.2">PDF</text>
+                                </svg>
+                                <span className="spectator-draws-link">Draws</span>
+                              </button>
+                            )}
+                          </div>
+                          <div className="spectator-result-mat text-[11px] font-semibold">
+                            {matLabel}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              );
-            })
+              )}
+
+              {/* Athletes Results Section */}
+              {results.length > 0 && (
+                <div>
+                  <div className="px-3 py-1.5 bg-[#FAF9F5] border-y border-[#E1DDCF] flex items-center justify-between text-[10px] font-black uppercase tracking-wider text-[#68645A]">
+                    <span className="flex items-center gap-1">
+                      <span className="material-symbols-outlined text-[14px]">sports_martial_arts</span>
+                      Athletes ({results.length})
+                    </span>
+                  </div>
+                  {results.map((athlete) => {
+                    const { status, matLabel } = getAthleteRingStatus(athlete.category_id);
+                    const meta = statusMeta[status] || statusMeta.unscheduled;
+                    const parts = matLabel.match(/(Tatami \d+)(.*)/);
+                    const docUrl =
+                      athlete.categories?.doc_url ||
+                      cachedCategories.find((c) => c.id === athlete.category_id)?.doc_url;
+                    const displayCategoryName =
+                      athlete.categories?.name ||
+                      cachedCategories.find((c) => c.id === athlete.category_id)?.name ||
+                      "Uncategorized";
+
+                    return (
+                      <div
+                        key={athlete.id}
+                        onClick={() => handleSelectAthlete(athlete)}
+                        className="spectator-result-row cursor-pointer hover:bg-[#FAF9F5] transition-colors"
+                        role="option"
+                      >
+                        <div className="spectator-result-top">
+                          <div className="spectator-result-name-group">
+                            <span className="spectator-result-chest mono">
+                              #{athlete.chest_number || "-"}
+                            </span>
+                            <span className="spectator-result-name font-semibold">{athlete.name}</span>
+                          </div>
+                          <span className={`spectator-status ${meta.cls}`}>
+                            <span className="dot"></span>
+                            {meta.label}
+                          </span>
+                        </div>
+
+                        <div className="spectator-result-bottom">
+                          <div className="spectator-result-category-wrap">
+                            <span className="spectator-result-division">
+                              {displayCategoryName}
+                            </span>
+                            {docUrl && (
+                              <button
+                                type="button"
+                                className="spectator-pdf-chip"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setIsOpen(false);
+                                  setViewingPdf({
+                                    url: docUrl,
+                                    title: `${athlete.name} · ${displayCategoryName}`,
+                                  });
+                                }}
+                                title="View category draws PDF"
+                              >
+                                <svg className="spectator-pdf-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                  <rect x="0.5" y="0.5" width="15" height="15" rx="3" fill="#68645A" stroke="#524F47" strokeWidth="0.5" />
+                                  <text x="8" y="11" fill="#FFFFFF" fontSize="6.5" fontWeight="800" textAnchor="middle" fontFamily="system-ui, -apple-system, sans-serif" letterSpacing="0.2">PDF</text>
+                                </svg>
+                                <span className="spectator-draws-link">Draws</span>
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="spectator-result-mat">
+                            {parts ? (
+                              <>
+                                <strong>{parts[1]}</strong>
+                                {parts[2]}
+                              </>
+                            ) : (
+                              matLabel
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

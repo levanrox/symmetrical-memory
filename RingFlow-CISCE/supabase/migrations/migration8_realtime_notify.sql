@@ -56,7 +56,47 @@ BEGIN
   ELSIF TG_TABLE_NAME = 'categories' THEN
     payload := payload || jsonb_build_object('categoryId', row_data->'id');
   ELSIF TG_TABLE_NAME = 'matches' THEN
-    payload := payload || jsonb_build_object('matchId', row_data->'id');
+    payload := payload || jsonb_build_object(
+      'matchId', row_data->'id',
+      'akaScore', row_data->'aka_score',
+      'aoScore', row_data->'ao_score',
+      'akaPenalties', row_data->'aka_penalties',
+      'aoPenalties', row_data->'ao_penalties',
+      'senshu', row_data->'senshu',
+      'status', row_data->'status'
+    );
+    -- Resolve ringId from category_assignments so screens watching ringId get instant score updates
+    IF row_data ? 'category_id' AND (row_data->>'category_id') IS NOT NULL THEN
+      DECLARE
+        resolved_ring_id UUID;
+        resolved_tourn_id UUID;
+      BEGIN
+        SELECT ring_id INTO resolved_ring_id FROM public.category_assignments WHERE category_id = (row_data->>'category_id')::uuid LIMIT 1;
+        IF resolved_ring_id IS NOT NULL THEN
+          payload := payload || jsonb_build_object('ringId', resolved_ring_id);
+        END IF;
+        SELECT tournament_id INTO resolved_tourn_id FROM public.categories WHERE id = (row_data->>'category_id')::uuid LIMIT 1;
+        IF resolved_tourn_id IS NOT NULL THEN
+          payload := payload || jsonb_build_object('tournamentId', resolved_tourn_id);
+        END IF;
+      EXCEPTION WHEN OTHERS THEN
+        NULL;
+      END;
+    END IF;
+  ELSIF TG_TABLE_NAME = 'category_assignments' THEN
+    -- Resolve tournament_id from rings so admin, organiser, and stager watching tournamentId receive category assignment changes immediately
+    IF row_data ? 'ring_id' AND (row_data->>'ring_id') IS NOT NULL THEN
+      DECLARE
+        resolved_tourn_id UUID;
+      BEGIN
+        SELECT tournament_id INTO resolved_tourn_id FROM public.rings WHERE id = (row_data->>'ring_id')::uuid LIMIT 1;
+        IF resolved_tourn_id IS NOT NULL THEN
+          payload := payload || jsonb_build_object('tournamentId', resolved_tourn_id);
+        END IF;
+      EXCEPTION WHEN OTHERS THEN
+        NULL;
+      END;
+    END IF;
   END IF;
 
   -- 7999 is the hard limit; ids-only payloads sit far below it, but a defensive

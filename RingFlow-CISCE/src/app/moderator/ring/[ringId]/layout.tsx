@@ -42,15 +42,15 @@ export default async function ModeratorRingLayout({
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-background pb-28 font-body-md text-on-background lg:pb-8">
+    <div className="flex min-h-screen flex-col bg-background pb-20 font-body-md text-on-background lg:pb-6">
       {/* Top bar: identity on phones, the section tabs on laptops */}
-      <header className="sticky top-0 z-40 flex h-16 w-full items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-lowest px-4 text-primary md:px-margin-desktop">
-        <div className="flex min-w-0 items-center gap-2 sm:gap-6">
-          <span className="shrink-0 font-headline-sm text-headline-sm font-black tracking-tighter text-primary">Ring Flow</span>
-          <div className="h-5 w-[1px] shrink-0 bg-outline-variant sm:h-6"></div>
+      <header className="sticky top-0 z-40 flex h-14 sm:h-16 w-full items-center justify-between gap-2 border-b border-outline-variant bg-surface-container-lowest px-3 text-primary sm:px-4 md:px-margin-desktop">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-4">
+          <span className="shrink-0 font-headline-sm text-sm sm:text-headline-sm font-black tracking-tighter text-primary">RingFlow</span>
+          <div className="h-4 w-[1px] shrink-0 bg-outline-variant sm:h-5"></div>
           <div className="min-w-0">
-            <h1 className="truncate font-body-md font-bold text-on-surface uppercase">{ring.name.replace(/Ring/i, "Tatami")}</h1>
-            <p className="truncate text-[11px] font-semibold uppercase tracking-wider text-on-surface-variant">
+            <h1 className="truncate text-xs sm:text-sm font-bold text-on-surface uppercase leading-tight">{ring.name.replace(/Ring/i, "Tatami")}</h1>
+            <p className="hidden sm:block truncate text-[10px] font-semibold uppercase tracking-wider text-on-surface-variant">
               Moderator desk
             </p>
           </div>
@@ -62,7 +62,7 @@ export default async function ModeratorRingLayout({
       </header>
 
       {/* Main Content — full width on laptops, comfortable measure below */}
-      <main className="mx-auto w-full max-w-5xl flex-grow p-4 md:p-margin-desktop lg:max-w-[1800px]">
+      <main className="mx-auto w-full max-w-5xl flex-grow p-3 sm:p-4 md:p-margin-desktop lg:max-w-[1800px]">
         {children}
       </main>
 

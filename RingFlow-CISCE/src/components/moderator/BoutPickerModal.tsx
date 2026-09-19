@@ -75,7 +75,7 @@ export function BoutPickerModal({
   bronzeMedals = 2,
   onSelect,
 }: Props) {
-  const [view, setView] = useState<"list" | "tree">("list");
+  const [view, setView] = useState<"list" | "tree">("tree");
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("ready");
   const [roundFilter, setRoundFilter] = useState<string>("all");
@@ -256,62 +256,84 @@ export function BoutPickerModal({
           </div>
         </header>
 
-        {view === "list" && (
-          <div className="flex flex-wrap items-center gap-2 border-b border-[#E1DDCF] bg-white px-4 py-2.5 sm:px-6">
-            <div className="relative min-w-[220px] flex-1">
-              <span className="material-symbols-outlined pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[18px] text-[#8C877C]">
-                search
-              </span>
-              <input
-                ref={searchRef}
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                onKeyDown={handleKeyDown}
-                placeholder="Athlete, chest number, club, or bout number…"
-                aria-label="Search bouts"
-                className="w-full rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] py-2 pl-9 pr-8 text-base text-[#1B1815] outline-none transition-all focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 sm:text-sm"
-              />
-              {query && (
-                <button
-                  type="button"
-                  onClick={() => setQuery("")}
-                  aria-label="Clear search"
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-[#8C877C] hover:text-[#1B1815]"
-                >
-                  <span className="material-symbols-outlined text-[18px]">close</span>
-                </button>
-              )}
-            </div>
+        {/* Filter / Search Toolbar across both views */}
+        <div className="flex flex-wrap items-center gap-2.5 border-b border-[#E1DDCF] bg-white px-4 py-2.5 sm:px-6">
+          <div className="relative min-w-[200px] flex-1">
+            <span className="material-symbols-outlined pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[18px] text-[#8C877C]">
+              search
+            </span>
+            <input
+              ref={searchRef}
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={
+                view === "tree"
+                  ? "Highlight athlete, school, chest #, or bout # in bracket…"
+                  : "Athlete, chest number, club, or bout number…"
+              }
+              aria-label="Search bouts"
+              className="w-full rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] py-2 pl-9 pr-8 text-sm text-[#1B1815] outline-none transition-all focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 placeholder:text-[#8C877C]"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear search"
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[#8C877C] hover:text-[#1B1815] transition-colors"
+              >
+                <span className="material-symbols-outlined text-[18px]">close</span>
+              </button>
+            )}
+          </div>
 
+          {view === "list" ? (
             <div className="flex flex-wrap items-center gap-2">
               {statusChip("ready", "Ready")}
               {statusChip("live", "Live")}
               {statusChip("done", "Done")}
               {statusChip("all", "All")}
+
+              {rounds.length > 1 && (
+                <select
+                  value={roundFilter}
+                  onChange={(e) => setRoundFilter(e.target.value)}
+                  aria-label="Filter by round"
+                  className="min-h-[38px] cursor-pointer rounded-lg border border-[#E1DDCF] bg-white px-2.5 text-xs font-bold text-[#3D3A33] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                >
+                  <option value="all">All rounds</option>
+                  {rounds.map((round) => (
+                    <option key={round} value={round}>
+                      {round}
+                    </option>
+                  ))}
+                </select>
+              )}
             </div>
+          ) : (
+            <div className="flex items-center gap-2 text-xs">
+              <span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1.5 text-[11px] font-bold text-[#0E9C7C] border border-emerald-200/60">
+                <span className="material-symbols-outlined text-[14px]">touch_app</span>
+                Tap any bout to load on desk
+              </span>
+              <div className="hidden sm:flex items-center gap-2 text-[#68645A]">
+                {counts.live > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-700 border border-amber-200/60 animate-pulse">
+                    {counts.live} Live
+                  </span>
+                )}
+                <span className="text-[#8C877C]">
+                  {counts.ready} Ready · {counts.done}/{counts.all} Done
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
 
-            {rounds.length > 1 && (
-              <select
-                value={roundFilter}
-                onChange={(e) => setRoundFilter(e.target.value)}
-                aria-label="Filter by round"
-                className="min-h-[40px] cursor-pointer rounded-lg border border-[#E1DDCF] bg-white px-2 text-xs font-bold text-[#3D3A33] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-              >
-                <option value="all">All rounds</option>
-                {rounds.map((round) => (
-                  <option key={round} value={round}>
-                    {round}
-                  </option>
-                ))}
-              </select>
-            )}
-          </div>
-        )}
-
-        <div className="min-h-0 flex-1 overflow-hidden p-3 sm:p-5">
+        <div className="min-h-0 flex-1 overflow-hidden p-2.5 sm:p-4 md:p-5">
           {view === "tree" ? (
-            <div className="h-full overflow-hidden rounded-xl border border-[#E1DDCF] bg-white">
+            <div className="h-full overflow-hidden rounded-xl border border-[#E1DDCF] bg-white shadow-xs">
               {drawMatches.length > 0 ? (
                 <DrawBracket
                   matches={drawMatches}
@@ -320,6 +342,7 @@ export function BoutPickerModal({
                   bronzeMedals={bronzeMedals}
                   onSelectMatch={(m) => handleSelect(m.matchId)}
                   activeMatchId={activeMatchId}
+                  searchQuery={query}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center p-6 text-center text-sm text-[#68645A]">

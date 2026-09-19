@@ -20,6 +20,8 @@ interface Props {
   compact?: boolean;
   /** When set (public athlete search), that athlete is emphasised and the rest dimmed. */
   highlightAthleteId?: string | null;
+  /** When set, matching bouts are highlighted and non-matching dimmed */
+  searchQuery?: string;
   /** Medalists, shown once the bracket is decided. */
   podium?: PodiumView | null;
   /** 0 = no bronze bout, 1 = single bronze, 2 = repechage with two bronzes. */
@@ -76,6 +78,7 @@ export function DrawBracket({
   onSelectMatch,
   activeMatchId,
   highlightAthleteId,
+  searchQuery,
   podium,
   bronzeMedals = 2,
 }: Props) {
@@ -134,6 +137,17 @@ export function DrawBracket({
     const containsHighlight = akaHighlighted || aoHighlighted;
     const showScore = isDecided || match.status === "LIVE";
 
+    const cleanQuery = (searchQuery || "").trim().toLowerCase().replace(/^#/, "");
+    const matchesSearch = Boolean(
+      cleanQuery &&
+        (match.matchNo.toString() === cleanQuery ||
+          match.aka.displayName.toLowerCase().includes(cleanQuery) ||
+          match.ao.displayName.toLowerCase().includes(cleanQuery) ||
+          (match.aka.school && match.aka.school.toLowerCase().includes(cleanQuery)) ||
+          (match.ao.school && match.ao.school.toLowerCase().includes(cleanQuery)) ||
+          (match.roundName && match.roundName.toLowerCase().includes(cleanQuery)))
+    );
+
     return (
       <div
         key={match.matchId}
@@ -144,15 +158,19 @@ export function DrawBracket({
         className={`relative w-full rounded-xl border bg-white transition-all ${
           onSelectMatch ? "cursor-pointer hover:shadow-lg" : ""
         } ${
-          containsHighlight
-            ? "border-[#DC2626] ring-2 ring-[#DC2626] shadow-md"
-            : highlightAthleteId
-              ? "border-[#E1DDCF] opacity-55 hover:opacity-90"
-              : isCurrentBout
-                ? "border-[#0E9C7C] ring-2 ring-[#0E9C7C] shadow-md bg-emerald-50/15"
-                : selectedMatch?.matchId === match.matchId
-                  ? "border-[#0E9C7C] ring-2 ring-[#0E9C7C]/30 shadow-sm"
-                  : "border-[#E1DDCF] hover:border-[#0E9C7C]"
+          matchesSearch
+            ? "border-[#0E9C7C] ring-4 ring-[#0E9C7C]/40 shadow-xl bg-emerald-50/20 scale-[1.02]"
+            : cleanQuery
+              ? "border-[#E1DDCF] opacity-40 hover:opacity-90"
+              : containsHighlight
+                ? "border-[#DC2626] ring-2 ring-[#DC2626] shadow-md"
+                : highlightAthleteId
+                  ? "border-[#E1DDCF] opacity-55 hover:opacity-90"
+                  : isCurrentBout
+                    ? "border-[#0E9C7C] ring-2 ring-[#0E9C7C] shadow-md bg-emerald-50/15"
+                    : selectedMatch?.matchId === match.matchId
+                      ? "border-[#0E9C7C] ring-2 ring-[#0E9C7C]/30 shadow-sm"
+                      : "border-[#E1DDCF] hover:border-[#0E9C7C]"
         }`}
       >
         {/* Match # Pill */}
