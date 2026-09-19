@@ -9,42 +9,82 @@ import { ensureAdminOwnsTournament } from "./admin";
 export type AthleteInput = {
   name: string;
   chest_number: string;
-  category_id: string;
+  category_id?: string | null;
   school?: string | null;
   school_code?: string | null;
   sports_id?: string | null;
+  sex?: string | null;
+  age?: string | null;
+  belt?: string | null;
+  weight?: string | number | null;
 };
 
 export async function addAthlete(tournamentId: string, input: AthleteInput) {
   await ensureAdminOwnsTournament(tournamentId);
-
-  // Verify category belongs to tournament
-  const [cat] = await db
-    .select({ id: categories.id })
-    .from(categories)
-    .where(
-      and(
-        eq(categories.id, input.category_id),
-        eq(categories.tournamentId, tournamentId)
-      )
-    )
-    .limit(1);
-
-  if (!cat) throw new Error("Invalid category for this tournament");
 
   const name = (input.name || "").trim().slice(0, 200);
   if (!name) throw new Error("Athlete name is required");
 
   const chestNumber = (input.chest_number || "").trim().slice(0, 50);
 
+  let targetCategoryId: string | null = null;
+
+  if (input.category_id && input.category_id !== "uncategorized" && input.category_id !== "auto") {
+    // Explicit category selection
+    const [cat] = await db
+      .select({ id: categories.id })
+      .from(categories)
+      .where(
+        and(
+          eq(categories.id, input.category_id),
+          eq(categories.tournamentId, tournamentId)
+        )
+      )
+      .limit(1);
+
+    if (cat) {
+      targetCategoryId = cat.id;
+    }
+  } else if (input.category_id === "auto" || !input.category_id) {
+    // Auto-assignment attempt if sex / age / belt provided
+    const existingCats = await db
+      .select()
+      .from(categories)
+      .where(eq(categories.tournamentId, tournamentId));
+
+    const athleteAge = parseInt(input.age || "0", 10) || 0;
+    const aSex = (input.sex || "").trim().toLowerCase();
+    const aBelt = (input.belt || "").trim().toLowerCase();
+
+    const matchedCat = existingCats.find((c) => {
+      const cBelt = c.belt ? c.belt.trim().toLowerCase() : null;
+      const cSex = c.sex ? c.sex.trim().toLowerCase() : null;
+
+      if (cSex && aSex && cSex !== aSex) return false;
+      if (cBelt && aBelt && cBelt !== aBelt) return false;
+      if (c.ageMin !== null && athleteAge < c.ageMin) return false;
+      if (c.ageMax !== null && athleteAge > c.ageMax) return false;
+      return true;
+    });
+
+    if (matchedCat) {
+      targetCategoryId = matchedCat.id;
+    }
+  }
+
   await db.insert(athletes).values({
-    categoryId: input.category_id,
+    categoryId: targetCategoryId,
     tournamentId,
     name,
     chestNumber: chestNumber || null,
     school: input.school?.trim().slice(0, 200) || null,
     schoolCode: input.school_code?.trim().slice(0, 50) || null,
     sportsId: input.sports_id?.trim().slice(0, 50) || null,
+    sex: input.sex?.trim().slice(0, 20) || null,
+    age: input.age ? String(input.age).trim().slice(0, 20) : null,
+    belt: input.belt?.trim().slice(0, 50) || null,
+    weight: input.weight ? String(input.weight).trim().slice(0, 20) : null,
+    dojo: input.school?.trim().slice(0, 200) || null,
   });
 
   revalidatePath(`/admin/event/${tournamentId}/athletes`);

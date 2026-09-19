@@ -11,6 +11,7 @@ interface Props {
   isOpen: boolean;
   onClose: () => void;
   onSelectMatch?: (match: any) => void;
+  activeMatchId?: string | null;
   /** Load the draw through one athlete's search result instead of as a whole tree. */
   athleteId?: string | null;
   /** Extra line under the title, e.g. "Showing <name>'s path". */
@@ -25,6 +26,7 @@ export function DrawBracketModal({
   isOpen,
   onClose,
   onSelectMatch,
+  activeMatchId,
   athleteId,
   subtitle,
   allowPdf = true,
@@ -153,6 +155,7 @@ export function DrawBracketModal({
               bronzeMedals={drawData.bronzeMedals ?? 2}
               podium={drawData.podium ?? null}
               highlightAthleteId={drawData.highlightAthleteId ?? athleteId ?? null}
+              activeMatchId={activeMatchId}
               onDownloadPdf={allowPdf ? handleDownloadPdf : undefined}
               isDownloadingPdf={isDownloadingPdf}
               onSelectMatch={

@@ -26,6 +26,8 @@ interface Props {
   podium?: PodiumView | null;
   /** 0 = no bronze bout, 1 = single bronze, 2 = repechage with two bronzes. */
   bronzeMedals?: number;
+  /** When true, omits the top header so the parent modal header can be unified */
+  hideHeader?: boolean;
 }
 
 /** The recorded score line for one side of a bout. */
@@ -81,9 +83,28 @@ export function DrawBracket({
   searchQuery,
   podium,
   bronzeMedals = 2,
+  hideHeader = false,
 }: Props) {
   const [zoom, setZoom] = useState(1);
   const [selectedMatch, setSelectedMatch] = useState<BracketMatchView | null>(null);
+  const canvasContainerRef = React.useRef<HTMLDivElement>(null);
+
+  const jumpToMatch = React.useCallback((targetId: string) => {
+    const el = document.getElementById(`draw-match-${targetId}`);
+    if (el && canvasContainerRef.current) {
+      el.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    }
+  }, []);
+
+  // Auto-scroll to active match on load
+  React.useEffect(() => {
+    if (activeMatchId) {
+      const timer = setTimeout(() => {
+        jumpToMatch(activeMatchId);
+      }, 350);
+      return () => clearTimeout(timer);
+    }
+  }, [activeMatchId, jumpToMatch]);
 
   const { mainRounds, repechageMatches, bronzeMatches } = useMemo(() => {
     const main = matches.filter((m) => m.bracketType === "MAIN");
@@ -151,6 +172,7 @@ export function DrawBracket({
     return (
       <div
         key={match.matchId}
+        id={`draw-match-${match.matchId}`}
         onClick={() => {
           setSelectedMatch(match);
           if (onSelectMatch) onSelectMatch(match);
@@ -161,42 +183,48 @@ export function DrawBracket({
           matchesSearch
             ? "border-[#0E9C7C] ring-4 ring-[#0E9C7C]/40 shadow-xl bg-emerald-50/20 scale-[1.02]"
             : cleanQuery
-              ? "border-[#E1DDCF] opacity-40 hover:opacity-90"
+              ? "border-[#E1DDCF] opacity-35 hover:opacity-80"
               : containsHighlight
                 ? "border-[#DC2626] ring-2 ring-[#DC2626] shadow-md"
                 : highlightAthleteId
-                  ? "border-[#E1DDCF] opacity-55 hover:opacity-90"
+                  ? "border-[#E1DDCF] opacity-45 hover:opacity-80"
                   : isCurrentBout
-                    ? "border-[#0E9C7C] ring-2 ring-[#0E9C7C] shadow-md bg-emerald-50/15"
-                    : selectedMatch?.matchId === match.matchId
-                      ? "border-[#0E9C7C] ring-2 ring-[#0E9C7C]/30 shadow-sm"
-                      : "border-[#E1DDCF] hover:border-[#0E9C7C]"
+                    ? "border-[#0E9C7C] ring-4 ring-[#0E9C7C]/40 shadow-xl bg-emerald-50/25 scale-[1.02] z-10"
+                    : isDecided
+                      ? "border-[#E1DDCF] bg-[#FAF9F5]/70 opacity-80 hover:opacity-100"
+                      : selectedMatch?.matchId === match.matchId
+                        ? "border-[#0E9C7C] ring-2 ring-[#0E9C7C]/30 shadow-sm"
+                        : "border-[#E1DDCF] hover:border-[#0E9C7C]"
         }`}
       >
         {/* Match # Pill */}
         <div
           className={`flex items-center justify-between gap-2 rounded-t-xl border-b border-[#E1DDCF] px-3 py-1.5 text-[10px] font-bold ${
-            isCurrentBout ? "bg-[#0E9C7C] text-white" : "bg-[#FAF9F5] text-[#68645A]"
+            isCurrentBout
+              ? "bg-[#0E9C7C] text-white"
+              : isDecided
+                ? "bg-[#F5F3EC] text-[#8C877C]"
+                : "bg-[#FAF9F5] text-[#68645A]"
           }`}
         >
           <span className="flex items-center gap-1 whitespace-nowrap">
             {isCurrentBout && (
-              <span className="material-symbols-outlined text-[13px]">sports_martial_arts</span>
+              <span className="material-symbols-outlined text-[13px] animate-pulse">sports_martial_arts</span>
             )}
             Bout #{match.matchNo}
           </span>
           <span
             className={`whitespace-nowrap rounded px-1.5 py-0.5 text-[9px] font-black uppercase tracking-wider ${
               isCurrentBout
-                ? "bg-white text-[#0E9C7C]"
+                ? "bg-white text-[#0E9C7C] shadow-xs"
                 : isDecided
-                  ? "bg-emerald-50 text-emerald-700 font-bold"
+                  ? "bg-[#EAE7DC] text-[#78746B]"
                   : match.status === "LIVE"
-                    ? "bg-amber-50 text-amber-700 animate-pulse font-bold"
+                    ? "bg-amber-100 text-amber-800 animate-pulse font-bold"
                     : "bg-slate-100 text-slate-600"
             }`}
           >
-            {isCurrentBout ? "ON DESK" : isDecided ? "DONE" : match.status}
+            {isCurrentBout ? "LIVE ON DESK" : isDecided ? "DONE" : match.status}
           </span>
         </div>
 
@@ -338,61 +366,77 @@ export function DrawBracket({
 
   return (
     <div className="flex h-full flex-col overflow-hidden rounded-xl border border-[#E1DDCF] bg-[#FAF9F5]">
-      {/* Top Toolbar */}
-      <div className="flex items-center justify-between gap-3 border-b border-[#E1DDCF] bg-white px-5 py-3.5">
-        <div className="min-w-0">
-          <h3 className="truncate text-base font-bold tracking-tight text-[#1B1815]">{categoryName}</h3>
-          <p className="truncate text-xs text-[#68645A]">
-            {tournamentSize ? `${tournamentSize}-competitor bracket` : "Tournament bracket"} ·{" "}
-            {bronzeMedals === 0
-              ? "no bronze bout"
-              : bronzeMedals === 1
-                ? "single bronze"
-                : "repechage · two bronzes"}
-          </p>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-2">
-          <div className="flex items-center rounded-lg border border-[#E1DDCF] bg-[#F5F3EC] p-1">
-            <button
-              onClick={handleZoomOut}
-              className="flex h-9 w-9 items-center justify-center rounded text-[#68645A] transition-colors hover:bg-white hover:text-[#1B1815] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-              title="Zoom out"
-              aria-label="Zoom out"
-            >
-              <span className="material-symbols-outlined text-[18px]">zoom_out</span>
-            </button>
-            <span className="px-1 font-mono text-xs font-medium text-[#3D3A33]">{Math.round(zoom * 100)}%</span>
-            <button
-              onClick={handleZoomIn}
-              className="flex h-9 w-9 items-center justify-center rounded text-[#68645A] transition-colors hover:bg-white hover:text-[#1B1815] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-              title="Zoom in"
-              aria-label="Zoom in"
-            >
-              <span className="material-symbols-outlined text-[18px]">zoom_in</span>
-            </button>
-            <button
-              onClick={handleResetZoom}
-              className="ml-1 flex h-9 w-9 items-center justify-center rounded text-[#68645A] transition-colors hover:bg-white hover:text-[#1B1815] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-              title="Reset zoom"
-              aria-label="Reset zoom"
-            >
-              <span className="material-symbols-outlined text-[18px]">restart_alt</span>
-            </button>
+      {/* Top Toolbar - only when not embedded in a modal that already provides a unified header */}
+      {!hideHeader && (
+        <div className="flex items-center justify-between gap-3 border-b border-[#E1DDCF] bg-white px-5 py-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="inline-flex items-center gap-1.5 rounded-lg bg-[#FAF9F5] border border-[#E1DDCF] px-2.5 py-1 text-xs font-bold text-[#1B1815]">
+              <span className="material-symbols-outlined text-[15px] text-[#0E9C7C]">account_tree</span>
+              {tournamentSize ? `${tournamentSize} Competitors` : "Bracket"}
+            </span>
+            <span className="truncate text-xs text-[#68645A] font-medium hidden sm:inline">
+              {bronzeMedals === 0
+                ? "Single elimination · no bronze"
+                : bronzeMedals === 1
+                  ? "Single bronze bout"
+                  : "Repechage · two bronzes"}
+            </span>
           </div>
 
-          {onDownloadPdf && (
-            <button
-              onClick={onDownloadPdf}
-              disabled={isDownloadingPdf}
-              className="flex items-center gap-1.5 rounded-lg bg-[#0E9C7C] px-3 py-1.5 text-xs font-bold text-white shadow-xs transition-all hover:bg-[#0B7C63] disabled:opacity-50 cursor-pointer"
-            >
-              <span className="material-symbols-outlined text-[16px]">picture_as_pdf</span>
-              {isDownloadingPdf ? "Generating…" : "Draw sheet PDF"}
-            </button>
-          )}
+          <div className="flex shrink-0 items-center gap-2">
+            {activeMatchId && (
+              <button
+                type="button"
+                onClick={() => jumpToMatch(activeMatchId)}
+                className="flex items-center gap-1.5 rounded-lg bg-emerald-50 px-2.5 py-1.5 text-xs font-bold text-[#0E9C7C] border border-emerald-300 hover:bg-emerald-100 transition-colors cursor-pointer"
+                title="Jump to current live match"
+              >
+                <span className="material-symbols-outlined text-[16px] animate-pulse">my_location</span>
+                <span>Live Bout</span>
+              </button>
+            )}
+
+            <div className="flex items-center rounded-lg border border-[#E1DDCF] bg-[#F5F3EC] p-1">
+              <button
+                onClick={handleZoomOut}
+                className="flex h-8 w-8 items-center justify-center rounded text-[#68645A] transition-colors hover:bg-white hover:text-[#1B1815] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                title="Zoom out"
+                aria-label="Zoom out"
+              >
+                <span className="material-symbols-outlined text-[16px]">zoom_out</span>
+              </button>
+              <span className="px-1 font-mono text-xs font-medium text-[#3D3A33]">{Math.round(zoom * 100)}%</span>
+              <button
+                onClick={handleZoomIn}
+                className="flex h-8 w-8 items-center justify-center rounded text-[#68645A] transition-colors hover:bg-white hover:text-[#1B1815] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                title="Zoom in"
+                aria-label="Zoom in"
+              >
+                <span className="material-symbols-outlined text-[16px]">zoom_in</span>
+              </button>
+              <button
+                onClick={handleResetZoom}
+                className="ml-1 flex h-8 w-8 items-center justify-center rounded text-[#68645A] transition-colors hover:bg-white hover:text-[#1B1815] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                title="Reset zoom"
+                aria-label="Reset zoom"
+              >
+                <span className="material-symbols-outlined text-[16px]">restart_alt</span>
+              </button>
+            </div>
+
+            {onDownloadPdf && (
+              <button
+                onClick={onDownloadPdf}
+                disabled={isDownloadingPdf}
+                className="flex items-center gap-1.5 rounded-lg bg-[#0E9C7C] px-3 py-1.5 text-xs font-bold text-white shadow-xs transition-all hover:bg-[#0B7C63] disabled:opacity-50 cursor-pointer"
+              >
+                <span className="material-symbols-outlined text-[16px]">picture_as_pdf</span>
+                {isDownloadingPdf ? "Generating…" : "PDF"}
+              </button>
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Medalists, once the bracket is decided */}
       {medals.length > 0 && (
@@ -410,7 +454,7 @@ export function DrawBracket({
       )}
 
       {/* Bracket Canvas */}
-      <div className="relative flex-1 overflow-auto p-6">
+      <div ref={canvasContainerRef} className="relative flex-1 overflow-auto p-6 scroll-smooth">
         <div
           style={{ transform: `scale(${zoom})`, transformOrigin: "top left" }}
           className="flex min-w-max items-stretch gap-10 transition-transform duration-150 ease-out"

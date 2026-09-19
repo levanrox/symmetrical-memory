@@ -105,9 +105,9 @@ async function runRealtimeAndEdgeTests() {
   // Check queue order consistency
   const ringQueueOrders = new Map<string, number[]>();
   for (const a of balancingData) {
-    const list = ringQueueOrders.get(a.ringId) || [];
-    list.push(a.queueOrder);
-    ringQueueOrders.set(a.ringId, list);
+    const list = ringQueueOrders.get(a.ring_id) || [];
+    list.push(a.queue_order);
+    ringQueueOrders.set(a.ring_id, list);
   }
   for (const [rId, orders] of ringQueueOrders.entries()) {
     for (let i = 1; i < orders.length; i++) {

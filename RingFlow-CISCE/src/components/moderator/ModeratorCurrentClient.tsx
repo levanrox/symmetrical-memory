@@ -270,10 +270,6 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
   };
 
   const executeReturnToQueue = async () => {
-    if (returnConfirmText !== "CONFIRM") {
-      alert("Must type CONFIRM exactly to return.");
-      return;
-    }
     setLoading(true);
     try {
       await returnCategoryToQueue(activeAssignment.id, ringId);
@@ -390,37 +386,13 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
               Change bout
             </button>
 
-            <div className="mt-2 flex items-center gap-2">
-              <button
-                onClick={() => setShowBracketModal(true)}
-                className="flex min-h-[36px] flex-1 items-center justify-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-white px-2 text-[11px] font-bold text-[#3D3A33] transition-colors hover:bg-[#FAF9F5] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-              >
-                <span className="material-symbols-outlined text-[15px]">account_tree</span>
-                Bracket
-              </button>
-
-              {/* Mirrors the TV: same one action the pad's swap button calls. */}
-              <button
-                onClick={() => void handleSwapSides()}
-                aria-pressed={sidesSwapped}
-                title="Mirror which corner appears on the left of the arena screen"
-                className={`flex min-h-[36px] flex-1 items-center justify-center gap-1.5 rounded-lg border px-2 text-[11px] font-bold transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
-                  sidesSwapped
-                    ? "border-[#0E9C7C] bg-[#E3F6F0] text-[#0B7C63]"
-                    : "border-[#E1DDCF] bg-white text-[#3D3A33] hover:bg-[#FAF9F5]"
-                }`}
-              >
-                <span className="material-symbols-outlined text-[15px]">swap_horiz</span>
-                {sidesSwapped ? "AO left" : "AKA left"}
-              </button>
-            </div>
           </div>
         </div>
       )}
 
       {/* Category card — compact on mobile, expanded on desktop */}
-      <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-3 sm:p-card-padding shadow-sm relative overflow-hidden mb-4 sm:mb-6 lg:col-span-3 lg:col-start-1 lg:row-start-2 lg:mb-0">
-        <div className={`absolute top-0 left-0 w-1 h-full ${isPaused ? 'bg-error' : 'bg-secondary'}`}></div>
+      <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-3 sm:p-card-padding shadow-sm relative mb-4 sm:mb-6 lg:col-span-3 lg:col-start-1 lg:row-start-2 lg:mb-0">
+        <div className={`absolute top-0 left-0 w-1.5 h-full rounded-l-xl ${isPaused ? 'bg-error' : 'bg-secondary'}`}></div>
         {/* Mobile: compact single-line banner */}
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0 flex-1">
@@ -435,20 +407,42 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
             </div>
           </div>
           <div className="relative shrink-0">
-            <button onClick={() => setShowSettings(!showSettings)} className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-surface-container hover:bg-surface-container-high flex items-center justify-center text-on-surface transition-colors">
+            <button
+              onClick={() => setShowSettings(!showSettings)}
+              className="w-9 h-9 sm:w-10 sm:h-10 rounded-full bg-surface-container hover:bg-surface-container-high flex items-center justify-center text-on-surface transition-colors cursor-pointer"
+              title="Category Actions"
+              aria-label="Category Actions"
+            >
               <span className="material-symbols-outlined text-[20px]">settings</span>
             </button>
             {showSettings && (
-              <div className="absolute top-11 right-0 bg-surface-container-lowest border border-outline-variant shadow-lg rounded-xl w-48 z-10 overflow-hidden">
-                <button disabled={loading} onClick={() => setShowCompleteModal(true)} className="w-full text-left px-4 py-3 text-body-sm font-semibold hover:bg-surface-container flex items-center gap-2 disabled:opacity-50 text-secondary">
-                  <span className="material-symbols-outlined text-xl" style={{ fontVariationSettings: '"FILL" 1' }}>check_circle</span>
-                  Complete Category
-                </button>
-                <button disabled={loading} onClick={() => setShowReturnModal(true)} className="w-full text-left px-4 py-3 text-body-sm font-semibold hover:bg-surface-container flex items-center gap-2 disabled:opacity-50 border-t border-outline-variant text-error">
-                  <span className="material-symbols-outlined text-xl">undo</span>
-                  Return to Queue
-                </button>
-              </div>
+              <>
+                <div className="fixed inset-0 z-20" onClick={() => setShowSettings(false)} />
+                <div className="absolute top-11 right-0 bg-white border border-outline-variant shadow-2xl rounded-xl w-52 z-30 overflow-hidden animate-in fade-in zoom-in-95">
+                  <button
+                    disabled={loading}
+                    onClick={() => {
+                      setShowSettings(false);
+                      setShowCompleteModal(true);
+                    }}
+                    className="w-full text-left px-4 py-3 text-body-sm font-semibold hover:bg-[#F5F3EC] flex items-center gap-2.5 disabled:opacity-50 text-secondary cursor-pointer transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-xl" style={{ fontVariationSettings: '"FILL" 1' }}>check_circle</span>
+                    Complete Category
+                  </button>
+                  <button
+                    disabled={loading}
+                    onClick={() => {
+                      setShowSettings(false);
+                      setShowReturnModal(true);
+                    }}
+                    className="w-full text-left px-4 py-3 text-body-sm font-semibold hover:bg-red-50 flex items-center gap-2.5 disabled:opacity-50 border-t border-outline-variant text-error cursor-pointer transition-colors"
+                  >
+                    <span className="material-symbols-outlined text-xl">undo</span>
+                    Return to Queue
+                  </button>
+                </div>
+              </>
             )}
           </div>
         </div>
@@ -775,27 +769,31 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
 
       {showReturnModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-surface-container-lowest p-6 rounded-xl max-w-sm w-full space-y-4">
-            <h3 className="font-headline-sm text-error font-bold">Return to Queue</h3>
-            <p className="text-body-sm text-on-surface-variant">Are you sure? This will remove the category from the live tatami.</p>
-            <div>
-              <label className="text-[10px] font-bold text-on-surface-variant mb-1 block uppercase tracking-wider">Type CONFIRM to proceed</label>
-              <input
-                type="text"
-                value={returnConfirmText}
-                onChange={(e) => setReturnConfirmText(e.target.value)}
-                className="w-full bg-surface-container border border-outline-variant p-3 rounded text-on-surface font-bold"
-                placeholder="CONFIRM"
-              />
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => setShowReturnModal(false)} className="flex-1 py-3 bg-surface-container hover:bg-surface-container-high rounded font-bold text-sm text-on-surface">Cancel</button>
+          <div className="bg-surface-container-lowest p-6 rounded-2xl max-w-sm w-full space-y-4 border border-outline-variant shadow-2xl">
+            <h3 className="font-headline-sm text-error font-bold flex items-center gap-2">
+              <span className="material-symbols-outlined text-2xl">undo</span>
+              Return to Queue
+            </h3>
+            <p className="text-body-sm text-on-surface-variant leading-relaxed">
+              Are you sure you want to remove <strong>{activeAssignment.categories?.name}</strong> from the live tatami? Recorded matches will be safely preserved in the queue.
+            </p>
+            <div className="flex gap-2 pt-2">
               <button
-                onClick={executeReturnToQueue}
-                disabled={returnConfirmText !== "CONFIRM" || loading}
-                className="flex-1 py-3 bg-error text-white rounded font-bold text-sm disabled:opacity-50"
+                type="button"
+                onClick={() => setShowReturnModal(false)}
+                disabled={loading}
+                className="flex-1 py-3 bg-surface-container hover:bg-surface-container-high rounded-xl font-bold text-sm text-on-surface transition-colors cursor-pointer"
               >
-                Return
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={executeReturnToQueue}
+                disabled={loading}
+                className="flex-1 py-3 bg-error hover:bg-error/90 text-white rounded-xl font-bold text-sm disabled:opacity-50 transition-colors shadow-sm cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                {loading ? <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" /> : null}
+                <span>Return to Queue</span>
               </button>
             </div>
           </div>

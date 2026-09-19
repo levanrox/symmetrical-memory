@@ -465,6 +465,11 @@ export async function finishCategory(assignmentId: string, ringId: string) {
     })
     .where(eq(categoryAssignments.id, assignmentId));
 
+  await db
+    .update(rings)
+    .set({ currentMatchId: null })
+    .where(eq(rings.id, ringId));
+
   if (ring?.tournamentId) {
     try {
       await db.insert(eventLog).values({
@@ -624,6 +629,11 @@ export async function returnCategoryToQueue(assignmentId: string, ringId: string
       completedAt: null,
     })
     .where(eq(categoryAssignments.id, assignmentId));
+
+  await db
+    .update(rings)
+    .set({ currentMatchId: null })
+    .where(eq(rings.id, ringId));
 
   if (ring?.tournamentId) {
     await db.insert(eventLog).values({

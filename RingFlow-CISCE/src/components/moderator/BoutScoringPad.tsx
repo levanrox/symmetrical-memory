@@ -163,6 +163,19 @@ export function BoutScoringPad({
     setEditMilliseconds(String(total % 1000).padStart(3, "0"));
   }, [clock.clock.durationMs]);
 
+  const [showDisplayMenu, setShowDisplayMenu] = useState(false);
+
+  const openClockSettings = () => {
+    if (clock.running) {
+      void clock.pause();
+    }
+    const current = clock.remainingMs;
+    setEditMinutes(String(Math.floor(current / 60000)));
+    setEditSeconds(String(Math.floor((current % 60000) / 1000)).padStart(2, "0"));
+    setEditMilliseconds(String(current % 1000).padStart(3, "0"));
+    setShowSettings(true);
+  };
+
   const [deskSidesSwapped, setDeskSidesSwapped] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
       try {
@@ -249,7 +262,9 @@ export function BoutScoringPad({
     const mins = parseInt(editMinutes, 10) || 0;
     const secs = parseInt(editSeconds, 10) || 0;
     const ms = parseInt(editMilliseconds, 10) || 0;
-    void clock.applyDuration(Math.max(1000, mins * 60000 + secs * 1000 + ms));
+    const targetMs = Math.max(0, mins * 60000 + secs * 1000 + ms);
+    const deltaMs = clock.remainingMs - targetMs;
+    void clock.adjust(deltaMs);
     setShowSettings(false);
   };
 
@@ -670,10 +685,10 @@ export function BoutScoringPad({
             {/* Clock tools button — shows settings modal on mobile, inline on desktop */}
             <button
               type="button"
-              onClick={() => setShowSettings(true)}
-              className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg border border-neutral-700 bg-neutral-800/90 text-neutral-400 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] md:hidden"
-              title="Clock settings"
-              aria-label="Clock settings"
+              onClick={openClockSettings}
+              className="flex min-h-[40px] min-w-[40px] items-center justify-center rounded-lg border border-neutral-700 bg-neutral-800/90 text-neutral-400 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] md:hidden cursor-pointer"
+              title="Edit bout clock"
+              aria-label="Edit bout clock"
             >
               <span className="material-symbols-outlined text-[18px]">tune</span>
             </button>
@@ -702,10 +717,10 @@ export function BoutScoringPad({
             ))}
             <button
               type="button"
-              onClick={() => setShowSettings(true)}
-              className="flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-neutral-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-              title="Set an exact duration"
-              aria-label="Set an exact duration"
+              onClick={openClockSettings}
+              className="flex min-h-[36px] min-w-[36px] items-center justify-center rounded-lg p-1.5 text-neutral-400 transition-colors hover:bg-neutral-700 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] cursor-pointer"
+              title="Edit bout clock time"
+              aria-label="Edit bout clock time"
             >
               <span className="material-symbols-outlined text-[18px]">tune</span>
             </button>
@@ -833,46 +848,79 @@ export function BoutScoringPad({
         <div className="flex items-center gap-2">
           {/* Tools row — scrollable on mobile */}
           <div className="flex flex-1 items-center gap-1.5 overflow-x-auto scrollbar-none sm:gap-2">
-            {/* Desk swap — icon only on mobile */}
-            <button
-              type="button"
-              onClick={toggleDeskSides}
-              aria-pressed={deskSidesSwapped}
-              className={`flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs ${
-                deskSidesSwapped
-                  ? "border-blue-300 bg-blue-50 text-blue-800"
-                  : "border-[#E1DDCF] bg-white text-[#1B1815]"
-              }`}
-              title="Swap desk button order"
-            >
-              <span className="material-symbols-outlined text-[16px]">touch_app</span>
-              <span className="hidden sm:inline">Desk: {deskSidesSwapped ? "AO ← → AKA" : "AKA ← → AO"}</span>
-            </button>
+            {/* Corners & Display Dropdown Menu */}
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowDisplayMenu(!showDisplayMenu)}
+                aria-haspopup="true"
+                aria-expanded={showDisplayMenu}
+                className="flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-white px-2.5 py-1.5 text-xs font-bold text-[#1B1815] transition-all hover:bg-[#FAF9F5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 cursor-pointer"
+                title="Corner display and layout settings"
+              >
+                <span className="material-symbols-outlined text-[17px] text-[#0E9C7C]">tune</span>
+                <span className="hidden sm:inline">Corners</span>
+                <span className="material-symbols-outlined text-[15px] text-[#8C877C]">
+                  {showDisplayMenu ? "expand_less" : "expand_more"}
+                </span>
+              </button>
 
-            {/* TV swap — icon only on mobile */}
-            <button
-              type="button"
-              onClick={() => void clock.setSwapped(!sidesSwapped)}
-              aria-pressed={sidesSwapped}
-              className={`flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border px-2 py-1.5 text-[10px] font-bold transition-all active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs ${
-                sidesSwapped
-                  ? "border-[#0E9C7C] bg-[#E3F6F0] text-[#0B7C63]"
-                  : "border-[#E1DDCF] bg-white text-[#1B1815]"
-              }`}
-              title="Swap TV scoreboard sides"
-            >
-              <span className="material-symbols-outlined text-[16px]">tv</span>
-              <span className="hidden sm:inline">TV: {sidesSwapped ? "AO ← → AKA" : "AKA ← → AO"}</span>
-            </button>
+              {showDisplayMenu && (
+                <>
+                  <div className="fixed inset-0 z-30" onClick={() => setShowDisplayMenu(false)} />
+                  <div className="absolute bottom-12 left-0 z-40 w-60 rounded-xl border border-[#E1DDCF] bg-white p-2 shadow-2xl animate-in fade-in zoom-in-95">
+                    <p className="px-2 py-1 text-[10px] font-black uppercase tracking-wider text-[#8C877C]">
+                      Corner & Display Controls
+                    </p>
+                    {/* TV corner mirror */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void clock.setSwapped(!sidesSwapped);
+                        setShowDisplayMenu(false);
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg p-2 text-left text-xs font-semibold text-[#1B1815] hover:bg-[#FAF9F5] transition-colors cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-[18px] text-[#0E9C7C]">tv</span>
+                        <span>Arena TV Screen</span>
+                      </span>
+                      <span className="rounded bg-[#FAF9F5] border border-[#E1DDCF] px-1.5 py-0.5 text-[10px] font-black font-data-mono">
+                        {sidesSwapped ? "AO Left" : "AKA Left"}
+                      </span>
+                    </button>
+
+                    {/* Desk buttons flip */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        toggleDeskSides();
+                        setShowDisplayMenu(false);
+                      }}
+                      className="flex w-full items-center justify-between gap-2 rounded-lg p-2 text-left text-xs font-semibold text-[#1B1815] hover:bg-[#FAF9F5] transition-colors cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className="material-symbols-outlined text-[18px] text-[#2563EB]">touch_app</span>
+                        <span>Desk Layout</span>
+                      </span>
+                      <span className="rounded bg-[#FAF9F5] border border-[#E1DDCF] px-1.5 py-0.5 text-[10px] font-black font-data-mono">
+                        {deskSidesSwapped ? "AO Left" : "AKA Left"}
+                      </span>
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
 
             {/* Hantei */}
             <button
               type="button"
               onClick={() => setShowHanteiModal(true)}
-              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border border-[#E1DDCF] bg-white px-2 py-1.5 text-[10px] font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs"
+              className="flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-white px-2.5 py-1.5 text-xs font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 cursor-pointer"
+              title="Hantei (Judges' Decision)"
             >
-              <span className="material-symbols-outlined text-[16px]">how_to_vote</span>
-              <span className="hidden xs:inline">Hantei</span>
+              <span className="material-symbols-outlined text-[17px] text-amber-600">gavel</span>
+              <span>Hantei</span>
             </button>
 
             {/* Undo */}
@@ -880,9 +928,10 @@ export function BoutScoringPad({
               type="button"
               onClick={handleUndo}
               disabled={history.length === 0}
-              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border border-[#E1DDCF] bg-white px-2 py-1.5 text-[10px] font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs"
+              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border border-[#E1DDCF] bg-white px-2 py-1.5 text-xs font-bold text-[#1B1815] transition-colors hover:bg-[#FAF9F5] disabled:cursor-not-allowed disabled:opacity-40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 cursor-pointer"
+              title="Undo last score or warning"
             >
-              <span className="material-symbols-outlined text-[16px]">undo</span>
+              <span className="material-symbols-outlined text-[17px]">undo</span>
               <span className="hidden xs:inline">Undo</span>
             </button>
 
@@ -890,10 +939,11 @@ export function BoutScoringPad({
             <button
               type="button"
               onClick={handleResetAll}
-              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-1.5 text-[10px] font-bold text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs"
+              className="flex min-h-[40px] shrink-0 items-center gap-1 rounded-lg border border-red-200 bg-white px-2 py-1.5 text-xs font-bold text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 cursor-pointer"
+              title="Reset bout score & penalties"
             >
-              <span className="material-symbols-outlined text-[16px]">restart_alt</span>
-              <span className="hidden xs:inline">Reset</span>
+              <span className="material-symbols-outlined text-[17px]">restart_alt</span>
+              <span className="hidden xs:inline">Reset Score</span>
             </button>
           </div>
 
@@ -922,56 +972,41 @@ export function BoutScoringPad({
 
       {/* ── Modals ────────────────────────────────────────────── */}
 
-      {/* Exact duration */}
+      {/* Exact duration / remaining time modal */}
       {showSettings && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-sm rounded-2xl border border-[#E1DDCF] bg-white p-6 shadow-2xl">
-            <h3 className="text-lg font-extrabold text-[#1B1815]">Set the bout clock</h3>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <h3 className="text-lg font-extrabold text-[#1B1815]">Edit Bout Clock</h3>
+              <span className="rounded-md bg-amber-100 px-2 py-0.5 text-[10px] font-black uppercase text-amber-800">
+                Clock Paused
+              </span>
+            </div>
             <p className="mb-4 text-xs text-[#68645A]">
-              This duration is used by the moderator desk and the arena screen together.
+              Adjust the remaining time on the clock or set a new bout duration. Syncs instantly with the arena TV.
             </p>
 
-            {/* Quick presets — visible in modal on mobile */}
-            <div className="mb-4 flex items-center gap-1 rounded-xl border border-[#E1DDCF] bg-[#F5F3EC] p-1 md:hidden">
-              {PRESETS.map(({ sec, label }) => (
-                <button
-                  key={sec}
-                  type="button"
-                  onClick={() => {
-                    setEditMinutes(String(Math.floor(sec / 60)));
-                    setEditSeconds(String(sec % 60).padStart(2, "0"));
-                    setEditMilliseconds("000");
-                    void clock.applyDuration(sec * 1000);
-                  }}
-                  className={`flex-1 min-h-[40px] rounded-lg text-xs font-bold transition-colors ${
-                    clock.clock.durationMs === sec * 1000
-                      ? "bg-[#0E9C7C] text-white"
-                      : "text-[#68645A] hover:text-[#1B1815]"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {/* Fine adjust buttons — visible in modal on mobile */}
-            <div className="mb-4 md:hidden">
+            {/* Quick Presets */}
+            <div className="mb-4">
               <span className="mb-1.5 block text-[10px] font-black uppercase tracking-wider text-[#8C877C]">
-                Fine adjust
+                Duration Presets
               </span>
-              <div className="grid grid-cols-4 gap-1.5">
-                {[
-                  { delta: 1000, label: "+1s" },
-                  { delta: -1000, label: "-1s" },
-                  { delta: 100, label: "+.1" },
-                  { delta: -100, label: "-.1" },
-                ].map(({ delta, label }) => (
+              <div className="flex items-center gap-1 rounded-xl border border-[#E1DDCF] bg-[#F5F3EC] p-1">
+                {PRESETS.map(({ sec, label }) => (
                   <button
-                    key={label}
+                    key={sec}
                     type="button"
-                    onClick={() => void clock.adjust(delta)}
-                    disabled={pending}
-                    className="min-h-[40px] rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] font-data-mono text-xs font-bold text-[#3D3A33] transition-colors hover:bg-[#ECE9DF] disabled:opacity-50"
+                    onClick={() => {
+                      setEditMinutes(String(Math.floor(sec / 60)));
+                      setEditSeconds(String(sec % 60).padStart(2, "0"));
+                      setEditMilliseconds("000");
+                      void clock.applyDuration(sec * 1000);
+                    }}
+                    className={`flex-1 min-h-[38px] rounded-lg text-xs font-bold transition-colors cursor-pointer ${
+                      clock.clock.durationMs === sec * 1000
+                        ? "bg-[#0E9C7C] text-white shadow-sm"
+                        : "text-[#68645A] hover:text-[#1B1815] hover:bg-white"
+                    }`}
                   >
                     {label}
                   </button>
@@ -979,42 +1014,84 @@ export function BoutScoringPad({
               </div>
             </div>
 
-            <div className="mb-5 grid grid-cols-3 gap-3">
-              {[
-                { label: "Minutes", value: editMinutes, set: setEditMinutes, max: 59 },
-                { label: "Seconds", value: editSeconds, set: setEditSeconds, max: 59 },
-                { label: "Millis", value: editMilliseconds, set: setEditMilliseconds, max: 999 },
-              ].map(({ label, value, set, max }) => (
-                <div key={label}>
-                  <label className="mb-1 block text-[10px] font-black uppercase text-[#68645A]">
+            {/* Quick Adjust Buttons */}
+            <div className="mb-4">
+              <span className="mb-1.5 block text-[10px] font-black uppercase tracking-wider text-[#8C877C]">
+                Quick Adjust Remaining Time
+              </span>
+              <div className="grid grid-cols-4 gap-1.5">
+                {[
+                  { delta: 5000, label: "+5s" },
+                  { delta: -5000, label: "-5s" },
+                  { delta: 1000, label: "+1s" },
+                  { delta: -1000, label: "-1s" },
+                ].map(({ delta, label }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={() => {
+                      // Adjust local edit inputs directly as well as applying to clock
+                      void clock.adjust(delta);
+                      const currentTotalMs =
+                        parseInt(editMinutes || "0", 10) * 60000 +
+                        parseInt(editSeconds || "0", 10) * 1000 +
+                        parseInt(editMilliseconds || "0", 10);
+                      const newTotalMs = Math.max(0, currentTotalMs + delta);
+                      setEditMinutes(String(Math.floor(newTotalMs / 60000)));
+                      setEditSeconds(String(Math.floor((newTotalMs % 60000) / 1000)).padStart(2, "0"));
+                      setEditMilliseconds(String(newTotalMs % 1000).padStart(3, "0"));
+                    }}
+                    disabled={pending}
+                    className="min-h-[38px] rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] font-data-mono text-xs font-bold text-[#3D3A33] transition-colors hover:bg-[#ECE9DF] disabled:opacity-50 cursor-pointer"
+                  >
                     {label}
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    max={max}
-                    value={value}
-                    onChange={(e) => set(e.target.value)}
-                    className="w-full rounded-xl border border-[#E1DDCF] px-3 py-2 text-center font-data-mono text-base font-bold text-[#1B1815] focus:border-[#0E9C7C] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-                  />
-                </div>
-              ))}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Manual mm:ss input */}
+            <div className="mb-5">
+              <span className="mb-1.5 block text-[10px] font-black uppercase tracking-wider text-[#8C877C]">
+                Manual Remaining Time
+              </span>
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: "Minutes", value: editMinutes, set: setEditMinutes, max: 59 },
+                  { label: "Seconds", value: editSeconds, set: setEditSeconds, max: 59 },
+                  { label: "Millis", value: editMilliseconds, set: setEditMilliseconds, max: 999 },
+                ].map(({ label, value, set, max }) => (
+                  <div key={label}>
+                    <label className="mb-1 block text-[10px] font-black uppercase text-[#68645A]">
+                      {label}
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      max={max}
+                      value={value}
+                      onChange={(e) => set(e.target.value)}
+                      className="w-full rounded-xl border border-[#E1DDCF] px-3 py-2 text-center font-data-mono text-base font-bold text-[#1B1815] focus:border-[#0E9C7C] focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                    />
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div className="flex items-center justify-end gap-2 border-t border-[#E1DDCF] pt-4">
               <button
                 type="button"
                 onClick={() => setShowSettings(false)}
-                className="min-h-[44px] rounded-xl border border-[#E1DDCF] px-4 py-2 text-xs font-bold text-[#68645A] hover:bg-[#F5F3EC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                className="min-h-[44px] rounded-xl border border-[#E1DDCF] px-4 py-2 text-xs font-bold text-[#68645A] hover:bg-[#F5F3EC] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] cursor-pointer"
               >
                 Cancel
               </button>
               <button
                 type="button"
                 onClick={saveClockSettings}
-                className="min-h-[44px] rounded-xl bg-[#0E9C7C] px-5 py-2 text-xs font-black uppercase text-white hover:bg-[#0B7C63] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
+                className="min-h-[44px] rounded-xl bg-[#0E9C7C] px-5 py-2 text-xs font-black uppercase text-white hover:bg-[#0B7C63] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 cursor-pointer"
               >
-                Save clock
+                Apply Time
               </button>
             </div>
           </div>

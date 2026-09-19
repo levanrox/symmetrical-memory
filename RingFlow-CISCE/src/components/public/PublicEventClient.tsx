@@ -91,7 +91,11 @@ export default function PublicEventClient({
   const [assignments, setAssignments] = useState<CategoryAssignment[]>(initialAssignments);
   const [flashingMatId, setFlashingMatId] = useState<string | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
-  const [viewingBracket, setViewingBracket] = useState<{ categoryId: string; categoryName: string } | null>(null);
+  const [viewingBracket, setViewingBracket] = useState<{
+    categoryId: string;
+    categoryName: string;
+    activeMatchId?: string;
+  } | null>(null);
   const [activeBouts, setActiveBouts] = useState<Record<string, any>>({});
   const [viewingAthleteDraw, setViewingAthleteDraw] = useState<{
     athleteId: string;
@@ -626,28 +630,10 @@ export default function PublicEventClient({
                                 categoryName: displayCategoryName,
                               });
                             }}
-                            title={`Show only ${a.name} in the draw`}
+                            title={`View bracket for ${displayCategoryName} with ${a.name} highlighted`}
                           >
                             <span className="material-symbols-outlined text-[14px] text-[#0E9C7C]">account_tree</span>
-                            <span className="spectator-draws-link">My draw</span>
-                          </button>
-                        )}
-                        {isPublicDrawsEnabled && a.category_id && (
-                          <button
-                            type="button"
-                            className="spectator-pdf-chip"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setIsSearchOpen(false);
-                              setViewingBracket({
-                                categoryId: a.category_id!,
-                                categoryName: displayCategoryName,
-                              });
-                            }}
-                            title="View the whole elimination bracket"
-                          >
-                            <span className="material-symbols-outlined text-[14px] text-[#68645A]">account_tree</span>
-                            <span className="spectator-draws-link">Full draw</span>
+                            <span className="spectator-draws-link font-bold">View Draw</span>
                           </button>
                         )}
                       </div>
@@ -879,10 +865,11 @@ export default function PublicEventClient({
                                   setViewingBracket({
                                     categoryId: activeAssignment.category_id,
                                     categoryName: activeAssignment.categories?.name || "Division",
+                                    activeMatchId: curMatch?.id || activeBouts[ring.id]?.currentMatch?.id || activeBouts[ring.id]?.nextBout?.id,
                                   });
                                 }}
                                 className="flex-1 py-1.5 px-2.5 rounded-lg bg-[#0E9C7C]/10 hover:bg-[#0E9C7C]/20 text-[#0E9C7C] border border-[#0E9C7C]/30 font-bold text-xs flex items-center justify-center gap-1.5 transition cursor-pointer"
-                                title="View interactive category elimination bracket tree"
+                                title="View interactive category elimination bracket tree with live match focus"
                               >
                                 <span className="material-symbols-outlined text-[15px]">account_tree</span>
                                 <span>View Draw</span>
@@ -1004,6 +991,7 @@ export default function PublicEventClient({
         <DrawBracketModal
           categoryId={viewingBracket.categoryId}
           categoryName={viewingBracket.categoryName}
+          activeMatchId={viewingBracket.activeMatchId}
           allowPdf={false}
           isOpen={Boolean(viewingBracket)}
           onClose={() => setViewingBracket(null)}

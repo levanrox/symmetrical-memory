@@ -128,10 +128,15 @@ export function BoutPickerModal({
       return true;
     });
 
-    // Ready to run first, then by bout number — the order a moderator works in.
+    // Active/Live first, then Ready to run, then Waiting/Scheduled, and Finished at the very bottom.
     return matches.sort((a, b) => {
-      const rank = (bout: PickableBout) =>
-        bout.isReady && bout.status !== "LIVE" ? 0 : bout.status === "LIVE" ? 1 : 2;
+      const rank = (bout: PickableBout) => {
+        if (bout.id === activeMatchId) return 0;
+        if (bout.status === "LIVE") return 1;
+        if (bout.isReady && !bout.isFinished) return 2;
+        if (!bout.isFinished) return 3;
+        return 4; // Finished bouts at the bottom
+      };
       if (rank(a) !== rank(b)) return rank(a) - rank(b);
       return a.matchNo - b.matchNo;
     });
@@ -398,75 +403,119 @@ export function BoutPickerModal({
                       type="button"
                       onClick={() => handleSelect(m.id)}
                       onMouseEnter={() => setActiveIndex(index)}
-                      className={`rounded-xl border-2 p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 ${
+                      className={`group relative flex flex-col justify-between rounded-xl p-3.5 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 cursor-pointer ${
                         isCurrent
-                          ? "border-[#0E9C7C] bg-[#E3F6F0]"
+                          ? "border-2 border-[#0E9C7C] bg-emerald-50/60 shadow-md ring-2 ring-[#0E9C7C]/25"
                           : isActive
-                            ? "border-[#0E9C7C]/60 bg-white"
+                            ? "border-2 border-[#0E9C7C]/70 bg-white shadow-md"
                             : m.isFinished
-                              ? "border-[#E1DDCF] bg-[#F5F3EC] text-[#8C877C] hover:border-[#8C877C]"
+                              ? "border border-dashed border-[#DDD9CD] bg-[#F9F8F5] opacity-55 hover:opacity-100 hover:border-[#8C877C] shadow-none"
                               : m.status === "LIVE"
-                                ? "border-amber-300 bg-white hover:border-amber-500"
+                                ? "border-2 border-amber-400 bg-amber-50/40 shadow-sm hover:shadow-md ring-1 ring-amber-400/30"
                                 : m.isReady
-                                  ? "border-blue-300 bg-white hover:border-blue-500"
-                                  : "border-[#E1DDCF] bg-white hover:border-[#8C877C]"
+                                  ? "border-2 border-emerald-500/80 bg-white shadow-xs hover:border-emerald-600 hover:shadow-md ring-1 ring-emerald-500/20"
+                                  : "border border-[#E1DDCF] bg-white opacity-85 hover:opacity-100 hover:border-[#8C877C]"
                       }`}
                     >
-                      <div className="mb-2 flex items-center justify-between gap-2">
-                        <span className="text-[11px] font-black uppercase tracking-wider text-[#1B1815]">
-                          Bout #{m.matchNo}
-                        </span>
-                        <span
-                          className={`rounded px-1.5 py-0.5 text-[10px] font-black uppercase ${
-                            isCurrent
-                              ? "bg-[#0E9C7C] text-white"
+                      {/* Top Row: Bout # and Status Badge */}
+                      <div>
+                        <div className="mb-2.5 flex items-center justify-between gap-2">
+                          <span className={`text-[11px] font-black uppercase tracking-wider ${
+                            m.isFinished ? "text-[#78746A]" : "text-[#1B1815]"
+                          }`}>
+                            Bout #{m.matchNo}
+                          </span>
+                          <span
+                            className={`flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-black uppercase tracking-wide ${
+                              isCurrent
+                                ? "bg-[#0E9C7C] text-white shadow-2xs"
+                                : m.isFinished
+                                  ? "bg-[#ECE9DF] text-[#78746A]"
+                                  : m.status === "LIVE"
+                                    ? "bg-amber-500 text-white animate-pulse"
+                                    : m.isReady
+                                      ? "bg-emerald-600 text-white"
+                                      : "bg-[#F0EEE6] text-[#78746A]"
+                            }`}
+                          >
+                            {isCurrent && <span className="h-1.5 w-1.5 rounded-full bg-white animate-ping" />}
+                            {isCurrent
+                              ? "ON DESK"
                               : m.isFinished
-                                ? "bg-neutral-200 text-neutral-700"
+                                ? "DONE"
                                 : m.status === "LIVE"
-                                  ? "bg-amber-100 text-amber-800"
+                                  ? "LIVE"
                                   : m.isReady
-                                    ? "bg-emerald-100 text-emerald-800"
-                                    : "bg-neutral-100 text-neutral-600"
-                          }`}
-                        >
-                          {isCurrent ? "On desk" : m.isFinished ? "Done" : m.status}
-                        </span>
+                                    ? "READY"
+                                    : "WAITING"}
+                          </span>
+                        </div>
+
+                        {/* Fighters */}
+                        <div className="space-y-1">
+                          {/* AKA */}
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                                m.isFinished ? "bg-red-400/60" : "bg-[#C0392B]"
+                              }`} />
+                              <span className={`truncate text-sm ${
+                                m.isFinished ? "font-semibold text-[#68645A]" : "font-bold text-[#1B1815]"
+                              }`}>
+                                {m.aka?.name || "TBD"}
+                              </span>
+                            </span>
+                            {showScore && (
+                              <span className={`shrink-0 font-data-mono text-base tabular-nums ${
+                                m.isFinished ? "font-bold text-slate-500" : "font-black text-[#C0392B]"
+                              }`}>
+                                {m.akaScore ?? 0}
+                              </span>
+                            )}
+                          </div>
+
+                          {/* AO */}
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="flex min-w-0 items-center gap-1.5">
+                              <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${
+                                m.isFinished ? "bg-blue-400/60" : "bg-[#1D4ED8]"
+                              }`} />
+                              <span className={`truncate text-sm ${
+                                m.isFinished ? "font-semibold text-[#68645A]" : "font-bold text-[#1B1815]"
+                              }`}>
+                                {m.ao?.name || "TBD"}
+                              </span>
+                            </span>
+                            {showScore && (
+                              <span className={`shrink-0 font-data-mono text-base tabular-nums ${
+                                m.isFinished ? "font-bold text-slate-500" : "font-black text-[#1D4ED8]"
+                              }`}>
+                                {m.aoScore ?? 0}
+                              </span>
+                            )}
+                          </div>
+                        </div>
                       </div>
 
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          <span className="h-2 w-2 shrink-0 rounded-full bg-[#C0392B]" />
-                          <span className="truncate text-sm font-bold text-[#1B1815]">
-                            {m.aka?.name || "TBD"}
-                          </span>
+                      {/* Card Footer */}
+                      <div className="mt-3 flex items-center justify-between gap-1 border-t border-[#E1DDCF]/60 pt-2 text-[11px]">
+                        <span className="truncate font-semibold text-[#78746A]">
+                          {m.roundName}
+                          {m.aka?.chestNumber || m.ao?.chestNumber
+                            ? ` · #${m.aka?.chestNumber ?? "—"} vs #${m.ao?.chestNumber ?? "—"}`
+                            : ""}
                         </span>
-                        {showScore && (
-                          <span className="shrink-0 font-data-mono text-base font-black text-[#C0392B] tabular-nums">
-                            {m.akaScore ?? 0}
-                          </span>
-                        )}
-                      </div>
 
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="flex min-w-0 items-center gap-1.5">
-                          <span className="h-2 w-2 shrink-0 rounded-full bg-[#1D4ED8]" />
-                          <span className="truncate text-sm font-bold text-[#1B1815]">
-                            {m.ao?.name || "TBD"}
+                        {isCurrent ? (
+                          <span className="shrink-0 font-black uppercase text-[#0E9C7C] text-[10px]">
+                            Current
                           </span>
-                        </span>
-                        {showScore && (
-                          <span className="shrink-0 font-data-mono text-base font-black text-[#1D4ED8] tabular-nums">
-                            {m.aoScore ?? 0}
+                        ) : m.isReady ? (
+                          <span className="flex shrink-0 items-center gap-0.5 font-black uppercase text-emerald-700 text-[10px] group-hover:translate-x-0.5 transition-transform">
+                            Load <span className="material-symbols-outlined text-[13px]">arrow_forward</span>
                           </span>
-                        )}
+                        ) : null}
                       </div>
-
-                      <p className="mt-1.5 truncate text-[11px] font-semibold text-[#68645A]">
-                        {m.roundName}
-                        {m.aka?.chestNumber || m.ao?.chestNumber
-                          ? ` · #${m.aka?.chestNumber ?? "—"} vs #${m.ao?.chestNumber ?? "—"}`
-                          : ""}
-                      </p>
                     </button>
                   );
                 })}

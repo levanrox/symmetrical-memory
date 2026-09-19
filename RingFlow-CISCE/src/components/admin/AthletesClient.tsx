@@ -55,11 +55,16 @@ export default function AthletesClient({
   const [addForm, setAddForm] = useState({
     name: "",
     chest_number: "",
-    category_id: categories.length > 0 ? categories[0].id : "",
+    category_id: "auto",
     school: "",
     school_code: "",
-    sports_id: ""
+    sports_id: "",
+    sex: "",
+    age: "",
+    weight: "",
+    belt: "",
   });
+  const [isSavingAthlete, setIsSavingAthlete] = useState(false);
 
   const searchParams = useSearchParams();
 
@@ -165,20 +170,27 @@ export default function AthletesClient({
   }, [athletes, searchQuery, filterCategoryId]);
 
   const handleSaveAdd = async () => {
-    if (!addForm.name || !addForm.category_id) return alert("Name and Category are required");
+    if (!addForm.name.trim()) return alert("Athlete name is required");
+    setIsSavingAthlete(true);
     try {
       await addAthlete(tournamentId, addForm);
       setIsAdding(false);
       setAddForm({
         name: "",
         chest_number: "",
-        category_id: categories.length > 0 ? categories[0].id : "",
+        category_id: "auto",
         school: "",
         school_code: "",
-        sports_id: ""
+        sports_id: "",
+        sex: "",
+        age: "",
+        weight: "",
+        belt: "",
       });
     } catch (err) {
-      alert("Failed to add athlete");
+      alert("Failed to add athlete: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsSavingAthlete(false);
     }
   };
 
@@ -472,26 +484,6 @@ export default function AthletesClient({
             </tr>
           </thead>
           <tbody className="font-body-sm text-body-sm divide-y divide-outline-variant">
-            {isAdding && (
-              <tr className="bg-surface-container-low">
-                <td className="px-6 py-2"><input value={addForm.chest_number} onChange={e => setAddForm({...addForm, chest_number: e.target.value})} placeholder="No." className="w-full p-2 border rounded" /></td>
-                <td className="px-6 py-2"><input value={addForm.name} onChange={e => setAddForm({...addForm, name: e.target.value})} placeholder="Athlete Name" className="w-full p-2 border rounded" /></td>
-                <td className="px-6 py-2"><input value={addForm.school} onChange={e => setAddForm({...addForm, school: e.target.value})} placeholder="School" className="w-full p-2 border rounded" /></td>
-                <td className="px-6 py-2"><input value={addForm.school_code} onChange={e => setAddForm({...addForm, school_code: e.target.value})} placeholder="Code" className="w-full p-2 border rounded" /></td>
-                <td className="px-6 py-2"><input value={addForm.sports_id} onChange={e => setAddForm({...addForm, sports_id: e.target.value})} placeholder="Sports ID" className="w-full p-2 border rounded" /></td>
-                <td className="px-6 py-2">
-                  <select value={addForm.category_id} onChange={e => setAddForm({...addForm, category_id: e.target.value})} className="w-full p-2 border rounded bg-[#FAF9F5]">
-                    {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                  </select>
-                </td>
-                <td className="px-6 py-2 text-right">
-                  <div className="flex gap-2 justify-end">
-                    <button onClick={handleSaveAdd} className="px-3 py-1 bg-primary text-white rounded font-label-caps text-[10px]">SAVE</button>
-                    <button onClick={() => setIsAdding(false)} className="px-3 py-1 border rounded font-label-caps text-[10px]">CANCEL</button>
-                  </div>
-                </td>
-              </tr>
-            )}
 
             {filteredAthletes.map((athlete) => (
               <tr key={athlete.id} className="hover:bg-surface-container-low transition-colors">
@@ -628,6 +620,226 @@ export default function AthletesClient({
                 className="px-6 py-2 rounded font-bold bg-secondary text-on-secondary hover:opacity-90 transition-opacity flex items-center gap-2 disabled:opacity-50"
               >
                 {isUploading ? <><span className="w-4 h-4 border-2 border-current border-t-transparent rounded-full animate-spin shrink-0" /> {uploadProgress || "PUSHING..."}</> : "APPROVE & UPLOAD"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* ── Add Athlete Modal ────────────────────────────── */}
+      {isAdding && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-xs animate-in fade-in">
+          <div className="w-full max-w-xl max-h-[90vh] flex flex-col rounded-2xl border border-outline-variant bg-surface-container-lowest shadow-2xl overflow-hidden">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-outline-variant px-6 py-4 bg-surface-container-low">
+              <div className="flex items-center gap-2">
+                <span className="material-symbols-outlined text-[#0E9C7C]">person_add</span>
+                <h3 className="text-base font-bold text-primary">Add New Athlete</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAdding(false)}
+                className="text-outline hover:text-on-surface cursor-pointer p-1"
+              >
+                <span className="material-symbols-outlined text-lg">close</span>
+              </button>
+            </div>
+
+            {/* Modal Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {/* Category Hint Banner */}
+              <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 p-3.5 text-xs text-emerald-900 flex items-start gap-2.5">
+                <span className="material-symbols-outlined text-emerald-700 text-lg shrink-0 mt-0.5">info</span>
+                <div>
+                  <div className="font-bold text-[#0B7C63] mb-0.5">Category Assignment Logic</div>
+                  <p className="text-slate-600 leading-relaxed">
+                    Leave category as <strong>Auto-Assign</strong> to automatically match based on <strong>Gender</strong>, <strong>Age</strong>, and <strong>Belt</strong>. If criteria are missing or unmatched, the athlete will be safely placed in <strong>Uncategorized</strong>.
+                  </p>
+                </div>
+              </div>
+
+              {/* Form Fields Grid */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Full Name */}
+                <div className="sm:col-span-2">
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    Full Name <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="e.g. John Doe"
+                    value={addForm.name}
+                    onChange={(e) => setAddForm({ ...addForm, name: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none"
+                  />
+                </div>
+
+                {/* Chest Number */}
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    Chest / Bib No.
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. 104"
+                    value={addForm.chest_number}
+                    onChange={(e) => setAddForm({ ...addForm, chest_number: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm font-data-mono text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none"
+                  />
+                </div>
+
+                {/* Category Selection */}
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    Target Category
+                  </label>
+                  <select
+                    value={addForm.category_id}
+                    onChange={(e) => setAddForm({ ...addForm, category_id: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none cursor-pointer"
+                  >
+                    <option value="auto">✨ Auto-Assign (by Age / Gender / Belt)</option>
+                    <option value="uncategorized">Uncategorized (Assign Later)</option>
+                    {categories.map((c) => (
+                      <option key={c.id} value={c.id}>
+                        {c.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Gender */}
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    Gender / Sex
+                  </label>
+                  <select
+                    value={addForm.sex}
+                    onChange={(e) => setAddForm({ ...addForm, sex: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none cursor-pointer"
+                  >
+                    <option value="">Not Specified</option>
+                    <option value="Male">Male</option>
+                    <option value="Female">Female</option>
+                  </select>
+                </div>
+
+                {/* Age */}
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    Age
+                  </label>
+                  <input
+                    type="number"
+                    min="4"
+                    max="99"
+                    placeholder="e.g. 14"
+                    value={addForm.age}
+                    onChange={(e) => setAddForm({ ...addForm, age: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm font-data-mono text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none"
+                  />
+                </div>
+
+                {/* Weight */}
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    Weight (kg)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    placeholder="e.g. 48.5"
+                    value={addForm.weight}
+                    onChange={(e) => setAddForm({ ...addForm, weight: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm font-data-mono text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none"
+                  />
+                </div>
+
+                {/* Belt */}
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    Belt / Rank
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Black, Brown, Yellow"
+                    value={addForm.belt}
+                    onChange={(e) => setAddForm({ ...addForm, belt: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none"
+                  />
+                </div>
+
+                {/* School / Club */}
+                <div className="sm:col-span-2">
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    School / Dojo / Club
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. St. Joseph Academy"
+                    value={addForm.school}
+                    onChange={(e) => setAddForm({ ...addForm, school: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none"
+                  />
+                </div>
+
+                {/* School Code */}
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    School Code
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. SJA-01"
+                    value={addForm.school_code}
+                    onChange={(e) => setAddForm({ ...addForm, school_code: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm font-data-mono text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none"
+                  />
+                </div>
+
+                {/* Sports ID */}
+                <div>
+                  <label className="mb-1 block text-xs font-bold text-on-surface">
+                    Sports ID
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="e.g. SP-9982"
+                    value={addForm.sports_id}
+                    onChange={(e) => setAddForm({ ...addForm, sports_id: e.target.value })}
+                    className="w-full rounded-lg border border-outline-variant bg-[#FAF9F5] px-3 py-2 text-sm font-data-mono text-primary focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 outline-none"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex items-center justify-end gap-3 border-t border-outline-variant px-6 py-3.5 bg-surface-container-low">
+              <button
+                type="button"
+                onClick={() => setIsAdding(false)}
+                disabled={isSavingAthlete}
+                className="px-4 py-2 text-xs font-bold text-outline hover:text-on-surface rounded-lg hover:bg-surface-container transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveAdd}
+                disabled={isSavingAthlete || !addForm.name.trim()}
+                className="px-5 py-2 text-xs font-bold text-white bg-[#0E9C7C] hover:bg-[#0B7C63] rounded-lg shadow-sm transition-all disabled:opacity-50 flex items-center gap-2 cursor-pointer"
+              >
+                {isSavingAthlete ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                    Saving...
+                  </>
+                ) : (
+                  <>
+                    <span className="material-symbols-outlined text-base">check</span>
+                    Save Athlete
+                  </>
+                )}
               </button>
             </div>
           </div>

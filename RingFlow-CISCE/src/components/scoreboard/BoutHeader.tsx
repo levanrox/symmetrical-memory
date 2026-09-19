@@ -12,6 +12,8 @@ interface Props {
   chromeVisible: boolean;
   isFullscreen: boolean;
   onToggleFullscreen: () => void;
+  scale: number;
+  onSetScale: (scale: number) => void;
 }
 
 export function BoutHeader({
@@ -24,6 +26,8 @@ export function BoutHeader({
   chromeVisible,
   isFullscreen,
   onToggleFullscreen,
+  scale,
+  onSetScale,
 }: Props) {
   return (
     <header className="flex items-center justify-between gap-4 border-b border-[#2A2622] bg-[#191715] px-[max(1.25rem,env(safe-area-inset-left))] py-[clamp(0.5rem,1.4vmin,1rem)]">
@@ -68,6 +72,20 @@ export function BoutHeader({
           <span className={`h-1.5 w-1.5 rounded-full ${connection === "live" ? "bg-[#0E9C7C]" : "bg-amber-400"}`} />
           {connection === "live" ? "Connected" : "Reconnecting"}
         </span>
+
+        <select
+          value={scale}
+          onChange={(e) => onSetScale(parseFloat(e.target.value))}
+          className={`flex min-h-[44px] cursor-pointer items-center rounded-lg border border-[#2A2622] bg-[#221F1C] px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider text-[#E7E5E4] transition-all hover:border-[#0E9C7C] hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+            isFullscreen ? "opacity-0 group-hover/fullscreen:opacity-100" : "opacity-100"
+          }`}
+          title="Adjust arena display scale"
+        >
+          <option value="0.85">85% (Compact)</option>
+          <option value="1">100% (Standard)</option>
+          <option value="1.15">115% (Large TV)</option>
+          <option value="1.3">130% (Arena Wall)</option>
+        </select>
 
         <button
           type="button"

@@ -82,6 +82,29 @@ function assembleRingActiveBout({
     };
   });
 
+  // Identify fighters who recently competed to ensure rest time
+  const recentFighterIds = new Set<string>();
+  const lastFinishedMatch = enrichedMatches
+    .filter((m) => m.status === "CONFIRMED")
+    .sort((a, b) => (b.matchNo ?? 0) - (a.matchNo ?? 0))[0];
+  if (lastFinishedMatch) {
+    if (lastFinishedMatch.aka?.id) recentFighterIds.add(lastFinishedMatch.aka.id);
+    if (lastFinishedMatch.ao?.id) recentFighterIds.add(lastFinishedMatch.ao.id);
+  }
+
+  // Sort candidate ready bouts:
+  // 1. Neither fighter has just fought (fresh / rested fighters first)
+  // 2. Bout match number order
+  const sortReadyBouts = (bouts: typeof enrichedMatches) => {
+    return [...bouts].sort((a, b) => {
+      const aHasRecent = (a.aka?.id && recentFighterIds.has(a.aka.id)) || (a.ao?.id && recentFighterIds.has(a.ao.id));
+      const bHasRecent = (b.aka?.id && recentFighterIds.has(b.aka.id)) || (b.ao?.id && recentFighterIds.has(b.ao.id));
+      if (!aHasRecent && bHasRecent) return -1;
+      if (aHasRecent && !bHasRecent) return 1;
+      return a.matchNo - b.matchNo;
+    });
+  };
+
   let targetMatch = null;
   if (targetMatchId) {
     targetMatch = enrichedMatches.find((m) => m.id === targetMatchId) || null;
@@ -90,18 +113,25 @@ function assembleRingActiveBout({
     targetMatch = enrichedMatches.find((m) => m.id === ring.currentMatchId) || null;
   }
   if (!targetMatch) {
+    const readyBouts = sortReadyBouts(enrichedMatches.filter((m) => m.isReady));
     targetMatch =
       enrichedMatches.find((m) => m.status === "LIVE") ||
-      enrichedMatches.find((m) => m.isReady) ||
+      readyBouts[0] ||
       enrichedMatches.find((m) => !m.isFinished) ||
       enrichedMatches[0] ||
       null;
   }
 
-  const nextBout =
-    enrichedMatches
-      .filter((m) => m.isReady && m.id !== targetMatch?.id)
-      .sort((a, b) => a.matchNo - b.matchNo)[0] || null;
+  // Add currently active fighters to recent fighters for nextBout consideration
+  if (targetMatch) {
+    if (targetMatch.aka?.id) recentFighterIds.add(targetMatch.aka.id);
+    if (targetMatch.ao?.id) recentFighterIds.add(targetMatch.ao.id);
+  }
+
+  const candidateNextBouts = sortReadyBouts(
+    enrichedMatches.filter((m) => m.isReady && m.id !== targetMatch?.id)
+  );
+  const nextBout = candidateNextBouts[0] || null;
 
   return {
     tournament: tournament || null,

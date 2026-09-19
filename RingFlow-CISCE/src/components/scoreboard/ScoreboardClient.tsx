@@ -41,6 +41,26 @@ export function ScoreboardClient({ ringId, initialData }: Props) {
   const [now, setNow] = useState(() => Date.now());
   const [chromeVisible, setChromeVisible] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [scale, setScale] = useState<number>(1);
+
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("ringflow_tv_scale");
+      if (saved) {
+        const val = parseFloat(saved);
+        if (!isNaN(val) && val >= 0.5 && val <= 2) {
+          setScale(val);
+        }
+      }
+    }
+  }, []);
+
+  const handleSetScale = (newScale: number) => {
+    setScale(newScale);
+    if (typeof window !== "undefined") {
+      localStorage.setItem("ringflow_tv_scale", String(newScale));
+    }
+  };
 
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sentAtRef = useRef(Date.now());
@@ -279,9 +299,14 @@ export function ScoreboardClient({ ringId, initialData }: Props) {
         chromeVisible={chromeVisible}
         isFullscreen={isFullscreen}
         onToggleFullscreen={toggleFullscreen}
+        scale={scale}
+        onSetScale={handleSetScale}
       />
 
-      <main className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
+      <main
+        className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] transition-transform origin-center"
+        style={{ zoom: scale }}
+      >
         <FighterPanel {...left} mirrored={false} />
         <ClockStage
           remainingMs={remainingMs}

@@ -31,6 +31,7 @@ export interface RingClockController {
   error: string | null;
   sidesSwapped: boolean;
   toggle: () => Promise<void>;
+  pause: () => Promise<void>;
   reset: (durationMs?: number) => Promise<void>;
   applyDuration: (durationMs: number) => Promise<void>;
   adjust: (deltaMs: number) => Promise<void>;
@@ -275,6 +276,11 @@ export function useRingClockController(options: {
     error,
     sidesSwapped,
     toggle,
+    pause: async () => {
+      if (clock.status === "running") {
+        await toggle();
+      }
+    },
     reset,
     applyDuration,
     adjust,

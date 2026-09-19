@@ -113,7 +113,7 @@ async function runTests() {
   // 9. Clock Actions
   await test("9. getRingClock retrieves ring timing clock", async () => {
     const clockRes = await getRingClock(RING_ID);
-    if (!clockRes.success) throw new Error(clockRes.error || "Clock failed");
+    if (!clockRes.success || !clockRes.clock) throw new Error(clockRes.error || "Clock failed");
     console.log(`   -> Clock: status=${clockRes.clock.status}, durationMs=${clockRes.clock.durationMs}`);
   });
 
