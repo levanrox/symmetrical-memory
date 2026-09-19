@@ -25,12 +25,14 @@ export async function GET(request: Request) {
 
   const encoder = new TextEncoder();
 
+  let cleanup: (() => void) | null = null;
+
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       let closed = false;
 
       const write = (chunk: string) => {
-        if (closed) return;
+        if (closed || request.signal.aborted) return;
         try {
           controller.enqueue(encoder.encode(chunk));
         } catch {
@@ -44,28 +46,37 @@ export async function GET(request: Request) {
       write(`event: ready\ndata: {}\n\n`);
 
       const unsubscribe = subscribeToLiveEvents((event: LiveEvent) => {
+        if (closed || request.signal.aborted) return;
         if (!eventMatchesScope(event, scope)) return;
         write(`event: change\ndata: ${JSON.stringify(event)}\n\n`);
       });
 
       const heartbeat = setInterval(() => {
+        if (closed || request.signal.aborted) return;
         // A comment keeps proxies and the browser from timing the stream out.
         write(`: ping\n\n`);
       }, HEARTBEAT_MS);
 
-      const cleanup = () => {
+      cleanup = () => {
         if (closed) return;
         closed = true;
         clearInterval(heartbeat);
         unsubscribe();
         try {
-          controller.close();
+          if (!request.signal.aborted) {
+            controller.close();
+          }
         } catch {
           // Already closed by the runtime.
         }
       };
 
-      request.signal.addEventListener("abort", cleanup);
+      request.signal.addEventListener("abort", () => {
+        cleanup?.();
+      });
+    },
+    cancel() {
+      cleanup?.();
     },
   });
 

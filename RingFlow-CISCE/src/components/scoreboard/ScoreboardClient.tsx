@@ -1,7 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createClient } from "@/utils/supabase/client";
+import React, { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { getRingActiveBout } from "@/actions/matches";
 import { useMatchClock, type ClockSyncSample } from "@/hooks/useMatchClock";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
@@ -32,8 +31,6 @@ const STALE_MS = 6000;
  * same server state the moderator desk writes.
  */
 export function ScoreboardClient({ ringId, initialData }: Props) {
-  const supabase = useMemo(() => createClient(), []);
-
   const [data, setData] = useState<any>(initialData);
   const [sync, setSync] = useState<ClockSyncSample | null>(() =>
     initialData?.serverNow
@@ -142,26 +139,6 @@ export function ScoreboardClient({ ringId, initialData }: Props) {
   );
 
   useLiveEvents({ ringId }, handleLiveEvent, { debounceMs: 0 });
-
-  // Instant clock/score state when websockets are available.
-  useEffect(() => {
-    const channel = supabase
-      .channel(`scoreboard_${ringId}`)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "rings", filter: `id=eq.${ringId}` },
-        (payload) => {
-          if (!payload.new) return;
-          setData((prev: any) => (prev ? { ...prev, ring: { ...prev.ring, ...payload.new } } : prev));
-          setLastSyncAt(Date.now());
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [ringId, supabase]);
 
   // Chrome (fullscreen button, status) fades out so the screen stays clean.
   const revealChrome = useCallback(() => {

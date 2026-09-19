@@ -3,8 +3,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { DragDropContext, Droppable, Draggable, DropResult } from "@hello-pangea/dnd";
-import { saveAssignments } from "@/actions/balancing";
-import { createClient } from "@/utils/supabase/client";
+import { saveAssignments, getBalancingAssignments } from "@/actions/balancing";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import StagerStatusIndicator from "@/components/ui/StagerStatusIndicator";
@@ -218,15 +217,7 @@ export default function RingBalancingClient({
     const ringIds = initialRings.map((r) => r.id);
     if (ringIds.length === 0) return;
     try {
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from("category_assignments")
-        .select("*")
-        .in("ring_id", ringIds);
-      if (error) {
-        console.error("[balancing] live refresh failed:", error.message);
-        return;
-      }
+      const data = await getBalancingAssignments(ringIds);
       const map: Record<string, { matches_completed: number; status: string; ring_id: string; queue_order: number; stager_status: string | null; stager_name: string | null }> = {};
       for (const row of data ?? []) {
         map[row.category_id] = {
@@ -247,118 +238,9 @@ export default function RingBalancingClient({
   useLiveEvents({ tournamentId }, refreshAssignments);
 
   useEffect(() => {
-    const supabase = createClient();
-    const ringIds = initialRings.map(r => r.id);
-    if (ringIds.length === 0) return;
-
-    const channel = supabase.channel(`admin_balancing_${tournamentId}`)
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'category_assignments'
-      }, (payload) => {
-        if (payload.eventType === 'UPDATE' || payload.eventType === 'INSERT') {
-          const updated = payload.new as any;
-          if (!updated || !updated.category_id || !ringIds.includes(updated.ring_id)) return;
-          setAssignmentsMap(prev => ({
-              ...prev,
-              [updated.category_id]: {
-                matches_completed: updated.matches_completed || 0,
-                status: updated.status || "pending",
-                ring_id: updated.ring_id,
-                queue_order: updated.queue_order ?? prev[updated.category_id]?.queue_order ?? 0,
-                stager_status: updated.stager_status ?? null,
-                stager_name: updated.stager_name ?? null,
-              }
-            }));
-
-            // Handle real-time category completion: move from active queue to completed history
-            if (updated.status === 'completed' && updated.ring_id) {
-              setRingQueues(prev => {
-                const currentRingQueue = prev[updated.ring_id] || [];
-                const categoryItem = currentRingQueue.find(c => c.id === updated.category_id);
-                if (categoryItem) {
-                  const newRingQueue = currentRingQueue.filter(c => c.id !== updated.category_id);
-
-                  setRingCompletedQueues(compPrev => {
-                    const compQueue = compPrev[updated.ring_id] || [];
-                    if (!compQueue.some(c => c.id === categoryItem.id)) {
-                      return {
-                        ...compPrev,
-                        [updated.ring_id]: [categoryItem, ...compQueue]
-                      };
-                    }
-                    return compPrev;
-                  });
-
-                  return {
-                    ...prev,
-                    [updated.ring_id]: newRingQueue
-                  };
-                }
-                return prev;
-              });
-            }
-
-            // Handle real-time queue status & reorder from moderator/DB
-            if (
-              updated.ring_id &&
-              updated.status !== 'completed'
-            ) {
-              setRingQueues(prev => {
-                const currentQueue = prev[updated.ring_id];
-                if (!currentQueue) return prev;
-
-                let catItem = currentQueue.find(c => c.id === updated.category_id);
-                if (!catItem) {
-                  for (const rId of Object.keys(prev)) {
-                    const found = prev[rId].find(c => c.id === updated.category_id);
-                    if (found) { catItem = found; break; }
-                  }
-                  if (!catItem) {
-                    catItem = unassigned.find(c => c.id === updated.category_id);
-                  }
-                  if (!catItem) {
-                    catItem = initialCategories.find(c => c.id === updated.category_id);
-                  }
-                }
-                if (!catItem) return prev;
-
-                const cleanQueue = currentQueue.filter(c => c.id !== updated.category_id);
-
-                if (updated.status === 'running' || updated.status === 'paused') {
-                  // Running or paused category MUST always stay at top of queue (index 0)
-                  return { ...prev, [updated.ring_id]: [catItem, ...cleanQueue] };
-                } else if (updated.queue_order !== undefined) {
-                  const reQueue = [...cleanQueue];
-                  const insertIdx = Math.min(Math.max(0, updated.queue_order), reQueue.length);
-                  reQueue.splice(insertIdx, 0, catItem);
-                  return { ...prev, [updated.ring_id]: reQueue };
-                }
-                return prev;
-              });
-
-              // Clean from completed queues if it was completed earlier
-              setRingCompletedQueues(compPrev => {
-                let changed = false;
-                const newComp = { ...compPrev };
-                for (const rId of Object.keys(newComp)) {
-                  if (newComp[rId]?.some(c => c.id === updated.category_id)) {
-                    newComp[rId] = newComp[rId].filter(c => c.id !== updated.category_id);
-                    changed = true;
-                  }
-                }
-                return changed ? newComp : compPrev;
-              });
-            }
-          }
-        })
-        .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [tournamentId, initialRings]);
+    const poll = setInterval(refreshAssignments, 15000);
+    return () => clearInterval(poll);
+  }, [refreshAssignments]);
 
   // Initialize state from props (once on mount)
   useEffect(() => {

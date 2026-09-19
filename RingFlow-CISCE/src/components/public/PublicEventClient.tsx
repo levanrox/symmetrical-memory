@@ -1,11 +1,12 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import Link from "next/link";
-import { createClient } from "@/utils/supabase/client";
 import { formatDisplayDateWithWeekday } from "@/lib/utils";
 import { matchesCategorySearch } from "@/lib/searchUtils";
 import { getTournamentActiveBouts } from "@/actions/matches";
+import { searchTournamentAthletes } from "@/actions/athletes";
+import { getAdminDashboardData } from "@/actions/admin";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 import "./public-spectator.css";
@@ -86,7 +87,6 @@ export default function PublicEventClient({
   initialAssignments: CategoryAssignment[];
   categories: any[];
 }) {
-  const supabase = useMemo(() => createClient(), []);
   const [rings, setRings] = useState<Ring[]>(initialRings);
   const [assignments, setAssignments] = useState<CategoryAssignment[]>(initialAssignments);
   const [flashingMatId, setFlashingMatId] = useState<string | null>(null);
@@ -235,61 +235,29 @@ export default function PublicEventClient({
     }, duration);
   };
 
-  // Realtime Subscriptions
-  useEffect(() => {
-    const channel = supabase
-      .channel(`public_dashboard_${tournament.id}`)
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "rings", filter: `tournament_id=eq.${tournament.id}` },
-        (payload) => {
-          if (payload.eventType === "UPDATE") {
-            setRings((prev) => prev.map((r) => (r.id === payload.new.id ? { ...r, ...payload.new } : r)));
-            setSecondsAgo(0);
-            triggerFlash(payload.new.id);
-          } else if (payload.eventType === "INSERT") {
-            setRings((prev) => [...prev, payload.new as Ring].sort((a, b) => a.ring_order - b.ring_order));
-            setSecondsAgo(0);
-          } else if (payload.eventType === "DELETE") {
-            setRings((prev) => prev.filter((r) => r.id !== payload.old.id));
-            setSecondsAgo(0);
-          }
-        }
-      )
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "category_assignments" },
-        (payload) => {
-          if (payload.eventType === "UPDATE") {
-            setAssignments((prev) => {
-              const copy = [...prev];
-              const idx = copy.findIndex((a) => a.id === payload.new.id);
-              if (idx > -1) {
-                copy[idx] = { ...copy[idx], ...payload.new };
-              } else {
-                copy.push(payload.new as CategoryAssignment);
-              }
-              return copy;
-            });
-            setSecondsAgo(0);
-            if (payload.new.ring_id) {
-              triggerFlash(payload.new.ring_id);
-            }
-          } else if (payload.eventType === "INSERT") {
-            setAssignments((prev) => [...prev, payload.new as CategoryAssignment]);
-            setSecondsAgo(0);
-          } else if (payload.eventType === "DELETE") {
-            setAssignments((prev) => prev.filter((a) => a.id !== payload.old.id));
-            setSecondsAgo(0);
-          }
-        }
-      )
-      .subscribe();
+  // Live sync of floor data (rings, assignments, bouts)
+  const syncFloorData = useCallback(async () => {
+    try {
+      const data = await getAdminDashboardData(tournament.id);
+      if (data) {
+        if (data.rings) setRings(data.rings as Ring[]);
+        if (data.assignments) setAssignments(data.assignments as CategoryAssignment[]);
+        setSecondsAgo(0);
+      }
+      const bouts = await getTournamentActiveBouts(tournament.id);
+      if (bouts) setActiveBouts(bouts);
+    } catch (err) {
+      console.error("[public] syncFloorData error:", err);
+    }
+  }, [tournament.id]);
 
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [supabase, tournament.id]);
+  // Realtime Subscriptions via SSE
+  useLiveEvents({ tournamentId: tournament.id }, (event) => {
+    if (event?.ringId) {
+      triggerFlash(event.ringId);
+    }
+    syncFloorData();
+  });
 
   // Athlete & Category Search Query
   useEffect(() => {
@@ -306,92 +274,8 @@ export default function PublicEventClient({
 
     const fetchAthletes = async () => {
       try {
-        // Search terms are passed as filter *values*, never interpolated into an
-        // or=(…) expression: PostgREST treats , . ( ) and spaces as syntax there,
-        // which is what made an ordinary name like "Mary Jane" or "O'Brien"
-        // return an error. The documented wildcard alias is `*` (not `%`), which
-        // also avoids percent-encoding problems.
-        //
-        // Words are searched separately because imported rosters often separate
-        // names with non-breaking spaces: "*joycee*andrea*" matches whatever
-        // sits between the two words.
-        const words = cleanQ.split(/[\s\u00A0\u2000-\u200B]+/).filter(Boolean);
-        const pattern = words.length > 1 ? `*${words.join("*")}*` : `*${cleanQ}*`;
-
-        const searchColumns = "id, name, chest_number, category_id, categories(id, name)";
-
-        // 1. Fetch athletes matching the name and, separately, matching the
-        //    chest number (a text column, so a zero-padded "07" still matches).
-        const [byName, byChest] = await Promise.all([
-          supabase
-            .from("athletes")
-            .select(searchColumns)
-            .eq("tournament_id", tournament.id)
-            .ilike("name", pattern)
-            .limit(20),
-          supabase
-            .from("athletes")
-            .select(searchColumns)
-            .eq("tournament_id", tournament.id)
-            .ilike("chest_number", pattern)
-            .limit(20),
-        ]);
-
-        const nameRes = {
-          data: [...(byName.data ?? []), ...(byChest.data ?? [])],
-          error: byName.error ?? byChest.error ?? null,
-        };
-
-        // 2. Fetch categories matching the query (e.g. u14_30-35kg, 30, 14, age, weight)
-        const matchingCatIds = (categories || [])
-          .filter((c) => matchesCategorySearch(c, q))
-          .map((c) => c.id);
-
-        let catPromise = null;
-        if (matchingCatIds.length > 0) {
-          catPromise = supabase
-            .from("athletes")
-            .select("id, name, chest_number, category_id, categories(id, name)")
-            .eq("tournament_id", tournament.id)
-            .in("category_id", matchingCatIds.slice(0, 40))
-            .limit(40);
-        }
-
-        const catRes = catPromise ? await catPromise : { data: null, error: null };
-
-        // A failed query must never look like "no matches".
-        if (nameRes.error || catRes?.error) {
-          const message = nameRes.error?.message || catRes?.error?.message || "unknown error";
-          console.error("Public search query failed:", message);
-          setSearchError("Search is temporarily unavailable. Please try again in a moment.");
-          setSearchResults([]);
-          return;
-        }
-
-        const combined: AthleteSearchResult[] = [];
-        const seen = new Set<string>();
-
-        // Add direct athlete matches first
-        if (nameRes.data) {
-          for (const item of nameRes.data) {
-            if (!seen.has(item.id)) {
-              seen.add(item.id);
-              combined.push(item as unknown as AthleteSearchResult);
-            }
-          }
-        }
-
-        // Add category athlete matches
-        if (catRes?.data) {
-          for (const item of catRes.data) {
-            if (!seen.has(item.id)) {
-              seen.add(item.id);
-              combined.push(item as unknown as AthleteSearchResult);
-            }
-          }
-        }
-
-        setSearchResults(combined);
+        const athletes = await searchTournamentAthletes(tournament.id, cleanQ);
+        setSearchResults(athletes as AthleteSearchResult[]);
       } catch (err) {
         console.error("Public search error:", err);
         setSearchError("Search is temporarily unavailable. Please try again in a moment.");
@@ -403,14 +287,12 @@ export default function PublicEventClient({
       }
     };
 
-    // Clear the previous rows immediately: showing stale results while a new
-    // query is in flight is how people pick the wrong athlete.
     setSearchResults([]);
     setActiveIndex(-1);
 
     const debounce = setTimeout(fetchAthletes, 200);
     return () => clearTimeout(debounce);
-  }, [searchQuery, tournament.id, categories, supabase]);
+  }, [searchQuery, tournament.id]);
 
   // Outside click listener for search
   useEffect(() => {

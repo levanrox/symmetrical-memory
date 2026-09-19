@@ -2,7 +2,9 @@ import React from "react";
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { validateModeratorSession } from "@/actions/moderator";
-import { createClient } from "@/utils/supabase/server";
+import { db } from "@/db";
+import { rings as ringsTable } from "@/db/schema";
+import { eq } from "drizzle-orm";
 import ModeratorBottomNav from "@/components/moderator/ModeratorBottomNav";
 import ModeratorTopTabs from "@/components/moderator/ModeratorTopTabs";
 import ModeratorProfileMenu from "@/components/moderator/ModeratorProfileMenu";
@@ -29,13 +31,12 @@ export default async function ModeratorRingLayout({
     redirect("/login/mod");
   }
 
-  // Fetch Ring Info
-  const supabase = await createClient();
-  const { data: ring } = await supabase
-    .from("rings")
-    .select("*")
-    .eq("id", ringId)
-    .single();
+  // Fetch Ring Info via direct Drizzle
+  const [ring] = await db
+    .select()
+    .from(ringsTable)
+    .where(eq(ringsTable.id, ringId))
+    .limit(1);
 
   if (!ring) {
     return <div>Ring not found.</div>;

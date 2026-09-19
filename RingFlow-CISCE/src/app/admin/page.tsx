@@ -1,7 +1,9 @@
 import React from "react";
 import Link from "next/link";
 import AdminHeader from "@/components/layout/AdminHeader";
-import { createClient } from "@/utils/supabase/server";
+import { db } from "@/db";
+import { tournaments as tournamentsTable } from "@/db/schema";
+import { eq, desc } from "drizzle-orm";
 import { ensureAdmin } from "@/actions/admin";
 import { formatDisplayDate } from "@/lib/utils";
 
@@ -12,18 +14,17 @@ export default async function EventSelectionPage() {
 
   try {
     adminId = await ensureAdmin();
-    const supabase = await createClient();
-    const { data, error } = await supabase
-      .from("tournaments")
-      .select("*")
-      .eq("admin_id", adminId)
-      .order("created_at", { ascending: false });
+    const rows = await db
+      .select()
+      .from(tournamentsTable)
+      .where(eq(tournamentsTable.adminId, adminId))
+      .orderBy(desc(tournamentsTable.createdAt));
       
-    if (error) {
-      console.error("Error fetching tournaments:", error);
-    } else if (data) {
-      tournaments = data;
-    }
+    tournaments = rows.map((r) => ({
+      ...r,
+      event_date: r.eventDate,
+      admin_id: r.adminId,
+    }));
   } catch (err: any) {
     adminErrorStr = err.message;
   }

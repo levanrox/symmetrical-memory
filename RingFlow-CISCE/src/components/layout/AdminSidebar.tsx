@@ -3,10 +3,10 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useParams, useRouter } from "next/navigation";
-import { createClient } from "@/utils/supabase/client";
 import { RingFlowLogo } from "@/components/ui/ringflow-logo";
 import LogoutConfirmModal from "@/components/ui/LogoutConfirmModal";
 import { logoutAdminAction } from "@/actions/auth";
+import { getSidebarTournamentCounts } from "@/actions/admin";
 
 interface SidebarCounts {
   name: string;
@@ -50,46 +50,16 @@ export default function AdminSidebar({ initialCounts }: { initialCounts?: Sideba
   useEffect(() => {
     if (!id) return;
     let isMounted = true;
-    const supabase = createClient();
 
     const fetchDetails = async () => {
       try {
-        const { data: tourney } = await supabase
-          .from("tournaments")
-          .select("name")
-          .eq("id", id)
-          .maybeSingle();
-
-        const { count: rings, error: ringsError } = await supabase
-          .from("rings")
-          .select("*", { count: "exact", head: true })
-          .eq("tournament_id", id);
-
-        const { count: cats, error: catsError } = await supabase
-          .from("categories")
-          .select("*", { count: "exact", head: true })
-          .eq("tournament_id", id);
-
-        const { count: athletes, error: athletesError } = await supabase
-          .from("athletes")
-          .select("*", { count: "exact", head: true })
-          .eq("tournament_id", id);
-
-        if (isMounted) {
-          // A failed count must not be shown as a real zero: keep the server's
-          // numbers and say so in the console instead.
-          if (ringsError || catsError || athletesError) {
-            console.error(
-              "Sidebar counts could not be refreshed:",
-              ringsError?.message || catsError?.message || athletesError?.message
-            );
-          }
-
+        const counts = await getSidebarTournamentCounts(id);
+        if (isMounted && counts) {
           setTournamentData((prev) => ({
-            name: tourney?.name || prev.name,
-            ringsCount: rings ?? prev.ringsCount,
-            categoriesCount: cats ?? prev.categoriesCount,
-            athletesCount: athletes ?? prev.athletesCount,
+            name: counts.name || prev.name,
+            ringsCount: counts.ringsCount ?? prev.ringsCount,
+            categoriesCount: counts.categoriesCount ?? prev.categoriesCount,
+            athletesCount: counts.athletesCount ?? prev.athletesCount,
           }));
         }
       } catch (err) {

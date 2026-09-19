@@ -7,9 +7,9 @@ import HeaderSearchBar from "@/components/layout/HeaderSearchBar";
 import RingCard from "@/components/admin/RingCard";
 import LiveActivityFeed from "@/components/admin/LiveActivityFeed";
 import ModeratorRequestsWidget from "@/components/admin/ModeratorRequestsWidget";
-import { createClient } from "@/utils/supabase/client";
 import { toggleRingTimer, setAllRingTimers, resetRingTimer } from "@/actions/rings";
 import { getTournamentActiveBouts } from "@/actions/matches";
+import { getAdminDashboardData } from "@/actions/admin";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import OverviewSupportFooter from "@/components/support/OverviewSupportFooter";
@@ -29,81 +29,23 @@ export default function AdminDashboardClient({
   const [assignments, setAssignments] = useState<any[]>(initialAssignments || []);
   const [logs, setLogs] = useState<any[]>(initialLogs || []);
   const [activeAlert, setActiveAlert] = useState<any | null>(null);
-  
-  const supabase = createClient();
+
+  // Fast reconciliation function triggered by Live Events and tab visibility
+  const syncData = useCallback(async () => {
+    try {
+      const data = await getAdminDashboardData(tournament.id);
+      if (data) {
+        if (data.assignments) setAssignments(data.assignments);
+        if (data.logs) setLogs(data.logs);
+        if (data.rings) setRings(data.rings);
+      }
+    } catch (err) {
+      console.error("[dashboard] syncData error:", err);
+    }
+  }, [tournament.id]);
 
   useEffect(() => {
-    // Listen to assignment updates, ring changes, and event logs in realtime
-    const channel = supabase.channel(`admin_dashboard_${tournament.id}`)
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'category_assignments'
-      }, async (payload) => {
-        if (payload.eventType === 'UPDATE') {
-          setAssignments(prev => {
-            const idx = prev.findIndex(a => a.id === payload.new.id);
-            if (idx > -1) {
-              const copy = [...prev];
-              copy[idx] = { 
-                ...copy[idx], 
-                ...payload.new,
-                // Preserve category data if payload does not have joined categories
-                categories: copy[idx].categories || payload.new.categories
-              };
-              return copy;
-            } else if (rings.some(r => r.id === payload.new.ring_id)) {
-              return [...prev, payload.new];
-            }
-            return prev;
-          });
-        } else if (payload.eventType === 'INSERT') {
-          if (!rings.some(r => r.id === payload.new.ring_id)) return;
-          // Fetch joined category data if missing so division name and match count are populated
-          const { data: cat } = await supabase
-            .from("categories")
-            .select("name, expected_matches, athletes_count")
-            .eq("id", payload.new.category_id)
-            .single();
-          setAssignments(prev => {
-            if (prev.some(a => a.id === payload.new.id)) return prev;
-            return [...prev, { ...payload.new, categories: cat }];
-          });
-        } else if (payload.eventType === 'DELETE') {
-          setAssignments(prev => prev.filter(a => a.id !== payload.old.id));
-        }
-      })
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'rings',
-        filter: `tournament_id=eq.${tournament.id}`
-      }, (payload) => {
-        if (payload.eventType === 'UPDATE') {
-          setRings(prev => prev.map(r => r.id === payload.new.id ? { ...r, ...payload.new } : r));
-        } else if (payload.eventType === 'INSERT') {
-          setRings(prev => [...prev, payload.new].sort((a, b) => a.ring_order - b.ring_order));
-        } else if (payload.eventType === 'DELETE') {
-          setRings(prev => prev.filter(r => r.id !== payload.old.id));
-        }
-      })
-      .on('postgres_changes', {
-        event: 'INSERT',
-        schema: 'public',
-        table: 'event_log',
-        filter: `tournament_id=eq.${tournament.id}`
-      }, (payload) => {
-        setLogs(prev => [payload.new, ...prev]);
-        if (payload.new.action === "EMERGENCY_ALERT" || payload.new.action === "REQUEST_ASSISTANCE") {
-          setActiveAlert(payload.new);
-        }
-      })
-      .subscribe();
-
-    // Reconcile every 45s in background instead of hammering DB every 5s
-    const syncInterval = setInterval(syncData, 45000);
-
-    // Also reconcile immediately whenever user switches back to this tab
+    // Reconcile on tab focus
     const handleVisibilityChange = () => {
       if (document.visibilityState === "visible") {
         syncData();
@@ -111,49 +53,14 @@ export default function AdminDashboardClient({
     };
     document.addEventListener("visibilitychange", handleVisibilityChange);
 
+    // Periodic safety-net sync every 60s
+    const syncInterval = setInterval(syncData, 60000);
+
     return () => {
-      supabase.removeChannel(channel);
       clearInterval(syncInterval);
       document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [tournament.id, rings, supabase]);
-
-  // Secondary reconciliation function triggered by Live Events and fallback timer
-  const syncData = useCallback(async () => {
-    const ringIds = rings.map((r) => r.id);
-    if (ringIds.length === 0) return;
-
-    const { data: latestAssignments } = await supabase
-      .from("category_assignments")
-      .select("*, categories(name, expected_matches, athletes_count)")
-      .in("ring_id", ringIds)
-      .order("queue_order", { ascending: true });
-
-    if (latestAssignments && latestAssignments.length > 0) {
-      setAssignments(latestAssignments);
-    }
-
-    const { data: latestLogs } = await supabase
-      .from("event_log")
-      .select("*")
-      .eq("tournament_id", tournament.id)
-      .order("created_at", { ascending: false })
-      .limit(200);
-
-    if (latestLogs && latestLogs.length > 0) {
-      setLogs(latestLogs);
-    }
-
-    const { data: latestRings } = await supabase
-      .from("rings")
-      .select("*")
-      .eq("tournament_id", tournament.id)
-      .order("ring_order", { ascending: true });
-
-    if (latestRings && latestRings.length > 0) {
-      setRings(latestRings);
-    }
-  }, [rings, supabase, tournament.id]);
+  }, [syncData]);
 
   // Calculate totals
   let totalMatches = 0;

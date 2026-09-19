@@ -1,13 +1,25 @@
 import React from "react";
-import AdminHeader from "@/components/layout/AdminHeader";
-import RingCard from "@/components/admin/RingCard";
 import AdminDashboardClient from "@/components/admin/AdminDashboardClient";
-import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import { ensureAdminOwnsTournament } from "@/actions/admin";
 import { getTournamentActiveBouts } from "@/actions/matches";
-import LiveActivityFeed from "@/components/admin/LiveActivityFeed";
-import ModeratorRequestsWidget from "@/components/admin/ModeratorRequestsWidget";
+import { db } from "@/db";
+import {
+  tournaments as tournamentsTable,
+  categories as categoriesTable,
+  rings as ringsTable,
+  categoryAssignments as categoryAssignmentsTable,
+  moderatorRequests as moderatorRequestsTable,
+  eventLog as eventLogTable,
+} from "@/db/schema";
+import { eq, inArray, desc, asc, count } from "drizzle-orm";
+import {
+  serializeTournament,
+  serializeRing,
+  serializeCategoryAssignment,
+  serializeModRequest,
+  serializeEventLog,
+} from "@/lib/serializers";
 
 export default async function AdminDashboard({ params }: { params: Promise<{ id: string }> }) {
   const { id: tournamentId } = await params;
@@ -17,98 +29,80 @@ export default async function AdminDashboard({ params }: { params: Promise<{ id:
     redirect("/admin");
   }
 
-  const supabase = await createClient();
-
   // 1. Fetch Tournament
-  const { data: tournament, error: tournamentError } = await supabase
-    .from("tournaments")
-    .select("*")
-    .eq("id", tournamentId)
-    .single();
+  const [tournamentRow] = await db
+    .select()
+    .from(tournamentsTable)
+    .where(eq(tournamentsTable.id, tournamentId))
+    .limit(1);
 
-  if (tournamentError || !tournament) {
+  if (!tournamentRow) {
     redirect("/admin");
   }
 
-  // 2. Fetch Categories stats
-  const { count: categoryCount, error: categoryCountError } = await supabase
-    .from("categories")
-    .select("*", { count: "exact", head: true })
-    .eq("tournament_id", tournamentId);
-  if (categoryCountError) {
-    console.error("[dashboard] category count failed:", categoryCountError.message);
-  }
+  // 2. Fetch Categories count, Rings, and Logs in parallel via Drizzle
+  const [catCountRes, ringRows, logRows] = await Promise.all([
+    db
+      .select({ value: count() })
+      .from(categoriesTable)
+      .where(eq(categoriesTable.tournamentId, tournamentId)),
+    db
+      .select()
+      .from(ringsTable)
+      .where(eq(ringsTable.tournamentId, tournamentId))
+      .orderBy(asc(ringsTable.ringOrder)),
+    db
+      .select()
+      .from(eventLogTable)
+      .where(eq(eventLogTable.tournamentId, tournamentId))
+      .orderBy(desc(eventLogTable.createdAt))
+      .limit(200),
+  ]);
 
-  // 3. Fetch Rings
-  const { data: rings, error: ringsError } = await supabase
-    .from("rings")
-    .select("*")
-    .eq("tournament_id", tournamentId)
-    .order("ring_order", { ascending: true });
-  if (ringsError) {
-    console.error("[dashboard] rings query failed:", ringsError.message);
-  }
+  const categoryCount = catCountRes[0]?.value ?? 0;
+  const ringIds = ringRows.map((r) => r.id);
 
-  const ringIds = rings?.map(r => r.id) || [];
-
-  // Fetch Category Assignments (including completed). Skipped entirely when the
-  // event has no tatamis, rather than querying with an empty id list.
+  // 3. Category assignments and mod requests
   let assignments: any[] = [];
-  if (ringIds.length > 0) {
-    const { data, error } = await supabase
-      .from("category_assignments")
-      .select("*, categories(name, expected_matches)")
-      .in("ring_id", ringIds)
-      .order("queue_order", { ascending: true });
-
-    if (error) {
-      // Every dashboard counter derives from these rows, so a silent failure
-      // here is what used to render the whole floor as zeros.
-      console.error("[dashboard] category assignments query failed:", error.message);
-    }
-    assignments = data ?? [];
-  }
-
-  // 4. Fetch Moderator Requests
   let modRequests: any[] = [];
+
   if (ringIds.length > 0) {
-    const { data: reqs } = await supabase
-      .from("moderator_requests")
-      .select("*, rings(name)")
-      .in("ring_id", ringIds)
-      .order("created_at", { ascending: false })
-      .limit(20);
-    if (reqs) modRequests = reqs;
+    const [rawAssignments, rawModRequests] = await Promise.all([
+      db
+        .select()
+        .from(categoryAssignmentsTable)
+        .where(inArray(categoryAssignmentsTable.ringId, ringIds))
+        .orderBy(asc(categoryAssignmentsTable.queueOrder)),
+      db
+        .select()
+        .from(moderatorRequestsTable)
+        .where(inArray(moderatorRequestsTable.ringId, ringIds))
+        .orderBy(desc(moderatorRequestsTable.createdAt))
+        .limit(20),
+    ]);
+
+    // Fetch categories for assignments in one batch
+    const categoryIds = Array.from(new Set(rawAssignments.map((a) => a.categoryId).filter(Boolean)));
+    const catMap = new Map<string, any>();
+    if (categoryIds.length > 0) {
+      const cats = await db
+        .select()
+        .from(categoriesTable)
+        .where(inArray(categoriesTable.id, categoryIds));
+      cats.forEach((c) => catMap.set(c.id, c));
+    }
+
+    const ringMap = new Map<string, any>(ringRows.map((r) => [r.id, r]));
+
+    assignments = rawAssignments.map((a) =>
+      serializeCategoryAssignment(a, catMap.get(a.categoryId))
+    );
+    modRequests = rawModRequests.map((mr) =>
+      serializeModRequest(mr, ringMap.get(mr.ringId))
+    );
   }
 
-  // 5. Fetch Event Logs
-  const { data: logs, error: logsError } = await supabase
-    .from("event_log")
-    .select("*")
-    .eq("tournament_id", tournamentId)
-    .order("created_at", { ascending: false })
-    .limit(200);
-  if (logsError) {
-    console.error("[dashboard] event log query failed:", logsError.message);
-  }
-
-  // Prepare assignments data joined with categories for client (batch query, avoiding N+1)
-  const categoryIds = Array.from(new Set(assignments?.map((a) => a.category_id).filter(Boolean) || []));
-  const categoryMap = new Map<string, any>();
-  if (categoryIds.length > 0) {
-    const { data: cats } = await supabase
-      .from("categories")
-      .select("*")
-      .in("id", categoryIds);
-    cats?.forEach((c) => categoryMap.set(c.id, c));
-  }
-
-  const fullAssignments = (assignments || []).map((a) => ({
-    ...a,
-    categories: categoryMap.get(a.category_id) || null,
-  }));
-
-  // Who is fighting whom on each mat, so the floor view names the bout.
+  // Who is fighting whom on each mat, so the floor view names the bout
   const initialActiveBouts = await getTournamentActiveBouts(tournamentId).catch((err) => {
     console.error("[dashboard] live bout lookup failed:", err);
     return {};
@@ -116,12 +110,12 @@ export default async function AdminDashboard({ params }: { params: Promise<{ id:
 
   return (
     <AdminDashboardClient 
-      tournament={tournament}
+      tournament={serializeTournament(tournamentRow)}
       categoryCount={categoryCount}
-      initialRings={rings}
-      initialAssignments={fullAssignments}
+      initialRings={ringRows.map(serializeRing)}
+      initialAssignments={assignments}
       initialModRequests={modRequests}
-      initialLogs={logs}
+      initialLogs={logRows.map(serializeEventLog)}
       initialActiveBouts={initialActiveBouts}
     />
   );

@@ -3,10 +3,11 @@
 import React, { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useParams, useRouter } from "next/navigation";
-import { createClient } from "@/utils/supabase/client";
 import { RingFlowLogo } from "@/components/ui/ringflow-logo";
 import LogoutConfirmModal from "@/components/ui/LogoutConfirmModal";
 import { validateOrganiserSessionAction, logoutOrganiser } from "@/actions/organiser";
+import { getSidebarTournamentCounts } from "@/actions/admin";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 interface SidebarCounts {
   name: string;
@@ -52,181 +53,84 @@ export default function OrganiserSidebar({ initialCounts }: { initialCounts?: Si
     });
   };
 
-  // Active session watcher: kicks out the organiser if an admin revokes their session
-  useEffect(() => {
-    let isCleanedUp = false;
-    const supabase = createClient();
+  const handleRevoked = React.useCallback(() => {
+    document.cookie = "org_token=; path=/; max-age=0; SameSite=Lax";
+    document.cookie = "org_name=; path=/; max-age=0; SameSite=Lax";
+    try {
+      localStorage.removeItem("ringflow_organiser_name");
+    } catch {}
+    router.replace("/");
+  }, [router]);
 
-    const handleRevoked = () => {
-      document.cookie = "org_token=; path=/; max-age=0; SameSite=Lax";
-      document.cookie = "org_name=; path=/; max-age=0; SameSite=Lax";
-      try {
-        localStorage.removeItem("ringflow_organiser_name");
-      } catch {}
-      router.replace("/");
-    };
-
-    let interval: NodeJS.Timeout | null = null;
-    let channel: ReturnType<typeof supabase.channel> | null = null;
-
-    const checkSession = async (token: string) => {
-      try {
-        const res = await validateOrganiserSessionAction(token);
-        if (isCleanedUp) return null;
-
-        if (!res.valid) {
-          // If revoked, expired, or not found, kick out to public home screen immediately
-          if (res.reason === "revoked" || res.reason === "expired" || res.reason === "not_found") {
-            handleRevoked();
-          }
-        } else if (res.organiserName) {
-          setOrganiserName(res.organiserName);
-          localStorage.setItem("ringflow_organiser_name", res.organiserName);
+  const checkSession = React.useCallback(async (token: string) => {
+    try {
+      const res = await validateOrganiserSessionAction(token);
+      if (!res.valid) {
+        if (res.reason === "revoked" || res.reason === "expired" || res.reason === "not_found") {
+          handleRevoked();
         }
-        return res;
-      } catch (err) {
-        // Network or client exception: NEVER wipe session on transient error
-        console.warn("Session check error, keeping session intact:", err);
-        return null;
+      } else if (res.organiserName) {
+        setOrganiserName(res.organiserName);
+        localStorage.setItem("ringflow_organiser_name", res.organiserName);
       }
-    };
+      return res;
+    } catch (err) {
+      console.warn("Session check error, keeping session intact:", err);
+      return null;
+    }
+  }, [handleRevoked]);
 
-    const init = async () => {
-      if (isCleanedUp) return;
-
-      const {
-        data: { user },
-      } = await supabase.auth.getUser();
-
+  // Live real-time SSE listener for session / tournament changes
+  useLiveEvents(
+    { tournamentId: id },
+    React.useCallback(() => {
       const match =
         typeof document !== "undefined"
           ? document.cookie.match(/(?:^|; )org_token=([^;]*)/)
           : null;
       const token = match ? decodeURIComponent(match[1]) : null;
+      if (token) checkSession(token);
+    }, [checkSession])
+  );
 
-      // If not logged in as admin and no org token, kick out to public home screen
-      if (!token && !user) {
-        handleRevoked();
-        return;
-      }
+  // Active session watcher: periodically verifies organiser token validity
+  useEffect(() => {
+    let isCleanedUp = false;
 
-      if (token) {
-        const sessionRes = await checkSession(token);
-        if (isCleanedUp) return;
+    const match =
+      typeof document !== "undefined"
+        ? document.cookie.match(/(?:^|; )org_token=([^;]*)/)
+        : null;
+    const token = match ? decodeURIComponent(match[1]) : null;
 
-        // Subscribe to changes on the organiser request
-        const requestId = sessionRes?.requestId;
-        const channelName = requestId ? `org_req_${requestId}` : `org_session_${token.slice(0, 8)}`;
-        const filter = requestId ? `id=eq.${requestId}` : `session_token=eq.${token}`;
+    if (token) {
+      checkSession(token);
+      const interval = setInterval(() => {
+        if (!isCleanedUp) checkSession(token);
+      }, 15000);
 
-        channel = supabase
-          .channel(channelName)
-          .on(
-            "postgres_changes",
-            {
-              event: "*",
-              schema: "public",
-              table: "organiser_requests",
-              filter,
-            },
-            (payload: { eventType: string; new: Record<string, unknown> }) => {
-              if (payload.eventType === "DELETE" || payload?.new?.status !== "approved") {
-                handleRevoked();
-              }
-            }
-          )
-          .subscribe();
+      return () => {
+        isCleanedUp = true;
+        clearInterval(interval);
+      };
+    }
+  }, [checkSession]);
 
-        interval = setInterval(() => checkSession(token), 15000);
-      } else if (id) {
-        // Fetch the organiser name entered during code entry for this tournament
-        const { data: latestReq } = await supabase
-          .from("organiser_requests")
-          .select("organiser_name")
-          .eq("tournament_id", id)
-          .eq("status", "approved")
-          .order("created_at", { ascending: false })
-          .limit(1)
-          .maybeSingle();
-
-        if (latestReq?.organiser_name) {
-          setOrganiserName(latestReq.organiser_name);
-          localStorage.setItem("ringflow_organiser_name", latestReq.organiser_name);
-        }
-      }
-    };
-
-    init();
-
-    return () => {
-      isCleanedUp = true;
-      if (interval) clearInterval(interval);
-      if (channel) supabase.removeChannel(channel);
-    };
-  }, [router, id]);
-
+  // Fetch tournament counts
   useEffect(() => {
     if (!id) return;
     let isMounted = true;
-    const supabase = createClient();
 
     const fetchDetails = async () => {
       try {
-        const { data: tourney } = await supabase
-          .from("tournaments")
-          .select("name")
-          .eq("id", id)
-          .maybeSingle();
-
-        const { count: rings, error: ringsError } = await supabase
-          .from("rings")
-          .select("*", { count: "exact", head: true })
-          .eq("tournament_id", id);
-
-        const { count: cats, error: catsError } = await supabase
-          .from("categories")
-          .select("*", { count: "exact", head: true })
-          .eq("tournament_id", id);
-
-        const { count: athletes, error: athletesError } = await supabase
-          .from("athletes")
-          .select("*", { count: "exact", head: true })
-          .eq("tournament_id", id);
-
-        if (isMounted) {
-          if (ringsError || catsError || athletesError) {
-            console.error(
-              "Sidebar counts could not be refreshed:",
-              ringsError?.message || catsError?.message || athletesError?.message
-            );
-          }
-
+        const counts = await getSidebarTournamentCounts(id);
+        if (isMounted && counts) {
           setTournamentData((prev) => ({
-            name: tourney?.name || prev.name,
-            ringsCount: rings ?? prev.ringsCount,
-            categoriesCount: cats ?? prev.categoriesCount,
-            athletesCount: athletes ?? prev.athletesCount,
+            name: counts.name || prev.name,
+            ringsCount: counts.ringsCount ?? prev.ringsCount,
+            categoriesCount: counts.categoriesCount ?? prev.categoriesCount,
+            athletesCount: counts.athletesCount ?? prev.athletesCount,
           }));
-
-          // Fetch the organiser name entered during code entry for this tournament
-          const { data: latestOrg } = await supabase
-            .from("organiser_requests")
-            .select("organiser_name")
-            .eq("tournament_id", id)
-            .eq("status", "approved")
-            .order("created_at", { ascending: false })
-            .limit(1)
-            .maybeSingle();
-
-          if (latestOrg?.organiser_name) {
-            setOrganiserName((prev) => {
-              if (!prev || prev === "Organiser" || prev === "Admin" || prev.toLowerCase().includes("suprateek")) {
-                localStorage.setItem("ringflow_organiser_name", latestOrg.organiser_name);
-                return latestOrg.organiser_name;
-              }
-              return prev;
-            });
-          }
         }
       } catch (err) {
         console.error("Failed to load organiser sidebar stats:", err);

@@ -1,9 +1,16 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
-import { createClient } from "@/utils/supabase/client";
 import { useRouter } from "next/navigation";
-import { adjustMatchCount, finishCategory, setRingStatus, returnCategoryToQueue, logRingEvent, logoutModerator } from "@/actions/moderator";
+import {
+  adjustMatchCount,
+  finishCategory,
+  setRingStatus,
+  returnCategoryToQueue,
+  logRingEvent,
+  logoutModerator,
+  getModeratorRingAssignments,
+} from "@/actions/moderator";
 import { getRingActiveBout, setActiveBout } from "@/actions/matches";
 import { getRingClock, setRingSidesSwapped } from "@/actions/clock";
 import { normalizeClock, type RingClock } from "@/lib/matchClock";
@@ -37,7 +44,6 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
   const [activeMode, setActiveMode] = useState<"digital" | "counter">("digital");
   const [showBracketModal, setShowBracketModal] = useState(false);
   const router = useRouter();
-  const supabase = createClient();
 
   const loadBoutData = React.useCallback(async (targetMatchId?: string) => {
     try {
@@ -89,48 +95,16 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
     loadBoutData();
   }, [loadBoutData]);
 
-  useEffect(() => {
-    const channel = supabase.channel(`current_${ringId}`)
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'category_assignments',
-        filter: `ring_id=eq.${ringId}`
-      }, (payload) => {
-        if (payload.eventType === 'UPDATE') {
-          setAssignments(prev => {
-            const idx = prev.findIndex(a => a.id === payload.new.id);
-            if (idx > -1) {
-              const copy = [...prev];
-              copy[idx] = { ...copy[idx], ...payload.new };
-              return copy;
-            }
-            return prev;
-          });
-        }
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [ringId, supabase]);
-
   const refreshAssignments = React.useCallback(async () => {
     try {
-      const { data } = await supabase
-        .from("category_assignments")
-        .select("*, categories(name, expected_matches)")
-        .eq("ring_id", ringId)
-        .in("status", ["pending", "running", "paused", "completed"])
-        .order("queue_order", { ascending: true });
+      const data = await getModeratorRingAssignments(ringId);
       if (data) {
         setAssignments(data);
       }
     } catch (err) {
       console.error("Failed to refresh assignments:", err);
     }
-  }, [ringId, supabase]);
+  }, [ringId]);
 
   // The desk follows every change on this mat immediately — bout swaps from the
   // picker, scores, clock, category reassignments, and the queue behind it.
@@ -139,28 +113,7 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
     refreshAssignments();
   });
 
-  // Keep this desk's clock tied to the server: realtime push where available,
-  // a cheap single-row poll where it is not (local PostgREST has no realtime).
   useEffect(() => {
-    const applyRingRow = (row: any) => {
-      setBoutData((prev: any) =>
-        prev
-          ? { ...prev, clock: normalizeClock(row), serverNow: Date.now() }
-          : prev
-      );
-    };
-
-    const channel = supabase
-      .channel(`mod_ring_${ringId}`)
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "rings", filter: `id=eq.${ringId}` },
-        (payload) => {
-          if (payload.new) applyRingRow(payload.new);
-        }
-      )
-      .subscribe();
-
     // Adaptive cadence: a running clock re-anchors every second, otherwise the
     // desk barely needs to ask, and a hidden tab hardly at all.
     let cancelled = false;
@@ -202,9 +155,8 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
     return () => {
       cancelled = true;
       clearTimeout(pollTimer);
-      supabase.removeChannel(channel);
     };
-  }, [ringId, supabase]);
+  }, [ringId]);
 
   const activeAssignment = assignments.find(a => a.status === 'running' || a.status === 'paused');
 

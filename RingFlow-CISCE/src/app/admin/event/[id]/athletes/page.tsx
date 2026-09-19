@@ -1,9 +1,12 @@
 import React, { Suspense } from "react";
 import AdminHeader from "@/components/layout/AdminHeader";
-import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import { ensureAdminOwnsTournament } from "@/actions/admin";
 import AthletesClient from "@/components/admin/AthletesClient";
+import { db } from "@/db";
+import { tournaments as tournamentsTable, athletes as athletesTable, categories as categoriesTable } from "@/db/schema";
+import { eq, desc, asc } from "drizzle-orm";
+import { serializeAthlete } from "@/lib/serializers";
 
 export default async function AdminAthletes({ params }: { params: Promise<{ id: string }> }) {
   const { id: tournamentId } = await params;
@@ -13,21 +16,31 @@ export default async function AdminAthletes({ params }: { params: Promise<{ id: 
     redirect("/admin");
   }
 
-  const supabase = await createClient();
-
-  const [
-    { data: tournament },
-    { data: athletes },
-    { data: categories }
-  ] = await Promise.all([
-    supabase.from("tournaments").select("name").eq("id", tournamentId).single(),
-    supabase.from("athletes").select("*, categories(name)").eq("tournament_id", tournamentId).order("created_at", { ascending: false }),
-    supabase.from("categories").select("id, name").eq("tournament_id", tournamentId).order("name", { ascending: true })
+  const [tournamentRows, athleteRows, categoryRows] = await Promise.all([
+    db
+      .select({ name: tournamentsTable.name })
+      .from(tournamentsTable)
+      .where(eq(tournamentsTable.id, tournamentId))
+      .limit(1),
+    db
+      .select()
+      .from(athletesTable)
+      .where(eq(athletesTable.tournamentId, tournamentId))
+      .orderBy(desc(athletesTable.createdAt)),
+    db
+      .select({ id: categoriesTable.id, name: categoriesTable.name })
+      .from(categoriesTable)
+      .where(eq(categoriesTable.tournamentId, tournamentId))
+      .orderBy(asc(categoriesTable.name)),
   ]);
 
+  const tournament = tournamentRows[0];
   if (!tournament) redirect("/admin");
 
-  const validAthletes = athletes || [];
+  const catMap = new Map<string, string>(categoryRows.map((c) => [c.id, c.name]));
+  const validAthletes = athleteRows.map((a) =>
+    serializeAthlete(a, a.categoryId ? catMap.get(a.categoryId) : null)
+  );
 
   return (
     <>
@@ -36,7 +49,7 @@ export default async function AdminAthletes({ params }: { params: Promise<{ id: 
         <AthletesClient 
           tournamentId={tournamentId} 
           initialAthletes={validAthletes} 
-          categories={categories || []} 
+          categories={categoryRows} 
         />
       </Suspense>
     </>

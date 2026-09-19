@@ -2,7 +2,8 @@
 
 import React, { useState, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/utils/supabase/client";
+import { getTournamentSearchMeta } from "@/actions/admin";
+import { searchTournamentAthletes } from "@/actions/athletes";
 import { matchesCategorySearch } from "@/lib/searchUtils";
 import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
 import "@/components/public/public-spectator.css";
@@ -69,22 +70,15 @@ export default function HeaderSearchBar({
   // Load tournament categories, rings and assignments once for fast matching & ring status
   useEffect(() => {
     if (!tournamentId) return;
-    const supabase = createClient();
 
     const loadMeta = async () => {
       try {
-        const [catsRes, ringsRes, assignRes] = await Promise.all([
-          supabase.from("categories").select("*").eq("tournament_id", tournamentId),
-          supabase.from("rings").select("*").eq("tournament_id", tournamentId),
-          supabase
-            .from("category_assignments")
-            .select("category_id, ring_id, status")
-            .order("queue_order", { ascending: true }),
-        ]);
-
-        if (catsRes.data) setCachedCategories(catsRes.data);
-        if (ringsRes.data) setCachedRings(ringsRes.data);
-        if (assignRes.data) setCachedAssignments(assignRes.data);
+        const meta = await getTournamentSearchMeta(tournamentId);
+        if (meta) {
+          if (meta.categories) setCachedCategories(meta.categories);
+          if (meta.rings) setCachedRings(meta.rings);
+          if (meta.assignments) setCachedAssignments(meta.assignments);
+        }
       } catch (err) {
         console.error("HeaderSearchBar meta load error:", err);
       }
@@ -154,93 +148,22 @@ export default function HeaderSearchBar({
 
     const runSearch = async () => {
       try {
-        const supabase = createClient();
-
-        // Same rules as the public search: the term is passed as a filter value
-        // (never interpolated into or=(…), where , . ( ) and spaces are syntax),
-        // and `*` is the wildcard alias so nothing needs percent-encoding.
-        // Words are matched separately so a name stored with non-breaking
-        // spaces still matches what someone types with ordinary ones.
-        const words = cleanQ.split(/[\s\u00A0\u2000-\u200B]+/).filter(Boolean);
-        const pattern = words.length > 1 ? `*${words.join("*")}*` : `*${cleanQ}*`;
-        const columns = "id, name, chest_number, category_id, categories(id, name, doc_url)";
-
-        // 1. Direct name match and chest-number match, merged.
-        const directPromise = Promise.all([
-          supabase
-            .from("athletes")
-            .select(columns)
-            .eq("tournament_id", tournamentId)
-            .ilike("name", pattern)
-            .limit(25),
-          supabase
-            .from("athletes")
-            .select(columns)
-            .eq("tournament_id", tournamentId)
-            .ilike("chest_number", pattern)
-            .limit(25),
-        ]).then(([byName, byChest]) => ({
-          data: [...(byName.data ?? []), ...(byChest.data ?? [])],
-          error: byName.error ?? byChest.error ?? null,
-        }));
-
-        // 2. Ensure categories are loaded for category-based matching
-        let categoriesToSearch = cachedCategories;
-        if (!categoriesToSearch || categoriesToSearch.length === 0) {
-          const { data: fetchedCats } = await supabase
-            .from("categories")
-            .select("*")
-            .eq("tournament_id", tournamentId);
-          if (fetchedCats && fetchedCats.length > 0) {
-            categoriesToSearch = fetchedCats;
-            setCachedCategories(fetchedCats);
-          }
-        }
-
-        // 3. Category matches (e.g. u14_30-35kg, 30, 45, etc.)
-        const matchingCategories = (categoriesToSearch || []).filter((cat) =>
+        // 1. Category matches (e.g. u14_30-35kg, 30, 45, etc.) from cached categories
+        const matchingCategories = (cachedCategories || []).filter((cat) =>
           matchesCategorySearch(cat, trimmed)
         );
         setCategoryResults(matchingCategories.slice(0, 8));
 
         const matchingCatIds = matchingCategories.map((cat) => cat.id);
 
-        let catPromise = null;
-        if (matchingCatIds.length > 0) {
-          catPromise = supabase
-            .from("athletes")
-            .select(columns)
-            .eq("tournament_id", tournamentId)
-            .in("category_id", matchingCatIds.slice(0, 50))
-            .limit(30);
-        }
+        // 2. Query athletes matching name, chest number, or matching category IDs
+        const athleteList = await searchTournamentAthletes(
+          tournamentId,
+          cleanQ,
+          matchingCatIds.length > 0 ? matchingCatIds : undefined
+        );
 
-        const [directRes, catRes] = await Promise.all([
-          directPromise,
-          catPromise ? catPromise : Promise.resolve({ data: null, error: null }),
-        ]);
-
-        if (directRes.error) {
-          console.error("Header search failed:", directRes.error.message);
-        }
-
-        const combined: SearchAthlete[] = [];
-        const seen = new Set<string>();
-
-        const appendAthlete = (raw: any) => {
-          if (seen.has(raw.id)) return;
-          seen.add(raw.id);
-          combined.push(raw);
-        };
-
-        if (directRes?.data) {
-          for (const item of directRes.data) appendAthlete(item);
-        }
-        if (catRes?.data) {
-          for (const item of catRes.data) appendAthlete(item);
-        }
-
-        setResults(combined);
+        setResults(athleteList as SearchAthlete[]);
       } catch (err) {
         console.error("Search fetch error:", err);
         setResults([]);

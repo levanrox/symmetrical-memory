@@ -1,9 +1,12 @@
 import React from "react";
 import OrganiserHeader from "@/components/layout/OrganiserHeader";
-import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import CategoriesClient from "@/components/admin/CategoriesClient";
 import { ensureOrganiserHasAccessToTournament } from "@/actions/organiser";
+import { db } from "@/db";
+import { tournaments as tournamentsTable, categories as categoriesTable } from "@/db/schema";
+import { eq, desc } from "drizzle-orm";
+import { serializeCategory } from "@/lib/serializers";
 
 export default async function OrganiserCategoriesPage({ params }: { params: Promise<{ id: string }> }) {
   const { id: tournamentId } = await params;
@@ -14,16 +17,20 @@ export default async function OrganiserCategoriesPage({ params }: { params: Prom
     redirect("/");
   }
 
-  const supabase = await createClient();
-
-  const [
-    { data: tournament },
-    { data: categories }
-  ] = await Promise.all([
-    supabase.from("tournaments").select("name").eq("id", tournamentId).single(),
-    supabase.from("categories").select("*").eq("tournament_id", tournamentId).order("created_at", { ascending: false })
+  const [tournamentRows, catRows] = await Promise.all([
+    db
+      .select({ name: tournamentsTable.name })
+      .from(tournamentsTable)
+      .where(eq(tournamentsTable.id, tournamentId))
+      .limit(1),
+    db
+      .select()
+      .from(categoriesTable)
+      .where(eq(categoriesTable.tournamentId, tournamentId))
+      .orderBy(desc(categoriesTable.createdAt)),
   ]);
 
+  const tournament = tournamentRows[0];
   if (!tournament) redirect("/");
 
   return (
@@ -31,7 +38,7 @@ export default async function OrganiserCategoriesPage({ params }: { params: Prom
       <OrganiserHeader title="Categories" eventName={tournament.name} />
       <CategoriesClient 
         tournamentId={tournamentId} 
-        initialCategories={categories || []} 
+        initialCategories={catRows.map(serializeCategory)} 
         readOnly={true} 
       />
     </>

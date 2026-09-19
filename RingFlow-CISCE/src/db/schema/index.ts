@@ -142,6 +142,12 @@ export const categoryAssignments = pgTable(
     status: text('status').notNull().default('pending'), // 'pending' | 'running' | 'paused' | 'completed'
     matchesCompleted: integer('matches_completed').notNull().default(0),
     completedAt: timestamp('completed_at', { withTimezone: true, mode: 'date' }),
+    startedAt: timestamp('started_at', { withTimezone: true, mode: 'date' }),
+    pausedAt: timestamp('paused_at', { withTimezone: true, mode: 'date' }),
+    totalPausedSeconds: integer('total_paused_seconds').notNull().default(0),
+    stagerStatus: text('stager_status'),
+    stagerName: text('stager_name'),
+    stagerActionAt: timestamp('stager_action_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
       .notNull()
       .defaultNow(),
@@ -428,8 +434,30 @@ export const drawsRelations = relations(draws, ({ one, many }) => ({
   versions: many(drawVersions),
 }));
 
-export const matchesRelations = relations(matches, ({ one, many }) => ({
-  category: one(categories, { fields: [matches.categoryId], references: [categories.id] }),
-  slots: many(matchSlots),
-  events: many(matchEvents),
+export const ringsRelations = relations(rings, ({ one, many }) => ({
+  tournament: one(tournaments, { fields: [rings.tournamentId], references: [tournaments.id] }),
+  assignments: many(categoryAssignments),
+  moderatorRequests: many(moderatorRequests),
 }));
+
+export const categoryAssignmentsRelations = relations(categoryAssignments, ({ one }) => ({
+  ring: one(rings, { fields: [categoryAssignments.ringId], references: [rings.id] }),
+  category: one(categories, { fields: [categoryAssignments.categoryId], references: [categories.id] }),
+}));
+
+export const tournamentCategoryDefinitionsRelations = relations(tournamentCategoryDefinitions, ({ one }) => ({
+  tournament: one(tournaments, { fields: [tournamentCategoryDefinitions.tournamentId], references: [tournaments.id] }),
+}));
+
+export const tournamentRegistrationsRelations = relations(tournamentRegistrations, ({ one, many }) => ({
+  tournament: one(tournaments, { fields: [tournamentRegistrations.tournamentId], references: [tournaments.id] }),
+  athlete: one(athletes, { fields: [tournamentRegistrations.athleteId], references: [athletes.id] }),
+  entries: many(categoryEntries),
+}));
+
+export const eventLogRelations = relations(eventLog, ({ one }) => ({
+  tournament: one(tournaments, { fields: [eventLog.tournamentId], references: [tournaments.id] }),
+  ring: one(rings, { fields: [eventLog.ringId], references: [rings.id] }),
+  category: one(categories, { fields: [eventLog.categoryId], references: [categories.id] }),
+}));
+

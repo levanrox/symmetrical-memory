@@ -2,14 +2,12 @@
 
 import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { createClient } from "@/utils/supabase/client";
 import { checkOrganiserStatus } from "@/actions/organiser";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 export default function OrganiserWaitingRoom() {
   const { id } = useParams() as { id: string };
   const router = useRouter();
-  const supabase = createClient();
   const [status, setStatus] = useState("pending");
 
   const checkAndAdvance = () =>
@@ -24,17 +22,14 @@ export default function OrganiserWaitingRoom() {
           setStatus("rejected");
         }
       })
-      .catch(() => {
-        // The poll below will pick it up.
-      });
+      .catch(() => {});
 
-  // Approval lands here the instant an admin grants it.
+  // Approval lands here instantly via SSE
   useLiveEvents({ requestId: id }, () => {
     void checkAndAdvance();
   });
 
   const handleApproved = (tournamentId: string, token?: string) => {
-    // Also ensure server-side cookie is set via Server Action
     checkOrganiserStatus(id).catch(() => {});
 
     const isHttps = typeof window !== "undefined" && window.location.protocol === "https:";
@@ -46,16 +41,12 @@ export default function OrganiserWaitingRoom() {
     }
 
     setStatus("approved");
-    // A full navigation, not a client-side transition: this is a one-shot
-    // handoff out of the waiting room and must land even if the router's
-    // client transition is interrupted by the approval round trip.
     setTimeout(() => {
       window.location.replace(`/organiser/event/${tournamentId}/dashboard`);
     }, 800);
   };
 
   useEffect(() => {
-    // 1. Initial check
     const checkStatus = () => {
       checkOrganiserStatus(id).then((res) => {
         if (res.organiserName) {
@@ -70,41 +61,12 @@ export default function OrganiserWaitingRoom() {
     };
 
     checkStatus();
-
-    // Polling fallback: the live feed is the fast path, so this only has to
-    // catch a dropped stream eventually.
-    const pollInterval = setInterval(checkStatus, 20000);
-
-    // 2. Realtime listener on organiser_requests
-    const channel = supabase
-      .channel(`org_req_${id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "organiser_requests",
-          filter: `id=eq.${id}`,
-        },
-        (payload) => {
-          const newStatus = payload.new.status;
-          if (payload.new?.organiser_name) {
-            localStorage.setItem("ringflow_organiser_name", payload.new.organiser_name);
-          }
-          if (newStatus === "approved") {
-            handleApproved(payload.new.tournament_id, payload.new.session_token);
-          } else if (newStatus === "rejected") {
-            setStatus("rejected");
-          }
-        }
-      )
-      .subscribe();
+    const pollInterval = setInterval(checkStatus, 5000);
 
     return () => {
       clearInterval(pollInterval);
-      supabase.removeChannel(channel);
     };
-  }, [id, router, supabase]);
+  }, [id]);
 
   return (
     <div className="bg-surface text-on-surface min-h-screen flex flex-col font-body-md overflow-hidden relative">

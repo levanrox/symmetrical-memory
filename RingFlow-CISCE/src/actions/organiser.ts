@@ -3,12 +3,13 @@
 import { createClient } from "@/utils/supabase/server";
 import { db } from "@/db";
 import { organiserRequests, tournaments } from "@/db/schema";
-import { and, eq, isNotNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, isNotNull, ne, or, sql, desc } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { ensureAdminOwnsTournament } from "./admin";
-import { normalizeAccessCode, generateUnambiguousCode } from "@/lib/utils";
+import { normalizeAccessCode, generateUnambiguousCode, isValidUuid } from "@/lib/utils";
 import { secureCookieFlag } from "@/lib/serverCookies";
+import { serializeOrganiserRequest } from "@/lib/serializers";
 
 async function setOrganiserCookie(token: string) {
   const cookieStore = await cookies();
@@ -253,6 +254,19 @@ export async function revokeOrganiserSession(requestId: string, tournamentId: st
   return { success: true };
 }
 
+export async function getOrganiserRequests(tournamentId: string) {
+  await ensureAdminOwnsTournament(tournamentId);
+
+  const rows = await db
+    .select()
+    .from(organiserRequests)
+    .where(eq(organiserRequests.tournamentId, tournamentId))
+    .orderBy(desc(organiserRequests.createdAt))
+    .limit(50);
+
+  return rows.map(serializeOrganiserRequest);
+}
+
 export async function regenerateOrganiserCode(tournamentId: string) {
   await ensureAdminOwnsTournament(tournamentId);
 
@@ -437,9 +451,15 @@ export async function ensureOrganiser() {
  * Returns valid: true on transient database errors to protect user sessions during offline/reconnects.
  */
 export async function validateOrganiserSessionAction(token?: string) {
-  const cookieStore = await cookies();
-  const orgToken = token || cookieStore.get("org_token")?.value;
+  let cookieStore: any = null;
+  try {
+    cookieStore = await cookies();
+  } catch {
+    // Called outside Next.js request context
+  }
+  const orgToken = token || cookieStore?.get("org_token")?.value;
   if (!orgToken) return { valid: false, reason: "missing" };
+  if (!isValidUuid(orgToken)) return { valid: false, reason: "not_found" };
 
   let request;
   try {

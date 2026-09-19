@@ -20,6 +20,103 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { broadcastLiveEvent } from "@/lib/realtime/bus";
 
+function assembleRingActiveBout({
+  ring,
+  tournament,
+  assignment,
+  category,
+  hasDraw,
+  allMatches,
+  allSlots,
+  athleteMap,
+  targetMatchId,
+}: {
+  ring: any;
+  tournament: any;
+  assignment: any;
+  category: any;
+  hasDraw: boolean;
+  allMatches: any[];
+  allSlots: any[];
+  athleteMap: Map<string, any>;
+  targetMatchId?: string | null;
+}) {
+  if (!hasDraw) {
+    return {
+      tournament: tournament || null,
+      ring,
+      assignment,
+      category,
+      hasDraw: false,
+      currentMatch: null,
+      nextBout: null,
+      matches: [],
+      clock: normalizeClock(ring),
+      serverNow: Date.now(),
+    };
+  }
+
+  const enrichedMatches = allMatches.map((m) => {
+    const slots = allSlots.filter((s) => s.matchId === m.id);
+    const akaSlot = slots.find((s) => s.position === 1);
+    const aoSlot = slots.find((s) => s.position === 2);
+    const akaAth = akaSlot?.athleteId ? athleteMap.get(akaSlot.athleteId) : null;
+    const aoAth = aoSlot?.athleteId ? athleteMap.get(aoSlot.athleteId) : null;
+
+    const isReady =
+      Boolean(akaAth && aoAth) &&
+      m.status !== "CONFIRMED" &&
+      m.status !== "BYE";
+    const isFinished = m.status === "CONFIRMED" || m.status === "BYE";
+
+    return {
+      ...m,
+      aka: akaAth
+        ? { id: akaAth.id, name: akaAth.name, school: akaAth.school || akaAth.dojo || "", chestNumber: akaAth.chestNumber }
+        : { id: null, name: "TBD", school: "", chestNumber: null },
+      ao: aoAth
+        ? { id: aoAth.id, name: aoAth.name, school: aoAth.school || aoAth.dojo || "", chestNumber: aoAth.chestNumber }
+        : { id: null, name: "TBD", school: "", chestNumber: null },
+      isReady,
+      isFinished,
+    };
+  });
+
+  let targetMatch = null;
+  if (targetMatchId) {
+    targetMatch = enrichedMatches.find((m) => m.id === targetMatchId) || null;
+  }
+  if (!targetMatch && ring?.currentMatchId) {
+    targetMatch = enrichedMatches.find((m) => m.id === ring.currentMatchId) || null;
+  }
+  if (!targetMatch) {
+    targetMatch =
+      enrichedMatches.find((m) => m.status === "LIVE") ||
+      enrichedMatches.find((m) => m.isReady) ||
+      enrichedMatches.find((m) => !m.isFinished) ||
+      enrichedMatches[0] ||
+      null;
+  }
+
+  const nextBout =
+    enrichedMatches
+      .filter((m) => m.isReady && m.id !== targetMatch?.id)
+      .sort((a, b) => a.matchNo - b.matchNo)[0] || null;
+
+  return {
+    tournament: tournament || null,
+    ring,
+    assignment,
+    category,
+    hasDraw: true,
+    currentMatch: targetMatch,
+    nextBout,
+    matches: enrichedMatches,
+    clock: normalizeClock(ring),
+    serverNow: Date.now(),
+  };
+}
+
 export async function getRingActiveBout(ringId: string, matchId?: string) {
   // 1. Fetch ring info
   const [ring] = await db
@@ -67,18 +164,16 @@ export async function getRingActiveBout(ringId: string, matchId?: string) {
     .where(eq(draws.categoryId, cat.id));
 
   if (!draw) {
-    return {
-      tournament: tournament || null,
+    return assembleRingActiveBout({
       ring,
+      tournament,
       assignment,
       category: cat,
       hasDraw: false,
-      currentMatch: null,
-      nextBout: null,
-      matches: [],
-      clock: normalizeClock(ring),
-      serverNow: Date.now(),
-    };
+      allMatches: [],
+      allSlots: [],
+      athleteMap: new Map(),
+    });
   }
 
   // 4. Fetch all matches for this category
@@ -88,15 +183,18 @@ export async function getRingActiveBout(ringId: string, matchId?: string) {
     .where(eq(matches.categoryId, cat.id))
     .orderBy(matches.matchNo);
 
-  const allSlots = await db
-    .select()
-    .from(matchSlots)
-    .where(
-      inArray(
-        matchSlots.matchId,
-        allMatches.map((m) => m.id)
-      )
-    );
+  const allSlots =
+    allMatches.length > 0
+      ? await db
+          .select()
+          .from(matchSlots)
+          .where(
+            inArray(
+              matchSlots.matchId,
+              allMatches.map((m) => m.id)
+            )
+          )
+      : [];
 
   const relevantAthleteIds = Array.from(
     new Set(allSlots.map((s) => s.athleteId).filter((id): id is string => Boolean(id)))
@@ -112,68 +210,17 @@ export async function getRingActiveBout(ringId: string, matchId?: string) {
 
   const athleteMap = new Map(relevantAthletes.map((a) => [a.id, a]));
 
-  // Build structured matches list for moderator roster & switcher
-  const enrichedMatches = allMatches.map((m) => {
-    const slots = allSlots.filter((s) => s.matchId === m.id);
-    const akaSlot = slots.find((s) => s.position === 1);
-    const aoSlot = slots.find((s) => s.position === 2);
-    const akaAth = akaSlot?.athleteId ? athleteMap.get(akaSlot.athleteId) : null;
-    const aoAth = aoSlot?.athleteId ? athleteMap.get(aoSlot.athleteId) : null;
-
-    const isReady =
-      Boolean(akaAth && aoAth) &&
-      m.status !== "CONFIRMED" &&
-      m.status !== "BYE";
-    const isFinished = m.status === "CONFIRMED" || m.status === "BYE";
-
-    return {
-      ...m,
-      aka: akaAth
-        ? { id: akaAth.id, name: akaAth.name, school: akaAth.school || akaAth.dojo || "", chestNumber: akaAth.chestNumber }
-        : { id: null, name: "TBD", school: "", chestNumber: null },
-      ao: aoAth
-        ? { id: aoAth.id, name: aoAth.name, school: aoAth.school || aoAth.dojo || "", chestNumber: aoAth.chestNumber }
-        : { id: null, name: "TBD", school: "", chestNumber: null },
-      isReady,
-      isFinished,
-    };
-  });
-
-  // 5. Select active match (requested matchId > ring.currentMatchId > LIVE > first READY > first not CONFIRMED)
-  let targetMatch = null;
-  if (matchId) {
-    targetMatch = enrichedMatches.find((m) => m.id === matchId) || null;
-  }
-  if (!targetMatch && ring?.currentMatchId) {
-    targetMatch = enrichedMatches.find((m) => m.id === ring.currentMatchId) || null;
-  }
-  if (!targetMatch) {
-    targetMatch =
-      enrichedMatches.find((m) => m.status === "LIVE") ||
-      enrichedMatches.find((m) => m.isReady) ||
-      enrichedMatches.find((m) => !m.isFinished) ||
-      enrichedMatches[0] ||
-      null;
-  }
-
-  // 6. The bout after the current one, for the arena "next up" strip.
-  const nextBout =
-    enrichedMatches
-      .filter((m) => m.isReady && m.id !== targetMatch?.id)
-      .sort((a, b) => a.matchNo - b.matchNo)[0] || null;
-
-  return {
-    tournament: tournament || null,
+  return assembleRingActiveBout({
     ring,
+    tournament,
     assignment,
     category: cat,
     hasDraw: true,
-    currentMatch: targetMatch,
-    nextBout,
-    matches: enrichedMatches,
-    clock: normalizeClock(ring),
-    serverNow: Date.now(),
-  };
+    allMatches,
+    allSlots,
+    athleteMap,
+    targetMatchId: matchId,
+  });
 }
 
 export async function setActiveBout(ringId: string, matchId: string) {
@@ -468,24 +515,103 @@ export async function confirmBoutResult(
 }
 
 export async function getTournamentActiveBouts(tournamentId: string) {
-  const tournamentRings = await db
-    .select({ id: rings.id })
-    .from(rings)
-    .where(eq(rings.tournamentId, tournamentId))
-    .orderBy(rings.ringOrder);
+  const [tournamentRows, ringRows] = await Promise.all([
+    db
+      .select({
+        id: tournaments.id,
+        name: tournaments.name,
+        showPublicDraws: tournaments.showPublicDraws,
+      })
+      .from(tournaments)
+      .where(eq(tournaments.id, tournamentId))
+      .limit(1),
+    db
+      .select()
+      .from(rings)
+      .where(eq(rings.tournamentId, tournamentId))
+      .orderBy(rings.ringOrder),
+  ]);
 
-  const results = await Promise.all(
-    tournamentRings.map(async (r) => {
-      const bout = await getRingActiveBout(r.id);
-      return { ringId: r.id, bout };
-    })
-  );
+  if (ringRows.length === 0) return {};
+  const tournament = tournamentRows[0] || null;
+  const ringIds = ringRows.map((r) => r.id);
 
-  const boutMap: Record<string, any> = {};
-  for (const item of results) {
-    if (item.bout) {
-      boutMap[item.ringId] = item.bout;
+  // Fetch all active assignments across all rings in a single query
+  const allActiveAssignments = await db
+    .select()
+    .from(categoryAssignments)
+    .where(
+      and(
+        inArray(categoryAssignments.ringId, ringIds),
+        inArray(categoryAssignments.status, ["running", "paused", "pending"])
+      )
+    )
+    .orderBy(categoryAssignments.queueOrder);
+
+  // Map lowest queue_order active assignment per ring
+  const ringAssignmentMap = new Map<string, any>();
+  for (const a of allActiveAssignments) {
+    if (!ringAssignmentMap.has(a.ringId)) {
+      ringAssignmentMap.set(a.ringId, a);
     }
   }
+
+  const categoryIds = Array.from(
+    new Set(Array.from(ringAssignmentMap.values()).map((a) => a.categoryId).filter(Boolean))
+  );
+
+  if (categoryIds.length === 0) return {};
+
+  // Batch query categories, draws, and matches for all active categories in parallel
+  const [catRows, drawRows, matchRows] = await Promise.all([
+    db.select().from(categories).where(inArray(categories.id, categoryIds)),
+    db.select().from(draws).where(inArray(draws.categoryId, categoryIds)),
+    db.select().from(matches).where(inArray(matches.categoryId, categoryIds)).orderBy(matches.matchNo),
+  ]);
+
+  const catMap = new Map(catRows.map((c) => [c.id, c]));
+  const drawSet = new Set(drawRows.map((d) => d.categoryId));
+
+  const matchIds = matchRows.map((m) => m.id);
+  const slotRows =
+    matchIds.length > 0
+      ? await db.select().from(matchSlots).where(inArray(matchSlots.matchId, matchIds))
+      : [];
+
+  const athleteIds = Array.from(
+    new Set(slotRows.map((s) => s.athleteId).filter((id): id is string => Boolean(id)))
+  );
+
+  const athleteRows =
+    athleteIds.length > 0
+      ? await db.select().from(athletes).where(inArray(athletes.id, athleteIds))
+      : [];
+  const athleteMap = new Map(athleteRows.map((a) => [a.id, a]));
+
+  // Assemble bout map in memory (0 ms overhead)
+  const boutMap: Record<string, any> = {};
+  for (const ring of ringRows) {
+    const assignment = ringAssignmentMap.get(ring.id);
+    if (!assignment) continue;
+    const cat = catMap.get(assignment.categoryId);
+    if (!cat) continue;
+
+    const hasDraw = drawSet.has(cat.id);
+    const catMatches = matchRows.filter((m) => m.categoryId === cat.id);
+    const catMatchIds = new Set(catMatches.map((m) => m.id));
+    const catSlots = slotRows.filter((s) => catMatchIds.has(s.matchId));
+
+    boutMap[ring.id] = assembleRingActiveBout({
+      ring,
+      tournament,
+      assignment,
+      category: cat,
+      hasDraw,
+      allMatches: catMatches,
+      allSlots: catSlots,
+      athleteMap,
+    });
+  }
+
   return boutMap;
 }

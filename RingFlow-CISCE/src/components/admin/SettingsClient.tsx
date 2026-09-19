@@ -6,9 +6,9 @@ import {
   approveOrganiserRequest, 
   rejectOrganiserRequest, 
   revokeOrganiserSession, 
-  regenerateOrganiserCode 
+  regenerateOrganiserCode,
+  getOrganiserRequests,
 } from "@/actions/organiser";
-import { createClient } from "@/utils/supabase/client";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { useRouter } from "next/navigation";
 
@@ -44,7 +44,6 @@ interface Props {
 
 export default function SettingsClient({ tournament, initialOrganiserRequests = [] }: Props) {
   const router = useRouter();
-  const supabase = createClient();
 
   const [form, setForm] = useState({
     name: tournament.name,
@@ -69,75 +68,28 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
   const [deletePhase, setDeletePhase] = useState(0);
   const [deleteInput, setDeleteInput] = useState("");
 
-  // Realtime subscription for organiser requests
+  // Sync initial props
   useEffect(() => {
     setRequests(initialOrganiserRequests);
   }, [initialOrganiserRequests]);
 
   const refreshRequests = useCallback(async () => {
     try {
-      const { data, error } = await supabase
-        .from("organiser_requests")
-        .select("*")
-        .eq("tournament_id", tournament.id)
-        .order("created_at", { ascending: false })
-        .limit(20);
-      if (error) {
-        console.error("[settings] live refresh failed:", error.message);
-        return;
-      }
+      const data = await getOrganiserRequests(tournament.id);
       if (data) setRequests(data as OrganiserRequest[]);
     } catch (err) {
       console.error("[settings] live refresh failed:", err);
     }
-  }, [supabase, tournament.id]);
+  }, [tournament.id]);
 
-  // A request arrives over the live feed; the poll below is the safety net.
+  // Live real-time SSE listener
   useLiveEvents({ tournamentId: tournament.id }, refreshRequests);
 
+  // Polling fallback
   useEffect(() => {
-    const channel = supabase
-      .channel(`org_reqs_${tournament.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "organiser_requests",
-          filter: `tournament_id=eq.${tournament.id}`,
-        },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            const newReq = payload.new as OrganiserRequest;
-            setRequests((prev) => [newReq, ...prev.filter((r) => r.id !== newReq.id)]);
-          } else if (payload.eventType === "UPDATE") {
-            const updated = payload.new as OrganiserRequest;
-            setRequests((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
-          } else if (payload.eventType === "DELETE") {
-            setRequests((prev) => prev.filter((r) => r.id !== (payload.old as any).id));
-          }
-        }
-      )
-      .subscribe();
-
-    // Polling fallback: local deployments run PostgREST without websockets, so
-    // an incoming request must still show up for the admin to approve.
-    const poll = setInterval(async () => {
-      const { data } = await supabase
-        .from("organiser_requests")
-        .select("*")
-        .eq("tournament_id", tournament.id)
-        .order("created_at", { ascending: false })
-        .limit(20);
-
-      if (data) setRequests(data as OrganiserRequest[]);
-    }, 15000);
-
-    return () => {
-      clearInterval(poll);
-      supabase.removeChannel(channel);
-    };
-  }, [tournament.id, supabase]);
+    const poll = setInterval(refreshRequests, 15000);
+    return () => clearInterval(poll);
+  }, [refreshRequests]);
 
   const handleCopyCode = () => {
     if (!organiserCode || organiserCode === "------") return;

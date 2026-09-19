@@ -2,7 +2,7 @@
 
 import { db } from "@/db";
 import { athletes, categories } from "@/db/schema";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, or, inArray } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { ensureAdminOwnsTournament } from "./admin";
 
@@ -239,3 +239,54 @@ export async function bulkAddMasterAthletes(
   revalidatePath(`/admin/event/${tournamentId}/athletes`);
   return { success: true, count: toInsert.length };
 }
+
+export async function searchTournamentAthletes(
+  tournamentId: string,
+  query: string,
+  categoryIds?: string[]
+) {
+  const cleanQ = query.trim().replace(/^#/, "");
+  if (!cleanQ && (!categoryIds || categoryIds.length === 0)) return [];
+
+  const words = cleanQ.split(/[\s\u00A0\u2000-\u200B]+/).filter(Boolean);
+  const pattern = words.length > 0 ? `%${words.join("%")}%` : "";
+
+  const whereConditions = [eq(athletes.tournamentId, tournamentId)];
+
+  const textMatches = [];
+  if (pattern) {
+    textMatches.push(sql`LOWER(${athletes.name}) LIKE LOWER(${pattern})`);
+    textMatches.push(sql`LOWER(COALESCE(${athletes.chestNumber}, '')) LIKE LOWER(${pattern})`);
+  }
+  if (categoryIds && categoryIds.length > 0) {
+    textMatches.push(inArray(athletes.categoryId, categoryIds.slice(0, 50)));
+  }
+
+  if (textMatches.length > 0) {
+    whereConditions.push(or(...textMatches)!);
+  }
+
+  const results = await db
+    .select({
+      id: athletes.id,
+      name: athletes.name,
+      chestNumber: athletes.chestNumber,
+      categoryId: athletes.categoryId,
+      categoryName: categories.name,
+      categoryDocUrl: categories.docUrl,
+    })
+    .from(athletes)
+    .leftJoin(categories, eq(athletes.categoryId, categories.id))
+    .where(and(...whereConditions))
+    .limit(30);
+
+  return results.map((r) => ({
+    id: r.id,
+    name: r.name,
+    chest_number: r.chestNumber,
+    chestNumber: r.chestNumber,
+    category_id: r.categoryId,
+    categories: r.categoryId ? { id: r.categoryId, name: r.categoryName, doc_url: r.categoryDocUrl } : null,
+  }));
+}
+

@@ -1,11 +1,26 @@
 "use server";
 
-import { createClient } from "@/utils/supabase/server";
 import { cookies } from "next/headers";
 import { db } from "@/db";
-import { admins, tournaments } from "@/db/schema";
-import { eq } from "drizzle-orm";
+import {
+  admins,
+  tournaments,
+  rings,
+  categoryAssignments,
+  categories,
+  athletes,
+  eventLog,
+  moderatorRequests,
+} from "@/db/schema";
+import { eq, and, inArray, desc, asc, sql } from "drizzle-orm";
 import { startRingTimer, pauseRingTimer, setAllRingTimers } from "./rings";
+import {
+  serializeRing,
+  serializeCategory,
+  serializeCategoryAssignment,
+  serializeEventLog,
+  serializeModRequest,
+} from "@/lib/serializers";
 
 /**
  * Ensures the currently authenticated user exists in the public.admins table.
@@ -33,20 +48,6 @@ export async function ensureAdmin() {
     }
   }
 
-  // Check Supabase Auth as secondary fallback
-  try {
-    const supabase = await createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    if (user) {
-      const admin = await db
-        .select({ id: admins.id })
-        .from(admins)
-        .where(eq(admins.id, user.id))
-        .limit(1);
-      if (admin && admin.length > 0) return admin[0].id;
-    }
-  } catch {}
-
   // In non-production environments, fallback to the seeded director admin
   if (process.env.NODE_ENV !== "production") {
     const defaultAdmin = await db
@@ -60,15 +61,13 @@ export async function ensureAdmin() {
 }
 
 export async function loginAsDevAdmin(adminId?: string) {
-  const supabase = await createClient();
   let targetId: string = adminId || "";
   if (!targetId) {
-    const { data: firstAdmin } = await supabase
-      .from("admins")
-      .select("id")
-      .order("created_at", { ascending: true })
-      .limit(1)
-      .single();
+    const [firstAdmin] = await db
+      .select({ id: admins.id })
+      .from(admins)
+      .orderBy(asc(admins.createdAt))
+      .limit(1);
     targetId = firstAdmin?.id || "00000000-0000-0000-0000-000000000001";
   }
 
@@ -109,112 +108,238 @@ export async function ensureAdminOwnsTournament(tournamentId: string) {
 }
 
 export async function adminSetRingStatus(ringId: string, isPaused: boolean) {
-  const supabase = await createClient();
-
-  const { data: ring } = await supabase
-    .from("rings")
-    .select("id, tournament_id")
-    .eq("id", ringId)
-    .single();
+  const [ring] = await db
+    .select({ id: rings.id, tournamentId: rings.tournamentId })
+    .from(rings)
+    .where(eq(rings.id, ringId))
+    .limit(1);
 
   if (!ring) return;
 
   // Verify admin owns this tournament
-  await ensureAdminOwnsTournament(ring.tournament_id);
+  await ensureAdminOwnsTournament(ring.tournamentId);
 
   // Update ring timer state directly
   if (isPaused) {
-    await pauseRingTimer(ringId, ring.tournament_id);
+    await pauseRingTimer(ringId, ring.tournamentId);
   } else {
-    await startRingTimer(ringId, ring.tournament_id);
+    await startRingTimer(ringId, ring.tournamentId);
   }
 
-  const { data: assignment } = await supabase
-    .from("category_assignments")
-    .select("*")
-    .eq("ring_id", ringId)
-    .in("status", isPaused ? ["running"] : ["paused"])
-    .maybeSingle();
+  const [assignment] = await db
+    .select()
+    .from(categoryAssignments)
+    .where(
+      and(
+        eq(categoryAssignments.ringId, ringId),
+        inArray(categoryAssignments.status, isPaused ? ["running"] : ["paused"])
+      )
+    )
+    .limit(1);
 
   if (!assignment) return;
 
-  const nowIso = new Date().toISOString();
-  const updatePayload: any = { status: isPaused ? "paused" : "running" };
+  await db
+    .update(categoryAssignments)
+    .set({ status: isPaused ? "paused" : "running" })
+    .where(eq(categoryAssignments.id, assignment.id));
 
-  if (isPaused) {
-    updatePayload.paused_at = nowIso;
-  } else {
-    let addSeconds = 0;
-    if (assignment.paused_at) {
-      addSeconds = Math.max(0, Math.floor((Date.now() - new Date(assignment.paused_at).getTime()) / 1000));
-    }
-    updatePayload.paused_at = null;
-    updatePayload.total_paused_seconds = (assignment.total_paused_seconds || 0) + addSeconds;
-  }
-
-  await supabase
-    .from("category_assignments")
-    .update(updatePayload)
-    .eq("id", assignment.id);
-
-  await supabase
-    .from("event_log")
-    .insert({
-      tournament_id: assignment.tournament_id,
-      ring_id: ringId,
-      category_id: assignment.category_id,
-      action: isPaused ? "PAUSE_RING" : "RESUME_RING"
-    });
+  await db.insert(eventLog).values({
+    tournamentId: ring.tournamentId,
+    ringId: ringId,
+    categoryId: assignment.categoryId,
+    action: isPaused ? "PAUSE_RING" : "RESUME_RING",
+  });
 }
 
 export async function adminSetAllRingsStatus(tournamentId: string, isPaused: boolean) {
   await ensureAdminOwnsTournament(tournamentId);
-  const supabase = await createClient();
 
-  const { data: rings } = await supabase
-    .from("rings")
-    .select("id")
-    .eq("tournament_id", tournamentId);
+  const ringList = await db
+    .select({ id: rings.id })
+    .from(rings)
+    .where(eq(rings.tournamentId, tournamentId));
 
-  const ringIds = rings?.map(r => r.id) || [];
+  const ringIds = ringList.map((r) => r.id);
   if (ringIds.length === 0) return;
 
-  const { data: assignments } = await supabase
-    .from("category_assignments")
-    .select("*")
-    .in("ring_id", ringIds)
-    .in("status", isPaused ? ["running"] : ["paused"]);
+  const assignments = await db
+    .select()
+    .from(categoryAssignments)
+    .where(
+      and(
+        inArray(categoryAssignments.ringId, ringIds),
+        inArray(categoryAssignments.status, isPaused ? ["running"] : ["paused"])
+      )
+    );
 
   if (!assignments || assignments.length === 0) return;
 
-  const nowIso = new Date().toISOString();
-  const now = Date.now();
-
   for (const assignment of assignments) {
-    let updatePayload: any = { status: isPaused ? "paused" : "running" };
-    if (isPaused) {
-      updatePayload.paused_at = nowIso;
-    } else {
-      let addSeconds = 0;
-      if (assignment.paused_at) {
-        addSeconds = Math.max(0, Math.floor((now - new Date(assignment.paused_at).getTime()) / 1000));
-      }
-      updatePayload.paused_at = null;
-      updatePayload.total_paused_seconds = (assignment.total_paused_seconds || 0) + addSeconds;
-    }
+    await db
+      .update(categoryAssignments)
+      .set({ status: isPaused ? "paused" : "running" })
+      .where(eq(categoryAssignments.id, assignment.id));
 
-    await supabase
-      .from("category_assignments")
-      .update(updatePayload)
-      .eq("id", assignment.id);
-
-    await supabase
-      .from("event_log")
-      .insert({
-        tournament_id: tournamentId,
-        ring_id: assignment.ring_id,
-        category_id: assignment.category_id,
-        action: isPaused ? "PAUSE_RING" : "RESUME_RING"
-      });
+    await db.insert(eventLog).values({
+      tournamentId: tournamentId,
+      ringId: assignment.ringId,
+      categoryId: assignment.categoryId,
+      action: isPaused ? "PAUSE_RING" : "RESUME_RING",
+    });
   }
 }
+
+/**
+ * High-performance, direct Drizzle query for live dashboard reconciliation.
+ * Replaces client-side PostgREST queries with single fast server query.
+ */
+export async function getAdminDashboardData(tournamentId: string) {
+  const [ringRows, logRows] = await Promise.all([
+    db
+      .select()
+      .from(rings)
+      .where(eq(rings.tournamentId, tournamentId))
+      .orderBy(asc(rings.ringOrder)),
+    db
+      .select()
+      .from(eventLog)
+      .where(eq(eventLog.tournamentId, tournamentId))
+      .orderBy(desc(eventLog.createdAt))
+      .limit(50),
+  ]);
+
+  const ringIds = ringRows.map((r) => r.id);
+  let assignments: any[] = [];
+
+  if (ringIds.length > 0) {
+    const rawAssignments = await db
+      .select()
+      .from(categoryAssignments)
+      .where(inArray(categoryAssignments.ringId, ringIds))
+      .orderBy(asc(categoryAssignments.queueOrder));
+
+    const categoryIds = Array.from(new Set(rawAssignments.map((a) => a.categoryId).filter(Boolean)));
+    const catMap = new Map<string, any>();
+    if (categoryIds.length > 0) {
+      const cats = await db
+        .select()
+        .from(categories)
+        .where(inArray(categories.id, categoryIds));
+      cats.forEach((c) => catMap.set(c.id, c));
+    }
+
+    assignments = rawAssignments.map((a) =>
+      serializeCategoryAssignment(a, catMap.get(a.categoryId))
+    );
+  }
+
+  return {
+    rings: ringRows.map(serializeRing),
+    assignments,
+    logs: logRows.map(serializeEventLog),
+  };
+}
+
+export async function getLiveLogs(tournamentId: string) {
+  const logRows = await db
+    .select()
+    .from(eventLog)
+    .where(eq(eventLog.tournamentId, tournamentId))
+    .orderBy(desc(eventLog.createdAt))
+    .limit(200);
+  return logRows.map(serializeEventLog);
+}
+
+export async function getPendingModeratorRequests(tournamentId: string) {
+  const ringRows = await db
+    .select({ id: rings.id, name: rings.name })
+    .from(rings)
+    .where(eq(rings.tournamentId, tournamentId));
+
+  const ringMap = new Map(ringRows.map((r) => [r.id, r]));
+  const ringIds = ringRows.map((r) => r.id);
+
+  if (ringIds.length === 0) return [];
+
+  const rawReqs = await db
+    .select()
+    .from(moderatorRequests)
+    .where(inArray(moderatorRequests.ringId, ringIds))
+    .orderBy(desc(moderatorRequests.createdAt))
+    .limit(25);
+
+  return rawReqs.map((mr) => serializeModRequest(mr, ringMap.get(mr.ringId)));
+}
+
+export async function getTournamentSearchMeta(tournamentId: string) {
+  const [cats, ringList] = await Promise.all([
+    db.select().from(categories).where(eq(categories.tournamentId, tournamentId)),
+    db.select().from(rings).where(eq(rings.tournamentId, tournamentId)),
+  ]);
+
+  const ringIds = ringList.map((r) => r.id);
+  const assigns =
+    ringIds.length > 0
+      ? await db
+          .select({
+            categoryId: categoryAssignments.categoryId,
+            ringId: categoryAssignments.ringId,
+            status: categoryAssignments.status,
+            queueOrder: categoryAssignments.queueOrder,
+          })
+          .from(categoryAssignments)
+          .where(inArray(categoryAssignments.ringId, ringIds))
+      : [];
+
+  return {
+    categories: cats.map(serializeCategory),
+    rings: ringList.map(serializeRing),
+    assignments: assigns.map((a) => ({
+      category_id: a.categoryId,
+      ring_id: a.ringId,
+      status: a.status,
+      queue_order: a.queueOrder,
+    })),
+  };
+}
+
+export async function getSidebarTournamentCounts(tournamentId: string) {
+  if (!tournamentId) return null;
+
+  try {
+    const [t] = await db
+      .select({ name: tournaments.name })
+      .from(tournaments)
+      .where(eq(tournaments.id, tournamentId))
+      .limit(1);
+
+    if (!t) return null;
+
+    const [[ringsRes], [catsRes], [athRes]] = await Promise.all([
+      db
+        .select({ count: sql<number>`cast(count(*) as integer)` })
+        .from(rings)
+        .where(eq(rings.tournamentId, tournamentId)),
+      db
+        .select({ count: sql<number>`cast(count(*) as integer)` })
+        .from(categories)
+        .where(eq(categories.tournamentId, tournamentId)),
+      db
+        .select({ count: sql<number>`cast(count(*) as integer)` })
+        .from(athletes)
+        .where(eq(athletes.tournamentId, tournamentId)),
+    ]);
+
+    return {
+      name: t.name,
+      ringsCount: ringsRes?.count ?? 0,
+      categoriesCount: catsRes?.count ?? 0,
+      athletesCount: athRes?.count ?? 0,
+    };
+  } catch (err) {
+    console.error("Failed to load sidebar tournament counts:", err);
+    return null;
+  }
+}
+

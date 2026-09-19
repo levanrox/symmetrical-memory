@@ -1,33 +1,43 @@
 import React from "react";
-import { createClient } from "@/utils/supabase/server";
 import { notFound } from "next/navigation";
 import PublicEventClient from "@/components/public/PublicEventClient";
+import { db } from "@/db";
+import {
+  tournaments as tournamentsTable,
+  rings as ringsTable,
+  categories as categoriesTable,
+  categoryAssignments as categoryAssignmentsTable,
+} from "@/db/schema";
+import { eq, inArray, asc } from "drizzle-orm";
+import {
+  serializeTournament,
+  serializeRing,
+  serializeCategory,
+  serializeCategoryAssignment,
+} from "@/lib/serializers";
 
 export default async function PublicEventPage({ params }: { params: Promise<{ id: string }> }) {
   const { id: tournamentId } = await params;
-  const supabase = await createClient();
 
-  const { data: rings } = await supabase
-    .from("rings")
-    .select("*")
-    .eq("tournament_id", tournamentId)
-    .order("ring_order", { ascending: true });
-
-  const ringIds = rings?.map(r => r.id) || [];
-
-  const [
-    { data: tournament },
-    { data: assignments },
-    { data: categories }
-  ] = await Promise.all([
-    supabase.from("tournaments").select("*").eq("id", tournamentId).single(),
-    supabase.from("category_assignments").select(`
-      *,
-      categories(name, athletes_count, expected_matches)
-    `).in("ring_id", ringIds).order("queue_order", { ascending: true }),
-    supabase.from("categories").select("*").eq("tournament_id", tournamentId)
+  // 1. Fetch tournament, rings, and categories in parallel
+  const [tournamentRows, ringRows, catRows] = await Promise.all([
+    db
+      .select()
+      .from(tournamentsTable)
+      .where(eq(tournamentsTable.id, tournamentId))
+      .limit(1),
+    db
+      .select()
+      .from(ringsTable)
+      .where(eq(ringsTable.tournamentId, tournamentId))
+      .orderBy(asc(ringsTable.ringOrder)),
+    db
+      .select()
+      .from(categoriesTable)
+      .where(eq(categoriesTable.tournamentId, tournamentId)),
   ]);
 
+  const tournament = tournamentRows[0];
   if (!tournament) return notFound();
 
   if (tournament.status === "draft") {
@@ -50,12 +60,28 @@ export default async function PublicEventPage({ params }: { params: Promise<{ id
     );
   }
 
+  const ringIds = ringRows.map((r) => r.id);
+  let assignments: any[] = [];
+
+  if (ringIds.length > 0) {
+    const rawAssignments = await db
+      .select()
+      .from(categoryAssignmentsTable)
+      .where(inArray(categoryAssignmentsTable.ringId, ringIds))
+      .orderBy(asc(categoryAssignmentsTable.queueOrder));
+
+    const catMap = new Map<string, any>(catRows.map((c) => [c.id, c]));
+    assignments = rawAssignments.map((a) =>
+      serializeCategoryAssignment(a, catMap.get(a.categoryId))
+    );
+  }
+
   return (
     <PublicEventClient 
-      tournament={tournament} 
-      initialRings={rings || []} 
-      initialAssignments={assignments || []} 
-      categories={categories || []}
+      tournament={serializeTournament(tournament)} 
+      initialRings={ringRows.map(serializeRing)} 
+      initialAssignments={assignments} 
+      categories={catRows.map(serializeCategory)}
     />
   );
 }

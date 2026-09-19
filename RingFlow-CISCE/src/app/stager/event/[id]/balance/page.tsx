@@ -1,12 +1,18 @@
 import React from "react";
 import { redirect } from "next/navigation";
-import { createClient } from "@/utils/supabase/server";
 import { ensureStagerHasAccessToTournament } from "@/actions/stager";
 import StagerBalancingClient from "./StagerBalancingClient";
+import { db } from "@/db";
+import {
+  tournaments as tournamentsTable,
+  categories as categoriesTable,
+  rings as ringsTable,
+  categoryAssignments as categoryAssignmentsTable,
+  eventLog as eventLogTable,
+} from "@/db/schema";
+import { eq, inArray, desc, asc, and } from "drizzle-orm";
+import { serializeRing, serializeCategory, serializeCategoryAssignment } from "@/lib/serializers";
 
-// Cache this page for 10s on Vercel's CDN / edge.
-// The client-side Realtime subscription delivers live updates after hydration,
-// so stagers always see current data — this just speeds up the initial server render.
 export const revalidate = 10;
 
 export default async function StagerBalancePage({
@@ -23,69 +29,60 @@ export default async function StagerBalancePage({
     redirect("/login/stager");
   }
 
-  const supabase = await createClient();
-
-  const [
-    { data: tournament, error: tournamentError },
-    catRes,
-    { data: rings },
-  ] = await Promise.all([
-    supabase
-      .from("tournaments")
-      .select("*")
-      .eq("id", tournamentId)
-      .single(),
-    supabase
-      .from("categories")
-      .select("id, name, age_bracket, weight_class, athletes_count, expected_matches, belt, age_min, age_max, sex, day, doc_url")
-      .eq("tournament_id", tournamentId)
-      .order("created_at", { ascending: false }),
-    supabase
-      .from("rings")
-      .select("*")
-      .eq("tournament_id", tournamentId)
-      .order("ring_order", { ascending: true }),
+  const [tournamentRows, catRows, ringRows] = await Promise.all([
+    db
+      .select()
+      .from(tournamentsTable)
+      .where(eq(tournamentsTable.id, tournamentId))
+      .limit(1),
+    db
+      .select()
+      .from(categoriesTable)
+      .where(eq(categoriesTable.tournamentId, tournamentId))
+      .orderBy(desc(categoriesTable.createdAt)),
+    db
+      .select()
+      .from(ringsTable)
+      .where(eq(ringsTable.tournamentId, tournamentId))
+      .orderBy(asc(ringsTable.ringOrder)),
   ]);
 
-  let categories = catRes.data;
-  if (catRes.error || !categories) {
-    const { data: catFallback } = await supabase
-      .from("categories")
-      .select("id, name, age_bracket, weight_class, athletes_count, expected_matches, belt, age_min, age_max, sex, day")
-      .eq("tournament_id", tournamentId)
-      .order("created_at", { ascending: false });
-    categories = (catFallback || []).map((c: any) => ({ ...c, doc_url: null }));
-  }
-
-  if (tournamentError || !tournament) {
+  const tournament = tournamentRows[0];
+  if (!tournament) {
     redirect("/login/stager");
   }
 
-  const ringIds = rings?.map((r) => r.id) || [];
+  const ringIds = ringRows.map((r) => r.id);
   let assignments: any[] = [];
-  let completedTimes: Record<string, string> = {};
+  const completedTimes: Record<string, string> = {};
 
   if (ringIds.length > 0) {
-    const { data: assignmentData } = await supabase
-      .from("category_assignments")
-      .select("*")
-      .in("ring_id", ringIds);
+    const [rawAssignments, finishLogs] = await Promise.all([
+      db
+        .select()
+        .from(categoryAssignmentsTable)
+        .where(inArray(categoryAssignmentsTable.ringId, ringIds)),
+      db
+        .select({
+          categoryId: eventLogTable.categoryId,
+          createdAt: eventLogTable.createdAt,
+        })
+        .from(eventLogTable)
+        .where(
+          and(
+            eq(eventLogTable.action, "FINISH_CATEGORY"),
+            inArray(eventLogTable.ringId, ringIds)
+          )
+        ),
+    ]);
 
-    if (assignmentData) assignments = assignmentData;
+    assignments = rawAssignments.map(serializeCategoryAssignment);
 
-    const { data: eventLogData } = await supabase
-      .from("event_log")
-      .select("category_id, created_at")
-      .eq("action", "FINISH_CATEGORY")
-      .in("ring_id", ringIds);
-
-    if (eventLogData) {
-      eventLogData.forEach((log) => {
-        if (log.category_id) {
-          completedTimes[log.category_id] = log.created_at;
-        }
-      });
-    }
+    finishLogs.forEach((log) => {
+      if (log.categoryId && log.createdAt) {
+        completedTimes[log.categoryId] = new Date(log.createdAt).toISOString();
+      }
+    });
   }
 
   return (
@@ -93,8 +90,8 @@ export default async function StagerBalancePage({
       tournamentId={tournamentId}
       tournamentName={tournament.name}
       stagerName={stagerInfo.name || "Stager"}
-      initialCategories={categories || []}
-      initialRings={rings || []}
+      initialCategories={catRows.map(serializeCategory)}
+      initialRings={ringRows.map(serializeRing)}
       initialAssignments={assignments}
       completedTimes={completedTimes}
     />

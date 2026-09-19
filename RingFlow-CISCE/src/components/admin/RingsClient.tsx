@@ -10,8 +10,11 @@ import {
   revokeStagerSession,
   generateStagerCodes,
   removeStagerCode,
+  getStagerRequests,
+  getStagerCodes,
 } from "@/actions/stager";
-import { createClient } from "@/utils/supabase/client";
+import { getPendingModeratorRequests } from "@/actions/admin";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { normalizeAccessCode } from "@/lib/utils";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -101,79 +104,28 @@ export default function RingsClient({
     }
   }, [initialStagerCodes]);
 
-  // ── Realtime subscriptions ─────────────────────────────────────────────────
-  useEffect(() => {
-    const supabase = createClient();
-
-    // Moderator requests (scoped to rings)
-    const modChannel = supabase
-      .channel(`rings_mod_reqs_${tournamentId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "moderator_requests" }, (payload) => {
-        if (payload.eventType === "INSERT") {
-          const req = payload.new as ModRequest;
-          setModRequests((prev) => [req, ...prev.filter((r) => r.id !== req.id)]);
-        } else if (payload.eventType === "UPDATE") {
-          const req = payload.new as ModRequest;
-          setModRequests((prev) => prev.map((r) => (r.id === req.id ? req : r)));
-        }
-      })
-      .subscribe();
-
-    // Stager requests (tournament-scoped)
-    const stagerChannel = supabase
-      .channel(`rings_stager_reqs_${tournamentId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "stager_requests",
-          filter: `tournament_id=eq.${tournamentId}`,
-        },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            const req = payload.new as StagerRequest;
-            setStagerRequests((prev) => [req, ...prev.filter((r) => r.id !== req.id)]);
-          } else if (payload.eventType === "UPDATE") {
-            const req = payload.new as StagerRequest;
-            setStagerRequests((prev) => prev.map((r) => (r.id === req.id ? req : r)));
-          }
-        }
-      )
-      .subscribe();
-
-    // Polling fallback: the live feed below is the fast path, so this only has
-    // to catch a dropped stream eventually.
-    const poll = setInterval(async () => {
-      const [reqRes, codeRes] = await Promise.all([
-        supabase
-          .from("stager_requests")
-          .select("*")
-          .eq("tournament_id", tournamentId)
-          .order("created_at", { ascending: false })
-          .limit(50),
-        supabase.from("tournaments").select("stager_codes").eq("id", tournamentId).maybeSingle(),
+  // ── Live real-time SSE listener and periodic sync ─────────────────────────
+  const refreshRingsData = React.useCallback(async () => {
+    try {
+      const [sReqs, sCodes, mReqs] = await Promise.all([
+        getStagerRequests(tournamentId),
+        getStagerCodes(tournamentId),
+        getPendingModeratorRequests(tournamentId),
       ]);
-
-      if (reqRes.error) {
-        console.error("Could not refresh stager requests:", reqRes.error.message);
-      } else if (reqRes.data) {
-        setStagerRequests(reqRes.data as StagerRequest[]);
-      }
-
-      if (codeRes.error) {
-        console.error("Could not refresh stager codes:", codeRes.error.message);
-      } else if (Array.isArray(codeRes.data?.stager_codes)) {
-        setStagerCodes(codeRes.data.stager_codes as StagerCode[]);
-      }
-    }, 15000);
-
-    return () => {
-      clearInterval(poll);
-      supabase.removeChannel(modChannel);
-      supabase.removeChannel(stagerChannel);
-    };
+      if (sReqs) setStagerRequests(sReqs as StagerRequest[]);
+      if (sCodes) setStagerCodes(sCodes as StagerCode[]);
+      if (mReqs) setModRequests(mReqs as ModRequest[]);
+    } catch (err) {
+      console.error("Failed to refresh rings data:", err);
+    }
   }, [tournamentId]);
+
+  useLiveEvents({ tournamentId }, refreshRingsData);
+
+  useEffect(() => {
+    const poll = setInterval(refreshRingsData, 15000);
+    return () => clearInterval(poll);
+  }, [refreshRingsData]);
 
   // ── Moderator actions ──────────────────────────────────────────────────────
   const handleAddRing = async () => {
@@ -263,21 +215,7 @@ export default function RingsClient({
         return;
       }
 
-      // Show what the database actually holds, not just what the action returned.
-      const supabase = createClient();
-      const { data, error } = await supabase
-        .from("tournaments")
-        .select("stager_codes")
-        .eq("id", tournamentId)
-        .maybeSingle();
-
-      if (error) {
-        console.error("Could not verify the saved stager codes:", error.message);
-        setStagerCodes(res.stager_codes);
-      } else {
-        setStagerCodes((data?.stager_codes as StagerCode[]) ?? res.stager_codes);
-      }
-
+      setStagerCodes(res.stager_codes);
       router.refresh();
     } catch (err: any) {
       alert(err?.message || "Failed to generate stager codes.");

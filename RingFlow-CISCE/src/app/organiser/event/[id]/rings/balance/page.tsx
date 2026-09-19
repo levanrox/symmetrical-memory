@@ -1,8 +1,17 @@
 import React from "react";
-import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import RingBalancingClient from "@/app/admin/event/[id]/rings/balance/RingBalancingClient";
 import { ensureOrganiserHasAccessToTournament } from "@/actions/organiser";
+import { db } from "@/db";
+import {
+  tournaments as tournamentsTable,
+  categories as categoriesTable,
+  rings as ringsTable,
+  categoryAssignments as categoryAssignmentsTable,
+  eventLog as eventLogTable,
+} from "@/db/schema";
+import { eq, inArray, desc, asc, and } from "drizzle-orm";
+import { serializeRing, serializeCategory, serializeCategoryAssignment } from "@/lib/serializers";
 
 export default async function OrganiserRingBalancingPage({ params }: { params: Promise<{ id: string }> }) {
   const { id: tournamentId } = await params;
@@ -13,67 +22,68 @@ export default async function OrganiserRingBalancingPage({ params }: { params: P
     redirect("/");
   }
 
-  const supabase = await createClient();
-
-  const [
-    { data: tournament, error: tournamentError },
-    catRes,
-    { data: rings }
-  ] = await Promise.all([
-    supabase.from("tournaments").select("*").eq("id", tournamentId).single(),
-    supabase.from("categories").select("id, name, age_bracket, weight_class, athletes_count, expected_matches, belt, age_min, age_max, sex, day, doc_url").eq("tournament_id", tournamentId).order("created_at", { ascending: false }),
-    supabase.from("rings").select("*").eq("tournament_id", tournamentId).order("ring_order", { ascending: true })
+  const [tournamentRows, catRows, ringRows] = await Promise.all([
+    db
+      .select()
+      .from(tournamentsTable)
+      .where(eq(tournamentsTable.id, tournamentId))
+      .limit(1),
+    db
+      .select()
+      .from(categoriesTable)
+      .where(eq(categoriesTable.tournamentId, tournamentId))
+      .orderBy(desc(categoriesTable.createdAt)),
+    db
+      .select()
+      .from(ringsTable)
+      .where(eq(ringsTable.tournamentId, tournamentId))
+      .orderBy(asc(ringsTable.ringOrder)),
   ]);
 
-  let categories = catRes.data;
-  if (catRes.error || !categories) {
-    const { data: catFallback } = await supabase
-      .from("categories")
-      .select("id, name, age_bracket, weight_class, athletes_count, expected_matches, belt, age_min, age_max, sex, day")
-      .eq("tournament_id", tournamentId)
-      .order("created_at", { ascending: false });
-    categories = (catFallback || []).map((c: any) => ({ ...c, doc_url: null }));
-  }
-
-  if (tournamentError || !tournament) {
+  const tournament = tournamentRows[0];
+  if (!tournament) {
     redirect("/");
   }
 
-  // Fetch assignments for these rings
-  const ringIds = rings?.map(r => r.id) || [];
+  const ringIds = ringRows.map((r) => r.id);
   let assignments: any[] = [];
-  let completedTimes: Record<string, string> = {};
-  
-  if (ringIds.length > 0) {
-    const { data: assignmentData } = await supabase
-      .from("category_assignments")
-      .select("*")
-      .in("ring_id", ringIds);
-      
-    if (assignmentData) assignments = assignmentData;
+  const completedTimes: Record<string, string> = {};
 
-    // Fetch completion times from event_log
-    const { data: eventLogData } = await supabase
-      .from("event_log")
-      .select("category_id, created_at")
-      .eq("action", "FINISH_CATEGORY")
-      .in("ring_id", ringIds);
-      
-    if (eventLogData) {
-      eventLogData.forEach(log => {
-        if (log.category_id) {
-          completedTimes[log.category_id] = log.created_at;
-        }
-      });
-    }
+  if (ringIds.length > 0) {
+    const [rawAssignments, finishLogs] = await Promise.all([
+      db
+        .select()
+        .from(categoryAssignmentsTable)
+        .where(inArray(categoryAssignmentsTable.ringId, ringIds)),
+      db
+        .select({
+          categoryId: eventLogTable.categoryId,
+          createdAt: eventLogTable.createdAt,
+        })
+        .from(eventLogTable)
+        .where(
+          and(
+            eq(eventLogTable.action, "FINISH_CATEGORY"),
+            inArray(eventLogTable.ringId, ringIds)
+          )
+        ),
+    ]);
+
+    assignments = rawAssignments.map(serializeCategoryAssignment);
+
+    finishLogs.forEach((log) => {
+      if (log.categoryId && log.createdAt) {
+        completedTimes[log.categoryId] = new Date(log.createdAt).toISOString();
+      }
+    });
   }
 
   return (
     <RingBalancingClient 
       tournamentId={tournamentId}
       tournamentName={tournament.name}
-      initialCategories={categories || []}
-      initialRings={rings || []}
+      initialCategories={catRows.map(serializeCategory)}
+      initialRings={ringRows.map(serializeRing)}
       initialAssignments={assignments}
       completedTimes={completedTimes}
       readOnly={true}

@@ -2,9 +2,12 @@ import React from "react";
 import Link from "next/link";
 import { redirect } from "next/navigation";
 import OrganiserHeader from "@/components/layout/OrganiserHeader";
-import { createClient } from "@/utils/supabase/server";
+import { db } from "@/db";
+import { tournaments as tournamentsTable } from "@/db/schema";
+import { eq, desc } from "drizzle-orm";
 import { ensureOrganiser } from "@/actions/organiser";
 import { formatDisplayDate } from "@/lib/utils";
+import { serializeTournament } from "@/lib/serializers";
 
 export const dynamic = "force-dynamic";
 
@@ -14,33 +17,24 @@ export default async function OrganiserTournamentSelectionPage() {
   try {
     organiser = await ensureOrganiser();
   } catch {
-    // If not authenticated or session invalid/revoked, kick out immediately to public home screen
     redirect("/");
   }
 
-  // If approved organiser for a specific tournament, send directly to their tournament dashboard
   if (organiser?.tournamentId) {
     redirect(`/organiser/event/${organiser.tournamentId}/dashboard`);
   }
 
-  // Strictly admin-only: organisers have zero right to see or select from other tournaments.
-  // If not a registered tournament administrator, kick out to public home screen.
   if (organiser?.role !== "admin" || !organiser?.id) {
     redirect("/");
   }
 
-  const supabase = await createClient();
-  const { data: tournaments, error } = await supabase
-    .from("tournaments")
-    .select("*")
-    .eq("admin_id", organiser.id)
-    .order("created_at", { ascending: false });
+  const rows = await db
+    .select()
+    .from(tournamentsTable)
+    .where(eq(tournamentsTable.adminId, organiser.id))
+    .orderBy(desc(tournamentsTable.createdAt));
 
-  if (error) {
-    console.error("Error fetching tournaments for admin:", error);
-  }
-
-  const tournamentList = tournaments || [];
+  const tournamentList = rows.map(serializeTournament);
 
   return (
     <div className="min-h-screen bg-background flex flex-col w-full">

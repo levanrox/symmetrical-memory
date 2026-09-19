@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
-import { createClient } from "@/utils/supabase/client";
+import React, { useCallback, useState } from "react";
+import { getLiveLogs } from "@/actions/admin";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 interface LogEvent {
@@ -24,21 +24,11 @@ export default function LiveActivityFeed({
 }) {
   const [logs, setLogs] = useState<LogEvent[]>(initialLogs);
   const [isExpanded, setIsExpanded] = useState<boolean>(true);
-  const supabase = createClient();
 
   // The feed should show what just happened, the moment it happened.
   const refreshLogs = useCallback(async () => {
     try {
-      const { data, error } = await supabase
-        .from("event_log")
-        .select("*")
-        .eq("tournament_id", tournamentId)
-        .order("created_at", { ascending: false })
-        .limit(200);
-      if (error) {
-        console.error("[activity] live refresh failed:", error.message);
-        return;
-      }
+      const data = await getLiveLogs(tournamentId);
       if (data) {
         setLogs(data as LogEvent[]);
         setIsExpanded(true);
@@ -46,33 +36,16 @@ export default function LiveActivityFeed({
     } catch (err) {
       console.error("[activity] live refresh failed:", err);
     }
-  }, [supabase, tournamentId]);
+  }, [tournamentId]);
 
-  useLiveEvents({ tournamentId }, refreshLogs);
-
-  useEffect(() => {
-    // Subscribe to new event logs for this tournament
-    const channel = supabase
-      .channel("public:event_log")
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "event_log",
-          filter: `tournament_id=eq.${tournamentId}`,
-        },
-        (payload) => {
-          setLogs((current) => [payload.new as LogEvent, ...current]);
-          setIsExpanded(true); // Auto-expand when new activity occurs
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [tournamentId, supabase]);
+  useLiveEvents({ tournamentId }, (event) => {
+    if (event?.table === "event_log" && event?.op === "INSERT" && event.data) {
+      setLogs((current) => [event.data as LogEvent, ...current]);
+      setIsExpanded(true);
+    } else {
+      refreshLogs();
+    }
+  });
 
   return (
     <div className="bg-white border border-slate-200 rounded-xl shadow-2xs transition-all duration-200 overflow-hidden">

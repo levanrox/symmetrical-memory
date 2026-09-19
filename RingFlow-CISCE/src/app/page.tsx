@@ -1,22 +1,29 @@
 import React from "react";
 import Link from "next/link";
 import Image from "next/image";
-import { createClient } from "@/utils/supabase/server";
+import { db } from "@/db";
+import { tournaments as tournamentsTable } from "@/db/schema";
+import { asc } from "drizzle-orm";
 import PublicStats from "@/components/public/PublicStats";
 import PublicTournamentGrid from "@/components/public/PublicTournamentGrid";
 import { RingFlowLogo } from "@/components/ui/ringflow-logo";
 import { getEventDateKey } from "@/lib/utils";
 
 export default async function PublicHome() {
-  const supabase = await createClient();
-  const { data: tournaments } = await supabase
-    .from("tournaments")
-    .select(`
-      *,
-      rings (id),
-      categories (id)
-    `)
-    .order("event_date", { ascending: true });
+  const rawTournaments = await db.query.tournaments.findMany({
+    with: {
+      rings: { columns: { id: true } },
+      categories: { columns: { id: true } },
+    },
+    orderBy: [asc(tournamentsTable.eventDate)],
+  });
+
+  const tournaments = rawTournaments.map((t) => ({
+    ...t,
+    event_date: t.eventDate || undefined,
+    venue: t.venue || undefined,
+    city: t.city || undefined,
+  }));
 
   const now = new Date();
   const year = now.getFullYear();

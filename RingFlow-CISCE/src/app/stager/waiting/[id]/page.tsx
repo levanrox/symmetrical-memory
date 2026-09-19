@@ -2,14 +2,12 @@
 
 import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { createClient } from "@/utils/supabase/client";
 import { checkStagerStatus } from "@/actions/stager";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 export default function StagerWaitingRoom() {
   const { id } = useParams() as { id: string };
   const router = useRouter();
-  const supabase = createClient();
   const [status, setStatus] = useState("pending");
 
   const handleApproved = (tournamentId: string, token?: string, stagerName?: string) => {
@@ -25,14 +23,12 @@ export default function StagerWaitingRoom() {
     }
 
     setStatus("approved");
-    // A full navigation, not a client transition: this one-shot handoff must
-    // land even if the router is busy with the approval round trip.
     setTimeout(() => {
       window.location.replace(`/stager/event/${tournamentId}/balance`);
     }, 800);
   };
 
-  // Approval lands here the instant an admin grants it.
+  // Approval lands here instantly via SSE
   useLiveEvents({ requestId: id }, () => {
     void checkStagerStatus(id)
       .then((res) => {
@@ -42,9 +38,7 @@ export default function StagerWaitingRoom() {
           setStatus("rejected");
         }
       })
-      .catch(() => {
-        // The poll below will pick it up.
-      });
+      .catch(() => {});
   });
 
   useEffect(() => {
@@ -64,43 +58,14 @@ export default function StagerWaitingRoom() {
       }
     };
 
-    // 1. Initial status check
     checkStatus();
-
-    // 2. Approval arrives over the live feed; the poll is only the safety net
-    //    for a dropped stream.
-    const pollInterval = setInterval(checkStatus, 20000);
-
-
-    // 3. Realtime listener
-    const channel = supabase
-      .channel(`stager_req_${id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "stager_requests",
-          filter: `id=eq.${id}`,
-        },
-        (payload) => {
-          if (isCancelled) return;
-          const newStatus = payload.new.status;
-          if (newStatus === "approved") {
-            handleApproved(payload.new.tournament_id, payload.new.session_token, payload.new.stager_name);
-          } else if (newStatus === "rejected") {
-            setStatus("rejected");
-          }
-        }
-      )
-      .subscribe();
+    const pollInterval = setInterval(checkStatus, 5000);
 
     return () => {
       isCancelled = true;
       clearInterval(pollInterval);
-      supabase.removeChannel(channel);
     };
-  }, [id, supabase]);
+  }, [id]);
 
   return (
     <div className="bg-surface text-on-surface min-h-screen flex flex-col font-body-md overflow-hidden relative">

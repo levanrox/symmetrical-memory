@@ -1,6 +1,12 @@
 "use server";
 
-import { createAdminClient } from "@/utils/supabase/admin";
+import { db } from "@/db";
+import {
+  rings as ringsTable,
+  categories as categoriesTable,
+  categoryAssignments as categoryAssignmentsTable,
+} from "@/db/schema";
+import { eq, inArray, and } from "drizzle-orm";
 import { broadcastLiveEvent } from "@/lib/realtime/bus";
 import { ensureAdminOwnsTournament } from "./admin";
 
@@ -30,8 +36,6 @@ export async function saveAssignments(
       return { success: false, error: "Unauthorized: Only administrators can assign categories to Tatamis." };
     }
 
-    const supabase = await createAdminClient();
-
     // 1. Deduplicate payload by category_id (latest entry wins)
     const dedupedMap = new Map<string, AssignmentInput>();
     for (const a of assignments) {
@@ -41,47 +45,35 @@ export async function saveAssignments(
     const validAssignments = cleanAssignments.filter((a) => a.ring_id !== null);
 
     // 2. Fetch all ring IDs and valid categories for this tournament
-    const [{ data: rings, error: ringsError }, { data: tournamentCategories, error: catError }] = await Promise.all([
-      supabase.from("rings").select("id").eq("tournament_id", tournamentId),
-      supabase.from("categories").select("id").eq("tournament_id", tournamentId),
+    const [rings, tournamentCategories] = await Promise.all([
+      db.select({ id: ringsTable.id }).from(ringsTable).where(eq(ringsTable.tournamentId, tournamentId)),
+      db.select({ id: categoriesTable.id }).from(categoriesTable).where(eq(categoriesTable.tournamentId, tournamentId)),
     ]);
 
-    if (ringsError || catError) {
-      const msg = (ringsError || catError)?.message || "Unknown DB error";
-      console.error("Error fetching rings or categories:", msg);
-      return { success: false, error: `Failed to load tournament data: ${msg}` };
-    }
-
-    const validCatIds = new Set((tournamentCategories || []).map((c) => c.id));
+    const validCatIds = new Set(tournamentCategories.map((c) => c.id));
     for (const a of validAssignments) {
       if (!validCatIds.has(a.category_id)) {
         return { success: false, error: `Category ${a.category_id} does not belong to this tournament` };
       }
     }
 
-    const ringIds = (rings || []).map((r) => r.id);
+    const ringIds = rings.map((r) => r.id);
 
     // 3. Fetch current live assignments to preserve matches_completed and guard running categories
     let currentAssignments: any[] = [];
     if (ringIds.length > 0) {
-      const { data, error: fetchErr } = await supabase
-        .from("category_assignments")
-        .select("category_id, ring_id, status, matches_completed, completed_at")
-        .in("ring_id", ringIds);
-
-      if (fetchErr) {
-        console.error("Error fetching current assignments:", fetchErr);
-        return { success: false, error: `Failed to load current assignments: ${fetchErr.message || "DB error"}` };
-      }
-      currentAssignments = data || [];
+      currentAssignments = await db
+        .select()
+        .from(categoryAssignmentsTable)
+        .where(inArray(categoryAssignmentsTable.ringId, ringIds));
     }
 
-    const currentMap = new Map<string, { status: string; matches_completed: number; completed_at: string | null }>();
-    currentAssignments.forEach((a: any) => {
-      currentMap.set(a.category_id, {
+    const currentMap = new Map<string, { status: string; matchesCompleted: number; completedAt: Date | null }>();
+    currentAssignments.forEach((a) => {
+      currentMap.set(a.categoryId, {
         status: a.status,
-        matches_completed: a.matches_completed || 0,
-        completed_at: a.completed_at || null,
+        matchesCompleted: a.matchesCompleted ?? 0,
+        completedAt: a.completedAt,
       });
     });
 
@@ -95,113 +87,72 @@ export async function saveAssignments(
       }
     }
 
-    // 5. Remove categories that were moved out of all rings (now unassigned)
-    const incomingCategoryIds = new Set(validAssignments.map((a) => a.category_id));
-    const toDelete = Array.from(currentMap.keys()).filter((catId) => !incomingCategoryIds.has(catId));
+    // 5. Atomic database transaction
+    await db.transaction(async (tx) => {
+      // Remove categories that were moved out of all rings (now unassigned)
+      const incomingCategoryIds = new Set(validAssignments.map((a) => a.category_id));
+      const toDelete = Array.from(currentMap.keys()).filter((catId) => !incomingCategoryIds.has(catId));
 
-    if (toDelete.length > 0) {
-      const deleteQuery = supabase.from("category_assignments").delete().in("category_id", toDelete);
-      if (ringIds.length > 0) {
-        deleteQuery.in("ring_id", ringIds);
-      }
-      const { error: deleteError } = await deleteQuery;
-
-      if (deleteError) {
-        console.error("Error deleting removed assignments:", deleteError);
-        return { success: false, error: `Failed to remove old assignments: ${deleteError.message || "DB error"}` };
-      }
-    }
-
-    // 6. Non-destructive update/insert: update existing rows by category_id to preserve assignment ID UUIDs
-    if (validAssignments.length > 0) {
-      const rows = validAssignments.map((a) => {
-        const live = currentMap.get(a.category_id);
-        const isExplicitRevert = a.status === "pending" && live?.status === "completed";
-        return {
-          ring_id: a.ring_id,
-          category_id: a.category_id,
-          queue_order: a.queue_order,
-          status:
-            isExplicitRevert || a.status === "pending"
-              ? "pending"
-              : live?.status === "running" || live?.status === "paused"
-              ? live.status
-              : a.status === "completed"
-              ? "completed"
-              : "pending",
-          matches_completed: isExplicitRevert ? 0 : (live?.matches_completed ?? 0),
-          completed_at:
-            isExplicitRevert || a.status === "pending"
-              ? null
-              : a.status === "completed"
-              ? live?.completed_at || a.completed_at || new Date().toISOString()
-              : null,
-        };
-      });
-
-      const existingRows = rows.filter((r) => currentMap.has(r.category_id));
-      const newRows = rows.filter((r) => !currentMap.has(r.category_id));
-
-      // Stage A: Set negative temporary queue_order for existing rows to avoid transient unique conflicts
-      if (existingRows.length > 0) {
-        const stageAResults = await Promise.all(
-          existingRows.map((r, idx) =>
-            supabase
-              .from("category_assignments")
-              .update({ queue_order: -(idx + 5000) })
-              .eq("category_id", r.category_id)
-          )
-        );
-
-        for (const res of stageAResults) {
-          if (res.error) {
-            console.error("Error staging assignment queue order:", res.error);
-            return { success: false, error: `Failed to stage assignment: ${res.error.message}` };
-          }
-        }
-
-        // Stage B: Update existing rows with final values by category_id in-place
-        const stageBResults = await Promise.all(
-          existingRows.map((r) =>
-            supabase
-              .from("category_assignments")
-              .update({
-                ring_id: r.ring_id,
-                queue_order: r.queue_order,
-                status: r.status,
-                matches_completed: r.matches_completed,
-                completed_at: r.completed_at,
-              })
-              .eq("category_id", r.category_id)
-          )
-        );
-
-        for (const res of stageBResults) {
-          if (res.error) {
-            console.error("Error updating category_assignment:", res.error);
-            return { success: false, error: `Failed to update assignment: ${res.error.message}` };
-          }
-        }
+      if (toDelete.length > 0) {
+        await tx
+          .delete(categoryAssignmentsTable)
+          .where(
+            and(
+              inArray(categoryAssignmentsTable.categoryId, toDelete),
+              ringIds.length > 0 ? inArray(categoryAssignmentsTable.ringId, ringIds) : undefined
+            )
+          );
       }
 
-      // Stage C: Insert new rows for newly assigned categories
-      if (newRows.length > 0) {
-        const { error: insertError } = await supabase
-          .from("category_assignments")
-          .insert(newRows);
-
-        if (insertError) {
-          console.error("Error inserting new assignments:", insertError);
+      if (validAssignments.length > 0) {
+        const rows = validAssignments.map((a) => {
+          const live = currentMap.get(a.category_id);
+          const isExplicitRevert = a.status === "pending" && live?.status === "completed";
           return {
-            success: false,
-            error:
-              insertError.code === "42501"
-                ? "Permission denied: Ensure the admin has permission to manage category assignments in Supabase."
-                : `Failed to assign category to ring: ${insertError.message || "DB error"}`,
+            ringId: a.ring_id!,
+            categoryId: a.category_id,
+            queueOrder: a.queue_order,
+            status:
+              isExplicitRevert || a.status === "pending"
+                ? "pending"
+                : live?.status === "running" || live?.status === "paused"
+                ? live.status
+                : a.status === "completed"
+                ? "completed"
+                : "pending",
+            matchesCompleted: isExplicitRevert ? 0 : (live?.matchesCompleted ?? 0),
+            completedAt:
+              isExplicitRevert || a.status === "pending"
+                ? null
+                : a.status === "completed"
+                ? live?.completedAt || (a.completed_at ? new Date(a.completed_at) : new Date())
+                : null,
           };
+        });
+
+        const existingRows = rows.filter((r) => currentMap.has(r.categoryId));
+        const newRows = rows.filter((r) => !currentMap.has(r.categoryId));
+
+        // Update existing rows in place
+        for (const r of existingRows) {
+          await tx
+            .update(categoryAssignmentsTable)
+            .set({
+              ringId: r.ringId,
+              queueOrder: r.queueOrder,
+              status: r.status,
+              matchesCompleted: r.matchesCompleted,
+              completedAt: r.completedAt,
+            })
+            .where(eq(categoryAssignmentsTable.categoryId, r.categoryId));
+        }
+
+        // Insert new rows
+        if (newRows.length > 0) {
+          await tx.insert(categoryAssignmentsTable).values(newRows);
         }
       }
-    }
+    });
 
     // Broadcast immediately so Mod, Organiser, Stager receive updates with zero latency
     broadcastLiveEvent({
@@ -224,3 +175,28 @@ export async function saveAssignments(
     return { success: false, error: err?.message || "Unexpected error while saving assignments" };
   }
 }
+
+export async function getBalancingAssignments(ringIds: string[]) {
+  if (!ringIds || ringIds.length === 0) return [];
+
+  try {
+    const rows = await db
+      .select()
+      .from(categoryAssignmentsTable)
+      .where(inArray(categoryAssignmentsTable.ringId, ringIds));
+
+    return rows.map((row) => ({
+      category_id: row.categoryId,
+      ring_id: row.ringId,
+      matches_completed: row.matchesCompleted || 0,
+      status: row.status || "pending",
+      queue_order: row.queueOrder ?? 0,
+      stager_status: row.stagerStatus ?? null,
+      stager_name: row.stagerName ?? null,
+    }));
+  } catch (err) {
+    console.error("Failed to fetch balancing assignments:", err);
+    return [];
+  }
+}
+

@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
-import { createClient } from "@/utils/supabase/client";
+import React, { useCallback, useState } from "react";
 import { approveModeratorRequest, rejectModeratorRequest } from "@/actions/moderator";
+import { getPendingModeratorRequests } from "@/actions/admin";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 interface ModRequest {
@@ -26,7 +26,6 @@ export default function ModeratorRequestsWidget({
 }) {
   const [requests, setRequests] = useState<ModRequest[]>(initialRequests);
   const [isExpanded, setIsExpanded] = useState<boolean>(true);
-  const supabase = createClient();
   const [loadingId, setLoadingId] = useState<string | null>(null);
 
   const pendingRequests = requests.filter((r) => r.status === "pending");
@@ -37,15 +36,7 @@ export default function ModeratorRequestsWidget({
    */
   const refreshRequests = useCallback(async () => {
     try {
-      const { data, error } = await supabase
-        .from("moderator_requests")
-        .select("*, rings(name)")
-        .order("created_at", { ascending: false })
-        .limit(25);
-      if (error) {
-        console.error("[requests] live refresh failed:", error.message);
-        return;
-      }
+      const data = await getPendingModeratorRequests(tournamentId);
       if (data) {
         setRequests(data as ModRequest[]);
         if (data.some((r: any) => r.status === "pending")) setIsExpanded(true);
@@ -53,35 +44,9 @@ export default function ModeratorRequestsWidget({
     } catch (err) {
       console.error("[requests] live refresh failed:", err);
     }
-  }, [supabase]);
+  }, [tournamentId]);
 
   useLiveEvents({ tournamentId }, refreshRequests);
-
-  useEffect(() => {
-    // We cannot easily filter by tournamentId directly on moderator_requests if the column doesn't exist.
-    // The policy ensures we only see our own, so we can just listen to all changes the user has access to.
-    const channel = supabase
-      .channel("public:moderator_requests")
-      .on(
-        "postgres_changes",
-        { event: "*", schema: "public", table: "moderator_requests" },
-        (payload) => {
-          if (payload.eventType === "INSERT") {
-            setRequests((current) => [payload.new as ModRequest, ...current]);
-            setIsExpanded(true); // Pop open immediately when a request comes in!
-          } else if (payload.eventType === "UPDATE") {
-            setRequests((current) =>
-              current.map((r) => (r.id === payload.new.id ? { ...r, ...payload.new } : r))
-            );
-          }
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [supabase]);
 
   const handleApprove = async (id: string, ringId: string) => {
     setLoadingId(id);

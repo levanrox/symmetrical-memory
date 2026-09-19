@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
-import { createClient } from "@/utils/supabase/server";
+import { db } from "@/db";
+import { stagerRequests as stagerRequestsTable } from "@/db/schema";
+import { eq, or, and, desc } from "drizzle-orm";
 
 /**
  * /stager root - resolves active stager session and navigates directly to event balance
@@ -13,17 +15,30 @@ export default async function StagerRootPage() {
     redirect("/login/stager");
   }
 
-  const supabase = await createClient();
-  const { data: request } = await supabase
-    .from("stager_requests")
-    .select("tournament_id, status, expires_at")
-    .or(`session_token.eq.${stagerToken},id.eq.${stagerToken}`)
-    .eq("status", "approved")
-    .order("created_at", { ascending: false })
-    .maybeSingle();
+  const [request] = await db
+    .select({
+      tournamentId: stagerRequestsTable.tournamentId,
+      status: stagerRequestsTable.status,
+      expiresAt: stagerRequestsTable.expiresAt,
+    })
+    .from(stagerRequestsTable)
+    .where(
+      and(
+        or(
+          eq(stagerRequestsTable.sessionToken, stagerToken),
+          eq(stagerRequestsTable.id, stagerToken)
+        ),
+        eq(stagerRequestsTable.status, "approved")
+      )
+    )
+    .orderBy(desc(stagerRequestsTable.createdAt))
+    .limit(1);
 
-  if (request?.tournament_id && (!request.expires_at || new Date(request.expires_at).getTime() >= Date.now())) {
-    redirect(`/stager/event/${request.tournament_id}/balance`);
+  if (
+    request?.tournamentId &&
+    (!request.expiresAt || new Date(request.expiresAt).getTime() >= Date.now())
+  ) {
+    redirect(`/stager/event/${request.tournamentId}/balance`);
   }
 
   redirect("/login/stager");

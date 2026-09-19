@@ -1,7 +1,5 @@
 "use client";
-
 import React, { useState, useEffect } from "react";
-import { createClient } from "@/utils/supabase/client";
 import { useRouter } from "next/navigation";
 import { startCategory, reorderCategory } from "@/actions/moderator";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
@@ -10,7 +8,6 @@ export default function ModeratorQueueClient({ ringId, initialAssignments }: { r
   const [assignments, setAssignments] = useState(initialAssignments);
   const [loading, setLoading] = useState(false);
   const router = useRouter();
-  const supabase = createClient();
 
   // The server component owns this list; adopt it whenever it is re-fetched.
   useEffect(() => {
@@ -19,49 +16,6 @@ export default function ModeratorQueueClient({ ringId, initialAssignments }: { r
 
   // A change on this mat re-reads the queue — no waiting on a poll.
   useLiveEvents({ ringId }, () => router.refresh());
-
-  useEffect(() => {
-    const channel = supabase.channel(`queue_${ringId}`)
-      .on('postgres_changes', { 
-        event: '*', 
-        schema: 'public', 
-        table: 'category_assignments',
-        filter: `ring_id=eq.${ringId}`
-      }, async (payload) => {
-        if (payload.eventType === 'UPDATE' || payload.eventType === 'INSERT') {
-          const newRow = payload.new as any;
-          // Fetch joined category info if missing from raw payload
-          let categoryData = newRow.categories;
-          if (!categoryData && newRow.category_id) {
-            const { data } = await supabase
-              .from('categories')
-              .select('name, expected_matches')
-              .eq('id', newRow.category_id)
-              .single();
-            if (data) categoryData = data;
-          }
-
-          const fullAssignment = { ...newRow, categories: categoryData };
-
-          setAssignments(prev => {
-            const idx = prev.findIndex(a => a.id === fullAssignment.id || a.category_id === fullAssignment.category_id);
-            if (idx > -1) {
-              const copy = [...prev];
-              copy[idx] = { ...copy[idx], ...fullAssignment };
-              return copy;
-            }
-            return [...prev, fullAssignment];
-          });
-        } else if (payload.eventType === 'DELETE') {
-          setAssignments(prev => prev.filter(a => a.id !== (payload.old as any).id));
-        }
-      })
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [ringId, supabase]);
 
   const activeAssignment = assignments.find(a => a.status === 'running' || a.status === 'paused');
   const pendingAssignments = assignments.filter(a => a.status === 'pending').sort((a, b) => a.queue_order - b.queue_order);

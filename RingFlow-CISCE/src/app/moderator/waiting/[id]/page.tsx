@@ -2,17 +2,35 @@
 
 import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { createClient } from "@/utils/supabase/client";
 import { checkModeratorStatus } from "@/actions/moderator";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 export default function WaitingRoom() {
   const { id } = useParams() as { id: string };
   const router = useRouter();
-  const supabase = createClient();
   const [status, setStatus] = useState("pending");
 
-  // Approval lands here the instant an admin grants it.
+  const handleApproved = (ringId: string, token?: string) => {
+    // Also ensure server-side cookie is set via Server Action
+    checkModeratorStatus(id).catch(() => {});
+
+    // Save token in cookie or local storage so middleware/layout can read it
+    const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
+    const secureFlag = isHttps ? '; Secure' : '';
+    if (token) {
+      document.cookie = `mod_token=${token}; path=/; max-age=86400; SameSite=Lax${secureFlag}`;
+    } else {
+      document.cookie = `mod_token=${id}; path=/; max-age=86400; SameSite=Lax${secureFlag}`;
+    }
+    
+    // Animate a bit then redirect
+    setStatus("approved");
+    setTimeout(() => {
+      router.push(`/moderator/ring/${ringId}/queue`);
+    }, 1500);
+  };
+
+  // Approval lands here instantly via SSE
   useLiveEvents({ requestId: id }, () => {
     void checkModeratorStatus(id)
       .then((res) => {
@@ -22,9 +40,7 @@ export default function WaitingRoom() {
           setStatus("rejected");
         }
       })
-      .catch(() => {
-        // The poll below will pick it up.
-      });
+      .catch(() => {});
   });
 
   useEffect(() => {
@@ -44,59 +60,16 @@ export default function WaitingRoom() {
       }
     };
 
-    // 1. Initial check
     checkStatus();
-
-    // 2. The live feed approves instantly; this poll is the safety net for a
-    //    dropped stream, so it only has to catch up eventually.
-    const pollInterval = setInterval(checkStatus, 20000);
-
-
-    // 3. Realtime listener
-    const channel = supabase.channel(`mod_req_${id}`)
-      .on('postgres_changes', { 
-        event: 'UPDATE', 
-        schema: 'public', 
-        table: 'moderator_requests',
-        filter: `id=eq.${id}`
-      }, (payload) => {
-        if (isCancelled) return;
-        const newStatus = payload.new.status;
-        if (newStatus === 'approved') {
-          handleApproved(payload.new.ring_id, payload.new.session_token);
-        } else if (newStatus === 'rejected') {
-          setStatus("rejected");
-        }
-      })
-      .subscribe();
+    const pollInterval = setInterval(checkStatus, 5000);
 
     return () => {
       isCancelled = true;
       clearInterval(pollInterval);
-      supabase.removeChannel(channel);
     };
-  }, [id, router, supabase]);
+  }, [id]);
 
-  const handleApproved = (ringId: string, token?: string) => {
-    // Also ensure server-side cookie is set via Server Action
-    checkModeratorStatus(id).catch(() => {});
 
-    // Save token in cookie or local storage so middleware/layout can read it
-    const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
-    const secureFlag = isHttps ? '; Secure' : '';
-    if (token) {
-      document.cookie = `mod_token=${token}; path=/; max-age=86400; SameSite=Lax${secureFlag}`;
-    } else {
-      // MVP fallback
-      document.cookie = `mod_token=${id}; path=/; max-age=86400; SameSite=Lax${secureFlag}`;
-    }
-    
-    // Animate a bit then redirect
-    setStatus("approved");
-    setTimeout(() => {
-      router.push(`/moderator/ring/${ringId}/queue`);
-    }, 1500);
-  };
 
   return (
     <div className="bg-surface text-on-surface min-h-screen flex flex-col font-body-md overflow-hidden relative">
