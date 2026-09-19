@@ -1,5 +1,5 @@
 import { PDFDocument, rgb, StandardFonts } from "pdf-lib";
-import type { BracketMatchView } from "@/actions/draws";
+import type { BracketMatchView } from "@/lib/draws/assembleDraw";
 
 export type CategoryDrawPdfData = {
   tournamentName: string;

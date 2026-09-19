@@ -4,12 +4,28 @@ import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import { checkModeratorStatus } from "@/actions/moderator";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 export default function WaitingRoom() {
   const { id } = useParams() as { id: string };
   const router = useRouter();
   const supabase = createClient();
   const [status, setStatus] = useState("pending");
+
+  // Approval lands here the instant an admin grants it.
+  useLiveEvents({ requestId: id }, () => {
+    void checkModeratorStatus(id)
+      .then((res) => {
+        if (res.status === "approved" && res.ringId) {
+          handleApproved(res.ringId, res.sessionToken || undefined);
+        } else if (res.status === "rejected") {
+          setStatus("rejected");
+        }
+      })
+      .catch(() => {
+        // The poll below will pick it up.
+      });
+  });
 
   useEffect(() => {
     let isCancelled = false;
@@ -31,9 +47,9 @@ export default function WaitingRoom() {
     // 1. Initial check
     checkStatus();
 
-    // 2. Fallback polling every 6s — Realtime is primary; this catches edge cases
-    //    where the websocket misses an event. Lower frequency = fewer DB queries.
-    const pollInterval = setInterval(checkStatus, 6000);
+    // 2. The live feed approves instantly; this poll is the safety net for a
+    //    dropped stream, so it only has to catch up eventually.
+    const pollInterval = setInterval(checkStatus, 20000);
 
 
     // 3. Realtime listener

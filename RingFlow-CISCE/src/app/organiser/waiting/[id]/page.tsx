@@ -4,12 +4,34 @@ import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import { checkOrganiserStatus } from "@/actions/organiser";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 export default function OrganiserWaitingRoom() {
   const { id } = useParams() as { id: string };
   const router = useRouter();
   const supabase = createClient();
   const [status, setStatus] = useState("pending");
+
+  const checkAndAdvance = () =>
+    checkOrganiserStatus(id)
+      .then((res) => {
+        if (res.organiserName) {
+          localStorage.setItem("ringflow_organiser_name", res.organiserName);
+        }
+        if (res.status === "approved" && res.tournamentId) {
+          handleApproved(res.tournamentId, res.sessionToken || undefined);
+        } else if (res.status === "rejected") {
+          setStatus("rejected");
+        }
+      })
+      .catch(() => {
+        // The poll below will pick it up.
+      });
+
+  // Approval lands here the instant an admin grants it.
+  useLiveEvents({ requestId: id }, () => {
+    void checkAndAdvance();
+  });
 
   const handleApproved = (tournamentId: string, token?: string) => {
     // Also ensure server-side cookie is set via Server Action
@@ -49,9 +71,9 @@ export default function OrganiserWaitingRoom() {
 
     checkStatus();
 
-    // Polling fallback: local deployments run without websockets, so approval
-    // must still be noticed without a manual refresh.
-    const pollInterval = setInterval(checkStatus, 6000);
+    // Polling fallback: the live feed is the fast path, so this only has to
+    // catch a dropped stream eventually.
+    const pollInterval = setInterval(checkStatus, 20000);
 
     // 2. Realtime listener on organiser_requests
     const channel = supabase

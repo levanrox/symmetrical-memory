@@ -1,0 +1,334 @@
+import { PDFDocument, PDFFont, PDFPage, rgb, StandardFonts } from "pdf-lib";
+import type { BracketMatchView } from "@/lib/draws/assembleDraw";
+
+/**
+ * The results document: not a results table, but the state of every draw as it
+ * stands — round by round, who fought whom, the points, and who won. That is
+ * what a venue actually needs to print at the end of a day.
+ */
+
+export interface CategoryDrawState {
+  categoryName: string;
+  tournamentSize?: number;
+  bronzeMedals?: number;
+  matches: BracketMatchView[];
+}
+
+export interface DrawStatePdfData {
+  tournamentName: string;
+  eventDate?: string | null;
+  venue?: string | null;
+  city?: string | null;
+  categories: CategoryDrawState[];
+  generatedAt: Date;
+}
+
+const PAGE_W = 595.28; // A4 portrait
+const PAGE_H = 841.89;
+const MARGIN = 40;
+const CONTENT_W = PAGE_W - MARGIN * 2;
+
+const INK = rgb(27 / 255, 24 / 255, 21 / 255);
+const MUTED = rgb(104 / 255, 100 / 255, 90 / 255);
+const LINE = rgb(225 / 255, 221 / 255, 207 / 255);
+const CARD = rgb(250 / 255, 249 / 255, 245 / 255);
+const EMERALD = rgb(14 / 255, 156 / 255, 124 / 255);
+const AKA = rgb(192 / 255, 57 / 255, 43 / 255);
+const AO = rgb(29 / 255, 78 / 255, 216 / 255);
+const WON_BG = rgb(229 / 255, 246 / 255, 240 / 255);
+
+/** pdf-lib's WinAnsi encoder rejects anything outside Latin-1. */
+function safe(text: string | null | undefined): string {
+  if (!text) return "";
+  return String(text)
+    .normalize("NFKD")
+    .replace(/[\u2018\u2019\u201B]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/\u2026/g, "...")
+    .replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, "?");
+}
+
+/** Trim to fit a column, so long school names never overlap the score. */
+function ellipsize(text: string, font: PDFFont, size: number, maxWidth: number): string {
+  const clean = safe(text);
+  if (font.widthOfTextAtSize(clean, size) <= maxWidth) return clean;
+  let cut = clean;
+  while (cut.length > 1 && font.widthOfTextAtSize(`${cut}…`, size) > maxWidth) {
+    cut = cut.slice(0, -1);
+  }
+  return `${cut}…`;
+}
+
+function scoreLine(match: BracketMatchView): string {
+  const parts: string[] = [];
+  if (match.akaScore !== undefined || match.aoScore !== undefined) {
+    parts.push(`${match.akaScore ?? 0}-${match.aoScore ?? 0}`);
+  }
+  const penalties = (match.akaPenalties ?? 0) + (match.aoPenalties ?? 0);
+  if (penalties > 0) parts.push(`P${match.akaPenalties ?? 0}/${match.aoPenalties ?? 0}`);
+  if (match.senshu) parts.push(`S:${match.senshu === "AKA" ? "AKA" : "AO"}`);
+  return parts.join(" · ");
+}
+
+function isDecided(match: BracketMatchView): boolean {
+  return match.status === "CONFIRMED" || Boolean(match.winnerId);
+}
+
+function side(match: BracketMatchView, which: "aka" | "ao") {
+  const fighter = which === "aka" ? match.aka : match.ao;
+  return {
+    name: fighter?.displayName || "TBD",
+    chest: fighter?.chestNumber ?? null,
+    school: fighter?.school ?? null,
+    won: Boolean(match.winnerId && fighter?.id && match.winnerId === fighter.id),
+  };
+}
+
+export async function generateDrawStatePdfBytes(data: DrawStatePdfData): Promise<Uint8Array> {
+  const pdf = await PDFDocument.create();
+  const regular = await pdf.embedFont(StandardFonts.Helvetica);
+  const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+
+  let page: PDFPage = pdf.addPage([PAGE_W, PAGE_H]);
+  let y = PAGE_H - MARGIN;
+
+  const newPage = () => {
+    page = pdf.addPage([PAGE_W, PAGE_H]);
+    y = PAGE_H - MARGIN;
+  };
+
+  const ensure = (needed: number) => {
+    if (y - needed < MARGIN) newPage();
+  };
+
+  // ── Title block ────────────────────────────────────────────────────────────
+  page.drawRectangle({
+    x: MARGIN,
+    y: y - 52,
+    width: CONTENT_W,
+    height: 52,
+    color: CARD,
+    borderColor: LINE,
+    borderWidth: 1,
+  });
+  page.drawText(ellipsize(data.tournamentName || "Tournament", bold, 15, CONTENT_W - 24), {
+    x: MARGIN + 12,
+    y: y - 22,
+    size: 15,
+    font: bold,
+    color: INK,
+  });
+
+  const metaBits = [
+    data.eventDate ? String(data.eventDate).slice(0, 10) : null,
+    data.venue,
+    data.city,
+  ].filter(Boolean) as string[];
+  page.drawText(
+    ellipsize(`Draw state · ${metaBits.join(" · ") || "Date not set"}`, regular, 9, CONTENT_W - 24),
+    { x: MARGIN + 12, y: y - 38, size: 9, font: regular, color: MUTED }
+  );
+  y -= 52 + 18;
+
+  page.drawText(
+    ellipsize(`Generated ${data.generatedAt.toISOString().slice(0, 16).replace("T", " ")}`, regular, 8, CONTENT_W),
+    { x: MARGIN, y, size: 8, font: regular, color: MUTED }
+  );
+  y -= 20;
+
+  // ── One section per category ───────────────────────────────────────────────
+  for (const category of data.categories) {
+    const decided = category.matches.filter(isDecided).length;
+    const withScores = category.matches.filter(
+      (m) => (m.akaScore ?? 0) > 0 || (m.aoScore ?? 0) > 0 || isDecided(m)
+    ).length;
+
+    ensure(70);
+    y -= 6;
+    page.drawRectangle({ x: MARGIN, y: y - 30, width: CONTENT_W, height: 30, color: INK });
+    page.drawText(ellipsize(category.categoryName, bold, 12, CONTENT_W - 150), {
+      x: MARGIN + 10,
+      y: y - 20,
+      size: 12,
+      font: bold,
+      color: rgb(1, 1, 1),
+    });
+    const summary =
+      category.bronzeMedals === 0
+        ? "no bronze bout"
+        : category.bronzeMedals === 1
+          ? "single bronze"
+          : "two bronzes";
+    page.drawText(
+      ellipsize(
+        `${category.matches.length} bouts · ${withScores} with points · ${summary}`,
+        regular,
+        8,
+        CONTENT_W - 150
+      ),
+      { x: MARGIN + 10, y: y - 8, size: 8, font: regular, color: rgb(0.85, 0.85, 0.85) }
+    );
+    if (category.tournamentSize) {
+      page.drawText(`Size ${category.tournamentSize}`, {
+        x: MARGIN + CONTENT_W - 66,
+        y: y - 20,
+        size: 9,
+        font: bold,
+        color: rgb(1, 1, 1),
+      });
+    }
+    y -= 38;
+
+    // Round groups: main bracket in order, then repechage, then bronze.
+    const groups: Array<{ label: string; matches: BracketMatchView[] }> = [];
+    const mainRounds = new Map<number, BracketMatchView[]>();
+    for (const m of category.matches.filter((m) => m.bracketType === "MAIN")) {
+      const list = mainRounds.get(m.roundNo) ?? [];
+      list.push(m);
+      mainRounds.set(m.roundNo, list);
+    }
+    for (const roundNo of Array.from(mainRounds.keys()).sort((a, b) => a - b)) {
+      const list = (mainRounds.get(roundNo) ?? []).sort((a, b) => a.matchNo - b.matchNo);
+      groups.push({ label: list[0]?.roundName || `Round ${roundNo}`, matches: list });
+    }
+    for (const type of ["REPECHAGE", "BRONZE"] as const) {
+      const list = category.matches
+        .filter((m) => m.bracketType === type)
+        .sort((a, b) => a.matchNo - b.matchNo);
+      if (list.length > 0) groups.push({ label: type, matches: list });
+    }
+
+    for (const group of groups) {
+      ensure(34);
+      page.drawText(safe(group.label.toUpperCase()), {
+        x: MARGIN,
+        y,
+        size: 9,
+        font: bold,
+        color: EMERALD,
+      });
+      page.drawLine({
+        start: { x: MARGIN, y: y - 4 },
+        end: { x: PAGE_W - MARGIN, y: y - 4 },
+        thickness: 0.5,
+        color: LINE,
+      });
+      y -= 14;
+
+      for (const match of group.matches) {
+        ensure(26);
+        const decidedMatch = isDecided(match);
+        const aka = side(match, "aka");
+        const ao = side(match, "ao");
+
+        if (aka.won || ao.won) {
+          page.drawRectangle({
+            x: MARGIN,
+            y: y - 16,
+            width: CONTENT_W,
+            height: 20,
+            color: WON_BG,
+          });
+        }
+
+        page.drawText(`#${match.matchNo}`, {
+          x: MARGIN + 2,
+          y: y - 10,
+          size: 8,
+          font: bold,
+          color: MUTED,
+        });
+
+        const nameX = MARGIN + 26;
+        const nameW = 200;
+        const akaLabel = `${aka.name}${aka.chest ? ` (${aka.chest})` : ""}`;
+        const aoLabel = `${ao.name}${ao.chest ? ` (${ao.chest})` : ""}`;
+
+        page.drawText(`AKA`, { x: nameX, y: y - 2, size: 6, font: bold, color: AKA });
+        page.drawText(ellipsize(akaLabel, aka.won ? bold : regular, 9, nameW), {
+          x: nameX + 24,
+          y: y - 2,
+          size: 9,
+          font: aka.won ? bold : regular,
+          color: INK,
+        });
+
+        page.drawText(`AO`, { x: nameX, y: y - 13, size: 6, font: bold, color: AO });
+        page.drawText(ellipsize(aoLabel, ao.won ? bold : regular, 9, nameW), {
+          x: nameX + 24,
+          y: y - 13,
+          size: 9,
+          font: ao.won ? bold : regular,
+          color: INK,
+        });
+
+        // Points, in the corner colour of the fighter they belong to.
+        const scoreX = nameX + nameW + 16;
+        page.drawText(`AKA ${match.akaScore ?? 0}`, {
+          x: scoreX,
+          y: y - 2,
+          size: 9,
+          font: bold,
+          color: AKA,
+        });
+        page.drawText(`AO ${match.aoScore ?? 0}`, {
+          x: scoreX,
+          y: y - 13,
+          size: 9,
+          font: bold,
+          color: AO,
+        });
+
+        const detail =
+          match.status === "BYE" || match.status === "WALKOVER"
+            ? "walkover"
+            : decidedMatch
+              ? `W · ${safe(aka.won ? aka.name : ao.won ? ao.name : "")}${
+                  match.decisionMethod ? ` · ${safe(match.decisionMethod)}` : ""
+                }`
+              : match.status === "LIVE"
+                ? "in progress"
+                : "not fought yet";
+
+        page.drawText(ellipsize(detail, regular, 8, 108), {
+          x: scoreX + 62,
+          y: y - 8,
+          size: 8,
+          font: regular,
+          color: decidedMatch ? MUTED : rgb(0.7, 0.7, 0.7),
+        });
+
+        const schools = [aka.school, ao.school].filter(Boolean).join(" / ");
+        if (schools) {
+          page.drawText(ellipsize(schools, regular, 7, CONTENT_W - 26), {
+            x: nameX,
+            y: y - 22,
+            size: 7,
+            font: regular,
+            color: rgb(0.65, 0.63, 0.6),
+          });
+          y -= 26;
+        } else {
+          y -= 20;
+        }
+      }
+      y -= 4;
+    }
+    y -= 8;
+  }
+
+  // ── Footer on every page ───────────────────────────────────────────────────
+  const pages = pdf.getPages();
+  pages.forEach((p, index) => {
+    p.drawText(`RingFlow · draw state · page ${index + 1} of ${pages.length}`, {
+      x: MARGIN,
+      y: MARGIN / 2,
+      size: 7,
+      font: regular,
+      color: MUTED,
+    });
+  });
+
+  return pdf.save();
+}

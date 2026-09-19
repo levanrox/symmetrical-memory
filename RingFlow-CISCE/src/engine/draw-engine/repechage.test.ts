@@ -150,6 +150,14 @@ describe('repechage — the medals it actually awards', () => {
     expect(bronze).toEqual(['p8']);
   });
 
+  it('awards no bronze at all when the organiser asks for none', () => {
+    const graph = draw(8, { bronzeMedals: 0 });
+
+    // No repechage ladder, no bronze bout, nobody on the third step.
+    expect(graph.matches.filter((match) => match.bracketType !== 'MAIN')).toEqual([]);
+    expect(bronzeOf(graph)).toEqual([]);
+  });
+
   it.each([4, 8, 16, 32])('awards two distinct bronzes in a full %i-entrant bracket', (count) => {
     const graph = draw(count);
     const resolution = resolveDraw(graph, playThrough(graph));
@@ -219,6 +227,21 @@ describe('repechage — integration with the bracket', () => {
   it('is deterministic, like the rest of the draw', () => {
     expect(draw(8).checksum).toBe(draw(8).checksum);
     expect(draw(8, { bronzeMedals: 1 }).checksum).not.toBe(draw(8, { bronzeMedals: 2 }).checksum);
+  });
+
+  it('ends at the final when no bronze is awarded', () => {
+    const graph = draw(8, { bronzeMedals: 0 });
+
+    expect(graph.rounds.at(-1)?.name).toBe('Final');
+    expect(graph.rounds.some((round) => round.name === REPECHAGE_ROUND_NAME)).toBe(false);
+  });
+
+  it('still resolves gold and silver when no bronze is awarded', () => {
+    const resolution = resolveDraw(draw(8, { bronzeMedals: 0 }), playThrough(draw(8, { bronzeMedals: 0 })));
+
+    expect(resolution.podium?.goldRegistrationId).toBe('p1');
+    expect(resolution.podium?.silverRegistrationId).toBe('p2');
+    expect(resolution.podium?.bronzeRegistrationIds ?? []).toEqual([]);
   });
 
   it('does not disturb gold and silver', () => {

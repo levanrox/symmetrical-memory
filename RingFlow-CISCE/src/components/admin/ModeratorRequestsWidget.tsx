@@ -1,8 +1,9 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/utils/supabase/client";
 import { approveModeratorRequest, rejectModeratorRequest } from "@/actions/moderator";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 interface ModRequest {
   id: string;
@@ -29,6 +30,32 @@ export default function ModeratorRequestsWidget({
   const [loadingId, setLoadingId] = useState<string | null>(null);
 
   const pendingRequests = requests.filter((r) => r.status === "pending");
+
+  /**
+   * A moderator knocking on the door has to appear immediately, so the live
+   * feed re-reads the list rather than waiting for the next refresh.
+   */
+  const refreshRequests = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from("moderator_requests")
+        .select("*, rings(name)")
+        .order("created_at", { ascending: false })
+        .limit(25);
+      if (error) {
+        console.error("[requests] live refresh failed:", error.message);
+        return;
+      }
+      if (data) {
+        setRequests(data as ModRequest[]);
+        if (data.some((r: any) => r.status === "pending")) setIsExpanded(true);
+      }
+    } catch (err) {
+      console.error("[requests] live refresh failed:", err);
+    }
+  }, [supabase]);
+
+  useLiveEvents({ tournamentId }, refreshRequests);
 
   useEffect(() => {
     // We cannot easily filter by tournamentId directly on moderator_requests if the column doesn't exist.

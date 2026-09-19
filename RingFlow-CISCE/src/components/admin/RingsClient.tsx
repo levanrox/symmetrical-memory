@@ -83,11 +83,23 @@ export default function RingsClient({
   // Shared loading state
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
 
-  // Sync props → state
+  // Sync props → state.
+  //
+  // Stager codes and requests are adopted only when the server actually sent
+  // something: an empty refresh must never wipe what the admin just created
+  // (that is what made a new code flash and disappear).
   useEffect(() => { setRings(initialRings); }, [initialRings]);
   useEffect(() => { setModRequests(initialModRequests); }, [initialModRequests]);
-  useEffect(() => { setStagerRequests(initialStagerRequests); }, [initialStagerRequests]);
-  useEffect(() => { setStagerCodes(initialStagerCodes); }, [initialStagerCodes]);
+  useEffect(() => {
+    if (initialStagerRequests && initialStagerRequests.length > 0) {
+      setStagerRequests(initialStagerRequests);
+    }
+  }, [initialStagerRequests]);
+  useEffect(() => {
+    if (initialStagerCodes && initialStagerCodes.length > 0) {
+      setStagerCodes(initialStagerCodes);
+    }
+  }, [initialStagerCodes]);
 
   // ── Realtime subscriptions ─────────────────────────────────────────────────
   useEffect(() => {
@@ -130,7 +142,34 @@ export default function RingsClient({
       )
       .subscribe();
 
+    // Polling fallback: the live feed below is the fast path, so this only has
+    // to catch a dropped stream eventually.
+    const poll = setInterval(async () => {
+      const [reqRes, codeRes] = await Promise.all([
+        supabase
+          .from("stager_requests")
+          .select("*")
+          .eq("tournament_id", tournamentId)
+          .order("created_at", { ascending: false })
+          .limit(50),
+        supabase.from("tournaments").select("stager_codes").eq("id", tournamentId).maybeSingle(),
+      ]);
+
+      if (reqRes.error) {
+        console.error("Could not refresh stager requests:", reqRes.error.message);
+      } else if (reqRes.data) {
+        setStagerRequests(reqRes.data as StagerRequest[]);
+      }
+
+      if (codeRes.error) {
+        console.error("Could not refresh stager codes:", codeRes.error.message);
+      } else if (Array.isArray(codeRes.data?.stager_codes)) {
+        setStagerCodes(codeRes.data.stager_codes as StagerCode[]);
+      }
+    }, 15000);
+
     return () => {
+      clearInterval(poll);
       supabase.removeChannel(modChannel);
       supabase.removeChannel(stagerChannel);
     };
@@ -218,7 +257,27 @@ export default function RingsClient({
     setIsGenerating(true);
     try {
       const res = await generateStagerCodes(tournamentId, stagerCountInput);
-      if (res?.stager_codes) setStagerCodes(res.stager_codes);
+
+      if (!res?.success || !res.stager_codes) {
+        alert(("error" in res && res.error) || "Could not generate stager codes.");
+        return;
+      }
+
+      // Show what the database actually holds, not just what the action returned.
+      const supabase = createClient();
+      const { data, error } = await supabase
+        .from("tournaments")
+        .select("stager_codes")
+        .eq("id", tournamentId)
+        .maybeSingle();
+
+      if (error) {
+        console.error("Could not verify the saved stager codes:", error.message);
+        setStagerCodes(res.stager_codes);
+      } else {
+        setStagerCodes((data?.stager_codes as StagerCode[]) ?? res.stager_codes);
+      }
+
       router.refresh();
     } catch (err: any) {
       alert(err?.message || "Failed to generate stager codes.");

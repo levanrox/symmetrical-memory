@@ -14,9 +14,12 @@ import {
 import { saveCategoryDefinitions } from "../src/actions/categoryDefinitions";
 import { OFFICIAL_PRESETS } from "../src/lib/constants/categoryPresets";
 import { importOfficialRoster } from "../src/actions/officialImport";
-import { generateAllTournamentDraws, getCategoryDraw } from "../src/actions/draws";
+import { getCategoryDraw } from "../src/actions/draws";
+// The guarded server action checks the caller's admin session; a seed script has
+// no request context, so it uses the same core the action wraps.
+import { performGenerateAllTournamentDraws } from "../src/lib/draws/generateDraws";
 import { confirmBoutResult } from "../src/actions/matches";
-import { downloadAllCategoryDrawPdfs } from "../src/actions/drawPdfs";
+import { buildAllCategoryDrawPdfs } from "../src/lib/pdf/drawSheetFiles";
 import { eq } from "drizzle-orm";
 import { hashPassword } from "../src/lib/auth/password";
 
@@ -128,7 +131,7 @@ async function runSeed() {
 
   // 6. Generate All Draws in One Go!
   console.log("🌳 Generating digital tournament draws for all categories...");
-  const drawGenResult = await generateAllTournamentDraws(tournament.id);
+  const drawGenResult = await performGenerateAllTournamentDraws(tournament.id);
   console.log(`✅ Draw Generation Result:
      - Categories processed: ${drawGenResult.totalCategories}
      - Draws successfully generated: ${drawGenResult.generatedCount}
@@ -185,7 +188,7 @@ async function runSeed() {
 
   // 10. Test Bulk PDF Generation
   console.log("📄 Testing bulk draw PDF package generation...");
-  const pdfPackage = await downloadAllCategoryDrawPdfs(tournament.id);
+  const pdfPackage = await buildAllCategoryDrawPdfs(tournament.id);
   if (pdfPackage.success) {
     console.log(`✅ Bulk PDF package generated successfully! Includes ${pdfPackage.includedCount} category draw PDFs.`);
   }

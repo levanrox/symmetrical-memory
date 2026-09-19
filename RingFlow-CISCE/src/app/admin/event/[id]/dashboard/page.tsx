@@ -5,6 +5,7 @@ import AdminDashboardClient from "@/components/admin/AdminDashboardClient";
 import { createClient } from "@/utils/supabase/server";
 import { redirect } from "next/navigation";
 import { ensureAdminOwnsTournament } from "@/actions/admin";
+import { getTournamentActiveBouts } from "@/actions/matches";
 import LiveActivityFeed from "@/components/admin/LiveActivityFeed";
 import ModeratorRequestsWidget from "@/components/admin/ModeratorRequestsWidget";
 
@@ -30,26 +31,43 @@ export default async function AdminDashboard({ params }: { params: Promise<{ id:
   }
 
   // 2. Fetch Categories stats
-  const { count: categoryCount } = await supabase
+  const { count: categoryCount, error: categoryCountError } = await supabase
     .from("categories")
     .select("*", { count: "exact", head: true })
     .eq("tournament_id", tournamentId);
+  if (categoryCountError) {
+    console.error("[dashboard] category count failed:", categoryCountError.message);
+  }
 
   // 3. Fetch Rings
-  const { data: rings } = await supabase
+  const { data: rings, error: ringsError } = await supabase
     .from("rings")
     .select("*")
     .eq("tournament_id", tournamentId)
     .order("ring_order", { ascending: true });
+  if (ringsError) {
+    console.error("[dashboard] rings query failed:", ringsError.message);
+  }
 
   const ringIds = rings?.map(r => r.id) || [];
 
-  // Fetch Category Assignments (including completed)
-  const { data: assignments } = await supabase
-    .from("category_assignments")
-    .select("*, categories(name, expected_matches)")
-    .in("ring_id", ringIds)
-    .order("queue_order", { ascending: true });
+  // Fetch Category Assignments (including completed). Skipped entirely when the
+  // event has no tatamis, rather than querying with an empty id list.
+  let assignments: any[] = [];
+  if (ringIds.length > 0) {
+    const { data, error } = await supabase
+      .from("category_assignments")
+      .select("*, categories(name, expected_matches)")
+      .in("ring_id", ringIds)
+      .order("queue_order", { ascending: true });
+
+    if (error) {
+      // Every dashboard counter derives from these rows, so a silent failure
+      // here is what used to render the whole floor as zeros.
+      console.error("[dashboard] category assignments query failed:", error.message);
+    }
+    assignments = data ?? [];
+  }
 
   // 4. Fetch Moderator Requests
   let modRequests: any[] = [];
@@ -64,12 +82,15 @@ export default async function AdminDashboard({ params }: { params: Promise<{ id:
   }
 
   // 5. Fetch Event Logs
-  const { data: logs } = await supabase
+  const { data: logs, error: logsError } = await supabase
     .from("event_log")
     .select("*")
     .eq("tournament_id", tournamentId)
     .order("created_at", { ascending: false })
     .limit(200);
+  if (logsError) {
+    console.error("[dashboard] event log query failed:", logsError.message);
+  }
 
   // Prepare assignments data joined with categories for client (batch query, avoiding N+1)
   const categoryIds = Array.from(new Set(assignments?.map((a) => a.category_id).filter(Boolean) || []));
@@ -87,6 +108,12 @@ export default async function AdminDashboard({ params }: { params: Promise<{ id:
     categories: categoryMap.get(a.category_id) || null,
   }));
 
+  // Who is fighting whom on each mat, so the floor view names the bout.
+  const initialActiveBouts = await getTournamentActiveBouts(tournamentId).catch((err) => {
+    console.error("[dashboard] live bout lookup failed:", err);
+    return {};
+  });
+
   return (
     <AdminDashboardClient 
       tournament={tournament}
@@ -95,6 +122,7 @@ export default async function AdminDashboard({ params }: { params: Promise<{ id:
       initialAssignments={fullAssignments}
       initialModRequests={modRequests}
       initialLogs={logs}
+      initialActiveBouts={initialActiveBouts}
     />
   );
 }

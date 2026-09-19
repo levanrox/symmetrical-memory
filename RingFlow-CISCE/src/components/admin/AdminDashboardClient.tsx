@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import AdminHeader from "@/components/layout/AdminHeader";
 import OrganiserHeader from "@/components/layout/OrganiserHeader";
 import HeaderSearchBar from "@/components/layout/HeaderSearchBar";
@@ -9,6 +9,9 @@ import LiveActivityFeed from "@/components/admin/LiveActivityFeed";
 import ModeratorRequestsWidget from "@/components/admin/ModeratorRequestsWidget";
 import { createClient } from "@/utils/supabase/client";
 import { toggleRingTimer, setAllRingTimers, resetRingTimer } from "@/actions/rings";
+import { getTournamentActiveBouts } from "@/actions/matches";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
+import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import OverviewSupportFooter from "@/components/support/OverviewSupportFooter";
 import BackNavigationGuard from "@/components/common/BackNavigationGuard";
 
@@ -19,6 +22,7 @@ export default function AdminDashboardClient({
   initialAssignments, 
   initialModRequests, 
   initialLogs,
+  initialActiveBouts,
   readOnly = false,
 }: any) {
   const [rings, setRings] = useState<any[]>(initialRings || []);
@@ -165,6 +169,47 @@ export default function AdminDashboardClient({
   const completedCategories = assignments.filter(a => a.status === "completed").length;
   const totalCategories = categoryCount || assignments.length || 0;
   const progressPercent = totalMatches > 0 ? (completedMatches / totalMatches) * 100 : 0;
+
+  // Which tatami's live draw is open, if any.
+  const [bracketCategory, setBracketCategory] = useState<{ id: string; name: string } | null>(null);
+
+  // Who is on each mat right now. Same source the public floor uses.
+  const [activeBouts, setActiveBouts] = useState<Record<string, any>>(initialActiveBouts ?? {});
+
+  const loadActiveBouts = useCallback(async () => {
+    try {
+      const bouts = await getTournamentActiveBouts(tournament.id);
+      setActiveBouts(bouts);
+    } catch (err) {
+      console.error("[dashboard] live bout lookup failed:", err);
+    }
+  }, [tournament.id]);
+
+  // Every mat reports in the moment a score, a bout or a clock changes.
+  useLiveEvents({ tournamentId: tournament.id }, loadActiveBouts);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const load = async () => {
+      try {
+        const bouts = await getTournamentActiveBouts(tournament.id);
+        if (!cancelled) setActiveBouts(bouts);
+      } catch (err) {
+        console.error("[dashboard] live bout lookup failed:", err);
+      }
+      if (cancelled) return;
+      // The live feed is the fast path; this only has to catch a dropped one.
+      timer = setTimeout(load, document.hidden ? 60000 : 20000);
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [tournament.id]);
 
   const [currentTime, setCurrentTime] = useState<number>(() => Date.now());
 
@@ -608,12 +653,43 @@ export default function AdminDashboardClient({
                     status={status as any}
                     categoryName={categoryName}
                     nextCategoryName={nextAssignment?.categories?.name}
+                    bout={
+                      activeBouts[ring.id]?.currentMatch
+                        ? {
+                            matchNo: activeBouts[ring.id].currentMatch.matchNo,
+                            roundName: activeBouts[ring.id].currentMatch.roundName,
+                            status: activeBouts[ring.id].currentMatch.status,
+                            akaName: activeBouts[ring.id].currentMatch.aka?.name || "TBD",
+                            akaScore: activeBouts[ring.id].currentMatch.akaScore ?? 0,
+                            aoName: activeBouts[ring.id].currentMatch.ao?.name || "TBD",
+                            aoScore: activeBouts[ring.id].currentMatch.aoScore ?? 0,
+                          }
+                        : null
+                    }
+                    onDeck={
+                      activeBouts[ring.id]?.nextBout
+                        ? {
+                            matchNo: activeBouts[ring.id].nextBout.matchNo,
+                            akaName: activeBouts[ring.id].nextBout.aka?.name || "TBD",
+                            aoName: activeBouts[ring.id].nextBout.ao?.name || "TBD",
+                          }
+                        : null
+                    }
                     ringOrder={ring.ring_order}
                     currentMatch={currentMatch}
                     totalMatches={totalMatchesForRing}
                     totalExpectedMatches={totalExpectedMatches}
                     divisionCount={ringAssignments.length}
                     progressPercent={ringProgressPercent}
+                    onViewDraw={
+                      assignment?.category_id
+                        ? () =>
+                            setBracketCategory({
+                              id: assignment.category_id,
+                              name: categoryName,
+                            })
+                        : undefined
+                    }
                     estimatedFinish={estFinish}
                     timing={timing}
                     onTogglePause={readOnly ? undefined : () => toggleRingPause(ring.id)}
@@ -638,6 +714,17 @@ export default function AdminDashboardClient({
         {/* Support & Crux Contact Desk */}
         <OverviewSupportFooter />
       </div>
+
+      {/* Live draw for whichever tatami asked for it — scores and winners as they
+          stand right now, for admin and organiser alike. */}
+      {bracketCategory && (
+        <DrawBracketModal
+          categoryId={bracketCategory.id}
+          categoryName={bracketCategory.name}
+          isOpen={Boolean(bracketCategory)}
+          onClose={() => setBracketCategory(null)}
+        />
+      )}
     </>
   );
 }

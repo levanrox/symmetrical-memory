@@ -384,7 +384,7 @@ export function BoutScoringPad({
     return (
       <section
         aria-label={`${isAka ? "Aka, red" : "Ao, blue"} competitor`}
-        className={`flex flex-col rounded-2xl border-2 bg-white p-4 shadow-sm sm:p-5 ${accentBorder}`}
+        className={`flex flex-col rounded-2xl border-2 bg-white p-3 shadow-sm sm:p-4 ${accentBorder}`}
       >
         <div className="mb-3 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
@@ -642,7 +642,7 @@ export function BoutScoringPad({
       </div>
 
       {/* Competitor grid: stacked on phones, side by side from tablet up */}
-      <div className="grid grid-cols-1 gap-4 p-4 md:grid-cols-2 sm:p-6">
+      <div className="grid grid-cols-1 gap-3 p-3 md:grid-cols-2 sm:p-4">
         {sidesSwapped ? renderCompetitor("AO") : renderCompetitor("AKA")}
         {sidesSwapped ? renderCompetitor("AKA") : renderCompetitor("AO")}
       </div>
@@ -657,8 +657,9 @@ export function BoutScoringPad({
         </div>
       )}
 
-      {/* Action bar — confirm sits in the thumb zone on phones */}
-      <div className="flex flex-wrap items-center justify-between gap-3 rounded-b-2xl border-t border-[#E1DDCF] bg-[#F5F3EC] px-4 py-3 sm:px-6">
+      {/* Action bar — always in reach: pinned to the bottom of the screen while
+          the pad scrolls, so Confirm result is never below the fold. */}
+      <div className="sticky bottom-0 z-30 flex flex-wrap items-center justify-between gap-2 rounded-b-2xl border-t border-[#E1DDCF] bg-[#F5F3EC]/95 px-3 py-2 backdrop-blur sm:px-4">
         <div className="flex flex-wrap items-center gap-2">
           <button
             type="button"

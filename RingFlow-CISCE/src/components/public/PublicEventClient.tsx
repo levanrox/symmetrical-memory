@@ -7,7 +7,7 @@ import { formatDisplayDateWithWeekday } from "@/lib/utils";
 import { matchesCategorySearch } from "@/lib/searchUtils";
 import { getTournamentActiveBouts } from "@/actions/matches";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
-import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 import "./public-spectator.css";
 
 interface Tournament {
@@ -90,7 +90,7 @@ export default function PublicEventClient({
   const [rings, setRings] = useState<Ring[]>(initialRings);
   const [assignments, setAssignments] = useState<CategoryAssignment[]>(initialAssignments);
   const [flashingMatId, setFlashingMatId] = useState<string | null>(null);
-  const [viewingPdf, setViewingPdf] = useState<{ url: string; title: string } | null>(null);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const [viewingBracket, setViewingBracket] = useState<{ categoryId: string; categoryName: string } | null>(null);
   const [activeBouts, setActiveBouts] = useState<Record<string, any>>({});
   const [viewingAthleteDraw, setViewingAthleteDraw] = useState<{
@@ -102,23 +102,50 @@ export default function PublicEventClient({
   const isPublicDrawsEnabled = tournament.show_public_draws === true;
   const isPublicScoreboardEnabled = tournament.show_public_scoreboard === true;
 
-  // Poll active running bouts across all tournament tatamis
+  // Poll active bouts across all tournament tatamis. The live feed below is the
+  // fast path; this is the safety net, so it runs on a relaxed cadence and
+  // reports a failure once instead of every tick.
+  const fetchActiveBouts = React.useCallback(async () => {
+    try {
+      const bouts = await getTournamentActiveBouts(tournament.id);
+      setActiveBouts(bouts);
+    } catch (e) {
+      console.error("Live bout data is unavailable; retrying quietly in the background.", e);
+    }
+  }, [tournament.id]);
+
+  useLiveEvents({ tournamentId: tournament.id }, fetchActiveBouts);
+
   useEffect(() => {
     let mounted = true;
+    let timer: ReturnType<typeof setTimeout>;
+    let reportedFailure = false;
+
     const fetchBouts = async () => {
       try {
         const bouts = await getTournamentActiveBouts(tournament.id);
         if (mounted) setActiveBouts(bouts);
+        reportedFailure = false;
       } catch (e) {
-        console.error("Failed to load active bouts:", e);
+        if (!reportedFailure) {
+          reportedFailure = true;
+          console.error("Live bout data is unavailable; retrying quietly in the background.", e);
+        }
       }
     };
 
-    fetchBouts();
-    const interval = setInterval(fetchBouts, 2000);
+    const schedule = async () => {
+      if (!mounted) return;
+      await fetchBouts();
+      if (!mounted) return;
+      timer = setTimeout(schedule, document.hidden ? 60000 : 20000);
+    };
+
+    void schedule();
+
     return () => {
       mounted = false;
-      clearInterval(interval);
+      clearTimeout(timer);
     };
   }, [tournament.id]);
 
@@ -274,22 +301,46 @@ export default function PublicEventClient({
     }
 
     setIsSearching(true);
+    setSearchError(null);
     const cleanQ = q.replace(/^#/, "").trim();
 
     const fetchAthletes = async () => {
       try {
-        const isNumeric = /^\d+$/.test(cleanQ);
-        const nameFilter = isNumeric
-          ? `name.ilike.%${cleanQ}%,chest_number.eq.${cleanQ}`
-          : `name.ilike.%${cleanQ}%,chest_number.ilike.%${cleanQ}%`;
+        // Search terms are passed as filter *values*, never interpolated into an
+        // or=(…) expression: PostgREST treats , . ( ) and spaces as syntax there,
+        // which is what made an ordinary name like "Mary Jane" or "O'Brien"
+        // return an error. The documented wildcard alias is `*` (not `%`), which
+        // also avoids percent-encoding problems.
+        //
+        // Words are searched separately because imported rosters often separate
+        // names with non-breaking spaces: "*joycee*andrea*" matches whatever
+        // sits between the two words.
+        const words = cleanQ.split(/[\s\u00A0\u2000-\u200B]+/).filter(Boolean);
+        const pattern = words.length > 1 ? `*${words.join("*")}*` : `*${cleanQ}*`;
 
-        // 1. Fetch athletes directly matching name or chest number
-        const namePromise = supabase
-          .from("athletes")
-          .select("id, name, chest_number, category_id, categories(id, name, doc_url)")
-          .eq("tournament_id", tournament.id)
-          .or(nameFilter)
-          .limit(20);
+        const searchColumns = "id, name, chest_number, category_id, categories(id, name)";
+
+        // 1. Fetch athletes matching the name and, separately, matching the
+        //    chest number (a text column, so a zero-padded "07" still matches).
+        const [byName, byChest] = await Promise.all([
+          supabase
+            .from("athletes")
+            .select(searchColumns)
+            .eq("tournament_id", tournament.id)
+            .ilike("name", pattern)
+            .limit(20),
+          supabase
+            .from("athletes")
+            .select(searchColumns)
+            .eq("tournament_id", tournament.id)
+            .ilike("chest_number", pattern)
+            .limit(20),
+        ]);
+
+        const nameRes = {
+          data: [...(byName.data ?? []), ...(byChest.data ?? [])],
+          error: byName.error ?? byChest.error ?? null,
+        };
 
         // 2. Fetch categories matching the query (e.g. u14_30-35kg, 30, 14, age, weight)
         const matchingCatIds = (categories || [])
@@ -300,16 +351,22 @@ export default function PublicEventClient({
         if (matchingCatIds.length > 0) {
           catPromise = supabase
             .from("athletes")
-            .select("id, name, chest_number, category_id, categories(id, name, doc_url)")
+            .select("id, name, chest_number, category_id, categories(id, name)")
             .eq("tournament_id", tournament.id)
             .in("category_id", matchingCatIds.slice(0, 40))
             .limit(40);
         }
 
-        const [nameRes, catRes] = await Promise.all([
-          namePromise,
-          catPromise ? catPromise : Promise.resolve({ data: null, error: null }),
-        ]);
+        const catRes = catPromise ? await catPromise : { data: null, error: null };
+
+        // A failed query must never look like "no matches".
+        if (nameRes.error || catRes?.error) {
+          const message = nameRes.error?.message || catRes?.error?.message || "unknown error";
+          console.error("Public search query failed:", message);
+          setSearchError("Search is temporarily unavailable. Please try again in a moment.");
+          setSearchResults([]);
+          return;
+        }
 
         const combined: AthleteSearchResult[] = [];
         const seen = new Set<string>();
@@ -337,6 +394,7 @@ export default function PublicEventClient({
         setSearchResults(combined);
       } catch (err) {
         console.error("Public search error:", err);
+        setSearchError("Search is temporarily unavailable. Please try again in a moment.");
         setSearchResults([]);
       } finally {
         setIsSearching(false);
@@ -345,19 +403,18 @@ export default function PublicEventClient({
       }
     };
 
+    // Clear the previous rows immediately: showing stale results while a new
+    // query is in flight is how people pick the wrong athlete.
+    setSearchResults([]);
+    setActiveIndex(-1);
+
     const debounce = setTimeout(fetchAthletes, 200);
     return () => clearTimeout(debounce);
   }, [searchQuery, tournament.id, categories, supabase]);
 
-  const viewingPdfRef = useRef(viewingPdf);
-  viewingPdfRef.current = viewingPdf;
-
   // Outside click listener for search
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      // Keep search state intact if PDF modal is open or being interacted with
-      if (viewingPdfRef.current) return;
-
       if (searchWrapRef.current && !searchWrapRef.current.contains(e.target as Node)) {
         setIsSearchOpen(false);
       }
@@ -397,27 +454,21 @@ export default function PublicEventClient({
     return { status: "idle" as const, matLabel, ringId: ring.id };
   };
 
-  const getCategoryDoc = (categoryId?: string, athleteCategory?: any) => {
+  const getCategoryName = (categoryId?: string, athleteCategory?: any) => {
     if (athleteCategory) {
       const catObj = Array.isArray(athleteCategory) ? athleteCategory[0] : athleteCategory;
-      if (catObj?.doc_url) return { docUrl: catObj.doc_url as string, name: catObj.name as string };
-      if (catObj?.name) {
-        const match = categories?.find((c) => c.id === categoryId || c.name === catObj.name);
-        if (match?.doc_url) return { docUrl: match.doc_url as string, name: match.name as string };
-        return { docUrl: null, name: catObj.name as string };
-      }
+      if (catObj?.name) return catObj.name as string;
     }
     if (categoryId && categories) {
       const match = categories.find((c) => c.id === categoryId);
-      if (match) return { docUrl: match.doc_url || null, name: match.name || null };
+      if (match?.name) return match.name as string;
     }
-    return { docUrl: null, name: null };
+    return null;
   };
 
   const handleAthleteClick = (
     athlete: AthleteSearchResult,
     ringId: string | null,
-    docUrl: string | null,
     categoryName: string
   ) => {
     setIsSearchOpen(false);
@@ -430,11 +481,6 @@ export default function PublicEventClient({
         athleteName: athlete.name,
         categoryName: categoryName || "Category",
       });
-      return;
-    }
-
-    if (docUrl) {
-      setViewingPdf({ url: docUrl, title: `${athlete.name} · ${categoryName}` });
       return;
     }
 
@@ -489,8 +535,8 @@ export default function PublicEventClient({
       if (activeIndex >= 0 && searchResults[activeIndex]) {
         const athlete = searchResults[activeIndex];
         const { ringId } = getAthleteRingStatus(athlete.category_id);
-        const { docUrl, name: categoryName } = getCategoryDoc(athlete.category_id, athlete.categories);
-        handleAthleteClick(athlete, ringId, docUrl, categoryName || "Category");
+        const categoryName = getCategoryName(athlete.category_id, athlete.categories);
+        handleAthleteClick(athlete, ringId, categoryName || "Category");
       }
     } else if (e.key === "Escape") {
       setIsSearchOpen(false);
@@ -504,46 +550,45 @@ export default function PublicEventClient({
     }).length;
   }, [rings, assignments]);
 
-  const { isEventLive, isEventPast } = useMemo(() => {
+  /**
+   * Live/past depends on today's date in the *viewer's* timezone, which the
+   * server cannot know. Computing it during render made the server and the
+   * browser disagree (React hydration error), so it is settled after mount and
+   * the first paint shows a neutral state on both sides.
+   */
+  const [eventPhase, setEventPhase] = useState<"live" | "past" | "upcoming" | null>(null);
+
+  useEffect(() => {
     if (tournament.status === "completed" || tournament.status === "archived") {
-      return { isEventLive: false, isEventPast: true };
+      setEventPhase("past");
+      return;
     }
     if (tournament.status === "live") {
-      return { isEventLive: true, isEventPast: false };
+      setEventPhase("live");
+      return;
     }
 
     if (tournament.event_date) {
       const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, "0");
-      const day = String(now.getDate()).padStart(2, "0");
-      const todayStr = `${year}-${month}-${day}`;
+      const todayStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(
+        now.getDate()
+      ).padStart(2, "0")}`;
 
-      const d = new Date(tournament.event_date);
-      let dateKey = "";
-      if (!isNaN(d.getTime())) {
-        const y = d.getFullYear();
-        const m = String(d.getMonth() + 1).padStart(2, "0");
-        const dt = String(d.getDate()).padStart(2, "0");
-        dateKey = `${y}-${m}-${dt}`;
-      }
+      // Compare the calendar day as written, not a parsed instant.
       const rawKey = String(tournament.event_date).split("T")[0];
 
-      if (dateKey === todayStr || rawKey === todayStr) {
-        return { isEventLive: true, isEventPast: false };
-      } else if (dateKey > todayStr || rawKey > todayStr) {
-        return { isEventLive: false, isEventPast: false };
+      if (rawKey === todayStr) {
+        setEventPhase("live");
+      } else if (rawKey > todayStr) {
+        setEventPhase("upcoming");
       } else {
-        return { isEventLive: false, isEventPast: true };
+        setEventPhase("past");
       }
+      return;
     }
 
-    if (runningCount > 0) {
-      return { isEventLive: true, isEventPast: false };
-    }
-
-    return { isEventLive: false, isEventPast: false };
-  }, [tournament, runningCount]);
+    setEventPhase(runningCount > 0 ? "live" : "upcoming");
+  }, [tournament.status, tournament.event_date, runningCount]);
 
   // Eyebrow text
   const eyebrowText = useMemo(() => {
@@ -568,13 +613,18 @@ export default function PublicEventClient({
               </svg>
               All events
             </Link>
-            {isEventLive ? (
+            {eventPhase === "live" ? (
               <span className="spectator-live-chip">
                 <span className="spectator-beacon"></span>LIVE
               </span>
-            ) : isEventPast ? (
+            ) : eventPhase === "past" ? (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#ECE9DF] text-[#7A756B] border border-[#E1DDCF] text-[11px] font-bold tracking-wider uppercase font-['Inter',sans-serif]">
                 <span className="w-2 h-2 rounded-full bg-[#8C877C]"></span>OVER
+              </span>
+            ) : eventPhase === null ? (
+              <span className="spectator-status spectator-status-idle" aria-hidden="true">
+                <span className="dot"></span>
+                …
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-[#2563EB]/10 text-[#1D4ED8] border border-[#2563EB]/20 text-[11px] font-extrabold tracking-wider uppercase font-['Inter',sans-serif]">
@@ -634,16 +684,19 @@ export default function PublicEventClient({
             role="listbox"
           >
             {isSearching ? (
-              <div className="spectator-no-results">Searching athletes...</div>
+              <div className="spectator-no-results">Searching athletes…</div>
+            ) : searchError ? (
+              <div className="spectator-no-results">{searchError}</div>
             ) : searchResults.length === 0 ? (
-              <div className="spectator-no-results">No athletes match that search.</div>
+              <div className="spectator-no-results">
+                No athletes match “{searchQuery.trim()}”. Try a full name, chest number, or division.
+              </div>
             ) : (
               searchResults.map((a, i) => {
                 const { status, matLabel, ringId } = getAthleteRingStatus(a.category_id);
                 const meta = statusMeta[status];
                 const parts = matLabel.match(/(Tatami \d+)(.*)/);
-                const { docUrl, name: categoryName } = getCategoryDoc(a.category_id, a.categories);
-                const displayCategoryName = categoryName || "Uncategorized";
+                const displayCategoryName = getCategoryName(a.category_id, a.categories) || "Uncategorized";
 
                 return (
                   <div
@@ -653,7 +706,7 @@ export default function PublicEventClient({
                     aria-selected={activeIndex === i}
                     data-index={i}
                     data-mat-id={ringId || ""}
-                    onClick={() => handleAthleteClick(a, ringId, docUrl, displayCategoryName)}
+                    onClick={() => handleAthleteClick(a, ringId, displayCategoryName)}
                   >
                     {/* Top Row: Chest & Athlete Name on Left, Status Badge on Right */}
                     <div className="spectator-result-top">
@@ -713,27 +766,6 @@ export default function PublicEventClient({
                           >
                             <span className="material-symbols-outlined text-[14px] text-[#68645A]">account_tree</span>
                             <span className="spectator-draws-link">Full draw</span>
-                          </button>
-                        )}
-                        {docUrl && (
-                          <button
-                            type="button"
-                            className="spectator-pdf-chip"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setIsSearchOpen(false);
-                              setViewingPdf({
-                                url: docUrl,
-                                title: `${a.name} · ${displayCategoryName}`,
-                              });
-                            }}
-                            title="View category draws PDF"
-                          >
-                            <svg className="spectator-pdf-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                              <rect x="0.5" y="0.5" width="15" height="15" rx="3" fill="#68645A" stroke="#524F47" strokeWidth="0.5" />
-                              <text x="8" y="11" fill="#FFFFFF" fontSize="6.5" fontWeight="800" textAnchor="middle" fontFamily="system-ui, -apple-system, sans-serif" letterSpacing="0.2">PDF</text>
-                            </svg>
-                            <span className="spectator-draws-link">PDF Draws</span>
                           </button>
                         )}
                       </div>
@@ -902,50 +934,57 @@ export default function PublicEventClient({
                       return (
                         <div className="mt-3.5 space-y-2.5 pt-2.5 border-t border-[#E1DDCF]/40">
                           {curMatch ? (
-                            <div className="p-2.5 rounded-xl bg-neutral-900/90 text-white shadow-sm border border-neutral-800 space-y-2">
-                              <div className="flex items-center justify-between text-[11px] font-bold tracking-wider uppercase text-neutral-400">
-                                <span className="flex items-center gap-1.5">
-                                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                                  Bout #{curMatch.matchNo} · {curMatch.roundName || "Match"}
+                            <div className="spectator-bout">
+                              <div className="spectator-bout__head">
+                                <span className="spectator-bout__label">
+                                  <span className="spectator-bout__pip" />
+                                  Bout {curMatch.matchNo} · {curMatch.roundName || "Match"}
                                 </span>
-                                <span className={`px-2 py-0.5 rounded text-[10px] font-black ${
-                                  curMatch.status === "LIVE"
-                                    ? "bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse"
-                                    : curMatch.status === "CONFIRMED"
-                                    ? "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-                                    : "bg-neutral-800 text-neutral-400"
-                                }`}>
+                                <span
+                                  className={`spectator-status ${
+                                    curMatch.status === "LIVE"
+                                      ? "spectator-status-run"
+                                      : curMatch.status === "CONFIRMED"
+                                        ? "spectator-status-idle"
+                                        : "spectator-status-queued"
+                                  }`}
+                                >
+                                  <span className="dot"></span>
                                   {curMatch.status}
                                 </span>
                               </div>
 
-                              <div className="grid grid-cols-2 gap-2">
-                                <div className="p-2 rounded-lg bg-red-950/40 border border-red-900/40 flex items-center justify-between">
-                                  <div className="min-w-0 pr-1">
-                                    <span className="text-[9px] font-black text-red-400 block tracking-wider">AKA (RED)</span>
-                                    <p className="font-bold text-xs text-white truncate">{curMatch.aka?.name || "TBD"}</p>
-                                    <p className="text-[10px] text-neutral-400 truncate">{curMatch.aka?.school || ""}</p>
+                              <div className="spectator-bout__sides">
+                                <div className="spectator-bout__side spectator-bout__side--aka">
+                                  <div className="min-w-0">
+                                    <span className="spectator-bout__corner">AKA</span>
+                                    <p className="spectator-bout__name">{curMatch.aka?.name || "TBD"}</p>
+                                    {curMatch.aka?.school && (
+                                      <p className="spectator-bout__club">{curMatch.aka.school}</p>
+                                    )}
                                   </div>
-                                  <span className="font-mono font-black text-lg text-red-400 shrink-0 ml-1">
-                                    {curMatch.akaScore ?? 0}
-                                  </span>
+                                  <span className="spectator-bout__score mono">{curMatch.akaScore ?? 0}</span>
                                 </div>
 
-                                <div className="p-2 rounded-lg bg-blue-950/40 border border-blue-900/40 flex items-center justify-between">
-                                  <div className="min-w-0 pr-1">
-                                    <span className="text-[9px] font-black text-blue-400 block tracking-wider">AO (BLUE)</span>
-                                    <p className="font-bold text-xs text-white truncate">{curMatch.ao?.name || "TBD"}</p>
-                                    <p className="text-[10px] text-neutral-400 truncate">{curMatch.ao?.school || ""}</p>
+                                <div className="spectator-bout__side spectator-bout__side--ao">
+                                  <div className="min-w-0">
+                                    <span className="spectator-bout__corner">AO</span>
+                                    <p className="spectator-bout__name">{curMatch.ao?.name || "TBD"}</p>
+                                    {curMatch.ao?.school && (
+                                      <p className="spectator-bout__club">{curMatch.ao.school}</p>
+                                    )}
                                   </div>
-                                  <span className="font-mono font-black text-lg text-blue-400 shrink-0 ml-1">
-                                    {curMatch.aoScore ?? 0}
-                                  </span>
+                                  <span className="spectator-bout__score mono">{curMatch.aoScore ?? 0}</span>
                                 </div>
                               </div>
                             </div>
                           ) : (
-                            <div className="p-2 rounded-lg bg-stone-100 dark:bg-neutral-800/60 text-center text-xs text-stone-500">
-                              Preparing active bout on mat...
+                            <div className="spectator-alert-row">
+                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                <circle cx="12" cy="12" r="9" />
+                                <path d="M12 8v4M12 16h.01" />
+                              </svg>
+                              Preparing the next bout on this mat
                             </div>
                           )}
 
@@ -1005,19 +1044,29 @@ export default function PublicEventClient({
                     )}
                   </div>
 
-                  {/* Foot / Next Queue */}
+                  {/* Foot / Next Queue — the next bout, and the division after it */}
                   <div className="spectator-mat-card__foot">
                     {activeBouts[ring.id]?.nextBout ? (
-                      <>
-                        <span className="spectator-next-label">NEXT</span>
-                        <span className="spectator-next-value">
-                          <span className="text-[#DC2626] font-black">AKA</span>{" "}
-                          {activeBouts[ring.id].nextBout.aka?.name || "TBD"}{" "}
-                          <span className="text-[#68645A]">vs</span>{" "}
-                          <span className="text-[#2563EB] font-black">AO</span>{" "}
-                          {activeBouts[ring.id].nextBout.ao?.name || "TBD"}
-                        </span>
-                      </>
+                      <div className="flex flex-col gap-1 min-w-0">
+                        <div className="flex items-baseline gap-2 min-w-0">
+                          <span className="spectator-next-label">NEXT</span>
+                          <span className="spectator-next-value truncate">
+                            <span className="text-[#DC2626] font-black">AKA</span>{" "}
+                            {activeBouts[ring.id].nextBout.aka?.name || "TBD"}{" "}
+                            <span className="text-[#68645A]">vs</span>{" "}
+                            <span className="text-[#2563EB] font-black">AO</span>{" "}
+                            {activeBouts[ring.id].nextBout.ao?.name || "TBD"}
+                          </span>
+                        </div>
+                        {nextAssignment?.categories?.name && (
+                          <div className="flex items-baseline gap-2 min-w-0">
+                            <span className="spectator-next-label">Then</span>
+                            <span className="spectator-next-value muted truncate">
+                              {nextAssignment.categories.name}
+                            </span>
+                          </div>
+                        )}
+                      </div>
                     ) : nextAssignment?.categories?.name ? (
                       <>
                         <span className="spectator-next-label">NEXT</span>
@@ -1067,18 +1116,13 @@ export default function PublicEventClient({
         </div>
       </div>
 
-      {/* Floating PDF Viewer Modal */}
-      <PdfViewerModal
-        url={viewingPdf?.url || null}
-        title={viewingPdf?.title}
-        onClose={() => setViewingPdf(null)}
-      />
 
       {/* Floating Interactive Bracket Tree Modal */}
       {viewingBracket && (
         <DrawBracketModal
           categoryId={viewingBracket.categoryId}
           categoryName={viewingBracket.categoryName}
+          allowPdf={false}
           isOpen={Boolean(viewingBracket)}
           onClose={() => setViewingBracket(null)}
         />
@@ -1091,6 +1135,7 @@ export default function PublicEventClient({
           categoryName={viewingAthleteDraw.categoryName}
           athleteId={viewingAthleteDraw.athleteId}
           subtitle={`Showing ${viewingAthleteDraw.athleteName} in ${viewingAthleteDraw.categoryName}`}
+          allowPdf={false}
           isOpen={Boolean(viewingAthleteDraw)}
           onClose={() => setViewingAthleteDraw(null)}
         />

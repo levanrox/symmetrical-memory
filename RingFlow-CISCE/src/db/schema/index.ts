@@ -41,6 +41,8 @@ export const tournaments = pgTable('tournaments', {
   stagerCodes: jsonb('stager_codes').default([]),
   showPublicDraws: boolean('show_public_draws').default(true),
   showPublicScoreboard: boolean('show_public_scoreboard').notNull().default(false),
+  // 0 = no bronze bout, 1 = single bronze, 2 = repechage with two bronzes (WKF).
+  defaultBronzeMedals: integer('default_bronze_medals').notNull().default(2),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
     .notNull()
     .defaultNow(),
@@ -95,6 +97,8 @@ export const categories = pgTable('categories', {
   sex: text('sex'),
   day: text('day'),
   docUrl: text('doc_url'),
+  // Null means "inherit the tournament's default".
+  bronzeMedals: integer('bronze_medals'),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
     .notNull()
     .defaultNow(),
@@ -298,6 +302,8 @@ export const draws = pgTable('draws', {
   byeCount: integer('bye_count').notNull().default(0),
   checksum: text('checksum').notNull(),
   state: text('state').notNull().default('DRAFT'), // 'DRAFT' | 'LOCKED'
+  // What this draw was actually generated with, so it can be re-read honestly.
+  bronzeMedals: integer('bronze_medals').notNull().default(2),
   lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'date' }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
     .notNull()

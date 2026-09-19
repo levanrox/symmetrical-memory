@@ -4,7 +4,7 @@ import { redirect } from "next/navigation";
 import { ensureAdminOwnsTournament } from "@/actions/admin";
 import RingsClient from "@/components/admin/RingsClient";
 import { db } from "@/db";
-import { tournaments, rings, moderatorRequests } from "@/db/schema";
+import { tournaments, rings, moderatorRequests, stagerRequests } from "@/db/schema";
 import { eq, and, inArray, desc, asc } from "drizzle-orm";
 
 export default async function AdminRings({ params }: { params: Promise<{ id: string }> }) {
@@ -17,7 +17,7 @@ export default async function AdminRings({ params }: { params: Promise<{ id: str
   }
 
   const [tournament] = await db
-    .select({ name: tournaments.name })
+    .select({ name: tournaments.name, stagerCodes: tournaments.stagerCodes })
     .from(tournaments)
     .where(eq(tournaments.id, tournamentId))
     .limit(1);
@@ -61,6 +61,34 @@ export default async function AdminRings({ params }: { params: Promise<{ id: str
     }
   }
 
+  // Stager codes live on the tournament row and stager requests in their own
+  // table. Both used to be passed as empty arrays, which is why a freshly
+  // generated code vanished on the next render.
+  const stagerCodes = Array.isArray(tournament.stagerCodes) ? tournament.stagerCodes : [];
+
+  let stagerReqList: any[] = [];
+  try {
+    const reqs = await db
+      .select()
+      .from(stagerRequests)
+      .where(eq(stagerRequests.tournamentId, tournamentId))
+      .orderBy(desc(stagerRequests.createdAt))
+      .limit(50);
+
+    stagerReqList = reqs.map((r) => ({
+      id: r.id,
+      tournament_id: r.tournamentId,
+      stager_name: r.stagerName || "Stager",
+      access_code_used: r.accessCodeUsed,
+      status: r.status,
+      device_info: r.deviceInfo,
+      created_at: r.createdAt ? r.createdAt.toISOString() : new Date().toISOString(),
+      expires_at: r.expiresAt ? r.expiresAt.toISOString() : new Date().toISOString(),
+    }));
+  } catch (err) {
+    console.warn("Could not fetch stagerRequests:", err);
+  }
+
   return (
     <>
       <AdminHeader title="Access" eventName={tournament.name} />
@@ -73,8 +101,8 @@ export default async function AdminRings({ params }: { params: Promise<{ id: str
           access_code: r.accessCode,
         }))}
         initialModRequests={modRequests}
-        initialStagerRequests={[]}
-        initialStagerCodes={[]}
+        initialStagerRequests={stagerReqList}
+        initialStagerCodes={stagerCodes}
       />
     </>
   );

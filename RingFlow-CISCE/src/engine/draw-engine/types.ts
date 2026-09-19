@@ -48,12 +48,15 @@ export interface DrawOptions {
   /**
    * How many bronze medals the category awards.
    *
-   * Two is the WKF default for elimination with repechage: each finalist's line
-   * produces one bronze. One runs the two line winners against each other for a
-   * single bronze, which is how some team and invitational formats work. This is
-   * a decision the organiser makes before the draw, not after.
+   * 2 — the WKF default for elimination with repechage: each finalist's line
+   *     produces one bronze, fed by a repechage ladder.
+   * 1 — the two semifinal losers meet once for a single bronze, no repechage.
+   * 0 — no bronze bout at all (some school and invitational events stop at the
+   *     final).
+   *
+   * This is a decision the organiser makes before the draw, not after.
    */
-  bronzeMedals?: 1 | 2;
+  bronzeMedals?: 0 | 1 | 2;
 }
 
 export interface DrawInput {

@@ -14,11 +14,24 @@ export interface RingTimingData {
   diffSeconds: number;
 }
 
+export interface RingBoutView {
+  matchNo: number;
+  roundName: string;
+  status: string;
+  akaName: string;
+  akaScore: number;
+  aoName: string;
+  aoScore: number;
+}
+
 interface RingCardProps {
   name: string;
   status: RingStatus;
   categoryName?: string;
   nextCategoryName?: string;
+  /** Who is on the mat right now, and who is next. */
+  bout?: RingBoutView | null;
+  onDeck?: { matchNo: number; akaName: string; aoName: string } | null;
   ringOrder?: number;
   currentMatch?: number;
   totalMatches?: number;
@@ -33,6 +46,8 @@ interface RingCardProps {
   formatTimeTook: (seconds: number) => string;
   formatTimeExpected: (seconds: number) => string;
   readOnly?: boolean;
+  /** Opens this category's live draw (current scores, winners, repechage). */
+  onViewDraw?: () => void;
 }
 
 export default function RingCard({
@@ -40,6 +55,8 @@ export default function RingCard({
   status,
   categoryName = "Pending Next Category",
   nextCategoryName,
+  bout,
+  onDeck,
   ringOrder,
   currentMatch = 0,
   totalMatches = 0,
@@ -54,6 +71,7 @@ export default function RingCard({
   formatTimeTook,
   formatTimeExpected,
   readOnly = false,
+  onViewDraw,
 }: RingCardProps) {
   // Status resolution matching public spectator floor
   const isRunning = status === "Running";
@@ -165,13 +183,75 @@ export default function RingCard({
             </div>
           ) : (
             <>
-              {/* Category Title */}
-              <h4
-                className="font-bold text-[15px] text-[#1B1815] mb-2 leading-snug line-clamp-1"
-                title={categoryName}
-              >
-                {categoryName}
-              </h4>
+              {/* Category Title — with a one-tap look at the live draw */}
+              <div className="mb-2 flex items-start justify-between gap-2">
+                <h4
+                  className="font-bold text-[15px] text-[#1B1815] leading-snug line-clamp-1 min-w-0"
+                  title={categoryName}
+                >
+                  {categoryName}
+                </h4>
+                {onViewDraw && (
+                  <button
+                    type="button"
+                    onClick={onViewDraw}
+                    title="View live draw for this category"
+                    aria-label={`View live draw for ${categoryName ?? "this category"}`}
+                    className="flex min-h-[26px] shrink-0 items-center gap-1 rounded-md border border-[#E1DDCF] bg-white px-1.5 text-[9.5px] font-black uppercase tracking-wider text-[#68645A] transition-colors hover:border-[#0E9C7C] hover:text-[#0B7C63] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                  >
+                    <span className="material-symbols-outlined text-[13px]">account_tree</span>
+                    Draw
+                  </button>
+                )}
+              </div>
+
+              {/* Who is on this mat right now */}
+              {bout && (
+                <div className="mb-3 rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] overflow-hidden">
+                  <div className="flex items-center justify-between gap-2 border-b border-[#EBE8DD] px-3 py-1.5">
+                    <span className="text-[10px] font-label-caps font-bold uppercase tracking-wider text-[#68645A]">
+                      Bout {bout.matchNo} · {bout.roundName}
+                    </span>
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[9px] font-black uppercase ${
+                        bout.status === "LIVE"
+                          ? "bg-[#E5F1E8] text-[#1F5C3B]"
+                          : bout.status === "CONFIRMED"
+                            ? "bg-[#ECE9DF] text-[#59564C]"
+                            : "bg-white text-[#68645A] border border-[#E1DDCF]"
+                      }`}
+                    >
+                      {bout.status === "CONFIRMED" ? "Done" : bout.status}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-dashed border-[#EBE8DD]">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="h-2 w-2 shrink-0 rounded-full bg-[#C0392B]" />
+                      <span className="shrink-0 text-[9px] font-black uppercase tracking-wider text-[#8E2E27]">
+                        AKA
+                      </span>
+                      <span className="truncate text-xs font-bold text-[#1B1815]">{bout.akaName}</span>
+                    </span>
+                    <span className="shrink-0 font-data-mono text-base font-black text-[#C0392B] tabular-nums">
+                      {bout.akaScore}
+                    </span>
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2 px-3 py-1.5">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className="h-2 w-2 shrink-0 rounded-full bg-[#1D4ED8]" />
+                      <span className="shrink-0 text-[9px] font-black uppercase tracking-wider text-[#1E3A8A]">
+                        AO
+                      </span>
+                      <span className="truncate text-xs font-bold text-[#1B1815]">{bout.aoName}</span>
+                    </span>
+                    <span className="shrink-0 font-data-mono text-base font-black text-[#1D4ED8] tabular-nums">
+                      {bout.aoScore}
+                    </span>
+                  </div>
+                </div>
+              )}
 
               {/* 10-Segment Hatched Progress Bar */}
               <SegmentedProgressBar
@@ -245,13 +325,22 @@ export default function RingCard({
             <span className="text-[10px] font-bold tracking-[0.08em] text-[#A19C90] uppercase shrink-0">
               NEXT
             </span>
-            <span
-              className={`text-[12px] truncate ${
-                nextCategoryName ? "font-semibold text-[#1B1815]" : "font-normal text-[#A19C90]"
-              }`}
-            >
-              {nextCategoryName || "No upcoming division queued"}
-            </span>
+            {onDeck ? (
+              <span className="text-[12px] truncate font-semibold text-[#1B1815]">
+                Bout {onDeck.matchNo} ·{" "}
+                <span className="text-[#C0392B]">{onDeck.akaName || "TBD"}</span>
+                <span className="text-[#A19C90]"> vs </span>
+                <span className="text-[#1D4ED8]">{onDeck.aoName || "TBD"}</span>
+              </span>
+            ) : (
+              <span
+                className={`text-[12px] truncate ${
+                  nextCategoryName ? "font-semibold text-[#1B1815]" : "font-normal text-[#A19C90]"
+                }`}
+              >
+                {nextCategoryName || "No upcoming division queued"}
+              </span>
+            )}
           </div>
 
           <span className="font-data-mono text-[11px] text-[#68645A] shrink-0" suppressHydrationWarning>

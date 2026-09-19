@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createClient } from "@/utils/supabase/client";
 import { getRingActiveBout } from "@/actions/matches";
 import { useMatchClock, type ClockSyncSample } from "@/hooks/useMatchClock";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { normalizeClock } from "@/lib/matchClock";
 import { BoutHeader } from "@/components/scoreboard/BoutHeader";
 import { ClockStage } from "@/components/scoreboard/ClockStage";
@@ -15,7 +16,13 @@ interface Props {
   initialData: any;
 }
 
-const POLL_MS = 1000;
+// Poll only as often as the screen actually needs: a running clock re-anchors
+// every second, an idle one rarely changes, and a hidden tab barely at all.
+// The live feed below carries every change instantly; these cadences are the
+// safety net for a dropped stream.
+const RUNNING_POLL_MS = 1000;
+const IDLE_POLL_MS = 20000;
+const HIDDEN_POLL_MS = 45000;
 const CHROME_HIDE_MS = 4000;
 const STALE_MS = 6000;
 
@@ -40,6 +47,7 @@ export function ScoreboardClient({ ringId, initialData }: Props) {
 
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sentAtRef = useRef(Date.now());
+  const clockStatusRef = useRef<string>("idle");
 
   const fetchBout = useCallback(async () => {
     sentAtRef.current = Date.now();
@@ -48,6 +56,8 @@ export function ScoreboardClient({ ringId, initialData }: Props) {
       const receivedAt = Date.now();
       if (res) {
         setData(res);
+        // Drives the poll cadence: is the clock running right now?
+        clockStatusRef.current = normalizeClock(res.clock ?? res.ring).status;
         if (typeof res.serverNow === "number") {
           setSync({ serverNow: res.serverNow, sentAt: sentAtRef.current, receivedAt });
         }
@@ -58,11 +68,35 @@ export function ScoreboardClient({ ringId, initialData }: Props) {
     }
   }, [ringId]);
 
+  // Poll on a cadence the screen earns: fast only while a clock runs.
   useEffect(() => {
-    fetchBout();
-    const interval = setInterval(fetchBout, POLL_MS);
-    return () => clearInterval(interval);
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+
+    const schedule = () => {
+      if (cancelled) return;
+      const delay = document.hidden
+        ? HIDDEN_POLL_MS
+        : clockStatusRef.current === "running"
+          ? RUNNING_POLL_MS
+          : IDLE_POLL_MS;
+      timer = setTimeout(async () => {
+        await fetchBout();
+        schedule();
+      }, delay);
+    };
+
+    void fetchBout().then(schedule);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
   }, [fetchBout]);
+
+  // The arena screen follows the desk the moment anything changes: a score, a
+  // bout swap, the clock, the next-fight strip.
+  useLiveEvents({ ringId }, fetchBout);
 
   // Instant clock/score state when websockets are available.
   useEffect(() => {

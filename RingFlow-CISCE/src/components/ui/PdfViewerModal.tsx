@@ -187,7 +187,14 @@ export function PdfViewerModal({ url, title, onClose }: PdfViewerModalProps) {
 
     try {
       const pdfjs = await loadPdfJs();
-      const freshUrl = url.includes("?") ? `${url}&_cb=${Date.now()}` : `${url}?_cb=${Date.now()}`;
+      // Storage URLs are cached and need busting to show a fresh document, but
+      // appending a query to a blob:/data: URL makes it unresolvable.
+      const isInlineUrl = url.startsWith("blob:") || url.startsWith("data:");
+      const freshUrl = isInlineUrl
+        ? url
+        : url.includes("?")
+          ? `${url}&_cb=${Date.now()}`
+          : `${url}?_cb=${Date.now()}`;
       const loadingTask = pdfjs.getDocument({
         url: freshUrl,
         withCredentials: false,

@@ -7,10 +7,12 @@ import { CategoryInput } from "@/actions/tournament";
 import { matchesCategorySearch } from "@/lib/searchUtils";
 import * as XLSX from "xlsx";
 import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
-import { generateAllTournamentDraws, generateCategoryDraw } from "@/actions/draws";
+import { generateAllTournamentDraws, generateCategoryDraw, setCategoryDrawOption } from "@/actions/draws";
 import { downloadAllCategoryDrawPdfs, downloadCategoryDrawPdf } from "@/actions/drawPdfs";
+import { exportTournamentResultsCsv, exportTournamentResultsPdf } from "@/actions/resultsExport";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import { CategoryDefinitionsModal } from "@/components/admin/CategoryDefinitionsModal";
+import { useRouter } from "next/navigation";
 
 type Category = {
   id: string;
@@ -20,6 +22,8 @@ type Category = {
   athletes_count: number;
   expected_matches: number;
   doc_url?: string | null;
+  /** 0 = no bronze, 1 = single bronze, 2 = repechage; null inherits the event default. */
+  bronze_medals?: number | null;
 };
 
 interface Props {
@@ -56,7 +60,10 @@ export default function CategoriesClient({
   const [showDefinitionsModal, setShowDefinitionsModal] = useState(false);
   const [bracketModalCategory, setBracketModalCategory] = useState<{ id: string; name: string } | null>(null);
   const [isGeneratingAllDraws, setIsGeneratingAllDraws] = useState(false);
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
+  const router = useRouter();
   const [isDownloadingAllPdfs, setIsDownloadingAllPdfs] = useState(false);
+  const [exporting, setExporting] = useState<"csv" | "pdf" | null>(null);
 
   const [addForm, setAddForm] = useState<CategoryInput>({
     name: "",
@@ -369,6 +376,82 @@ export default function CategoriesClient({
     }
   };
 
+  /**
+   * The post-event record for the association: every bout with its score line,
+   * as a spreadsheet to keep and a printable PDF to sign.
+   */
+  const handleExportResults = async (format: "csv" | "pdf") => {
+    setExporting(format);
+    try {
+      const res =
+        format === "csv"
+          ? await exportTournamentResultsCsv(tournamentId)
+          : await exportTournamentResultsPdf(tournamentId);
+
+      if (!res.success || !res.base64) {
+        alert(("error" in res && res.error) || "Could not build the results record.");
+        return;
+      }
+
+      const byteCharacters = atob(res.base64);
+      const byteNumbers = new Uint8Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i += 1) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const blob = new Blob([byteNumbers], {
+        type: format === "csv" ? "text/csv;charset=utf-8" : "application/pdf",
+      });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = res.filename;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (err: any) {
+      alert(`Export failed: ${err?.message ?? "unknown error"}`);
+    } finally {
+      setExporting(null);
+    }
+  };
+
+  /** Rebuild one category's bracket, using its own bronze setting. */
+  const handleGenerateOneDraw = async (cat: any) => {
+    setRegeneratingId(cat.id);
+    try {
+      const res = await generateCategoryDraw(cat.id);
+      if (!res.success) {
+        alert(res.error || "Could not generate the draw for this category.");
+        return;
+      }
+      router.refresh();
+    } catch (err: any) {
+      alert(err?.message || "Could not generate the draw for this category.");
+    } finally {
+      setRegeneratingId(null);
+    }
+  };
+
+  /**
+   * Record how many bronze medals this category awards. Stored on the category;
+   * it takes effect the next time the draw is generated.
+   */
+  const handleBronzeChange = async (cat: any, value: string) => {
+    const bronzeMedals = value === "inherit" ? null : (Number(value) as 0 | 1 | 2);
+    const res = await setCategoryDrawOption(cat.id, bronzeMedals);
+    if (!res.success) {
+      alert(res.error || "Could not save the bronze setting.");
+      return;
+    }
+    setCategories((prev) =>
+      prev.map((c) => (c.id === cat.id ? { ...c, bronze_medals: bronzeMedals } : c))
+    );
+    // An existing bracket was built with the old setting; offer the rebuild.
+    if (window.confirm(
+      "Bronze setting saved. Regenerate this category's draw now so the bracket matches?"
+    )) {
+      await handleGenerateOneDraw(cat);
+    }
+  };
+
   const handleDownloadSinglePdf = async (categoryId: string) => {
     try {
       const res = await downloadCategoryDrawPdf(categoryId);
@@ -465,6 +548,27 @@ export default function CategoriesClient({
             >
               <span className="material-symbols-outlined text-[18px]">download_for_offline</span>
               {isDownloadingAllPdfs ? "PACKAGING..." : "DOWNLOAD ALL DRAWS (ZIP)"}
+            </button>
+
+            {/* Results record for the association: CSV to keep, PDF to sign */}
+            <button
+              onClick={() => void handleExportResults("csv")}
+              disabled={exporting !== null || categories.length === 0}
+              title="Every bout with its score line, as a spreadsheet"
+              className="px-4 py-2 bg-[#1B1815] hover:bg-[#3D3A33] text-white font-label-caps text-label-caps rounded flex items-center gap-2 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+            >
+              <span className="material-symbols-outlined text-[18px]">table_view</span>
+              {exporting === "csv" ? "BUILDING…" : "RESULTS CSV"}
+            </button>
+
+            <button
+              onClick={() => void handleExportResults("pdf")}
+              disabled={exporting !== null || categories.length === 0}
+              title="Printable results record with signature lines"
+              className="px-4 py-2 bg-[#1B1815] hover:bg-[#3D3A33] text-white font-label-caps text-label-caps rounded flex items-center gap-2 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+            >
+              <span className="material-symbols-outlined text-[18px]">description</span>
+              {exporting === "pdf" ? "BUILDING…" : "RESULTS PDF"}
             </button>
 
             {/* Add category */}
@@ -640,6 +744,36 @@ export default function CategoriesClient({
                         >
                           account_tree
                         </button>
+                        {/* Bronze medals: how this category's draw is built */}
+                        <label className="flex items-center gap-1" title="Bronze medals for this category">
+                          <span className="material-symbols-outlined text-[16px] text-[#C08A5A]">workspace_premium</span>
+                          <select
+                            value={cat.bronze_medals === null || cat.bronze_medals === undefined ? "inherit" : String(cat.bronze_medals)}
+                            onChange={(e) => void handleBronzeChange(cat, e.target.value)}
+                            className="cursor-pointer rounded border border-outline-variant bg-white px-1.5 py-1 font-data-mono text-[11px] font-bold text-[#3D3A33] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                          >
+                            <option value="inherit">Event default</option>
+                            <option value="0">No bronze</option>
+                            <option value="1">One bronze</option>
+                            <option value="2">Two bronzes</option>
+                          </select>
+                        </label>
+
+                        {/* Rebuild just this category's bracket */}
+                        <button
+                          type="button"
+                          onClick={() => void handleGenerateOneDraw(cat)}
+                          disabled={regeneratingId === cat.id}
+                          title="Generate or regenerate this category's draw"
+                          className={`material-symbols-outlined transition-colors text-[18px] cursor-pointer ${
+                            regeneratingId === cat.id
+                              ? "animate-spin text-[#0E9C7C]"
+                              : "text-[#0E9C7C] hover:text-[#0B7C63]"
+                          }`}
+                        >
+                          autorenew
+                        </button>
+
                         {/* Download Draw Sheet PDF */}
                         <button
                           type="button"

@@ -38,7 +38,8 @@ export interface RepechageBuild {
  *
  * `bronzeMedals` is decided before the draw, never after: 2 marks the top of
  * each ladder as a bronze bout, while 1 runs the two ladder winners against each
- * other for a single bronze.
+ * other for a single bronze. The caller never asks for 0 — a category with no
+ * bronze is simply not given a repechage at all.
  */
 export function buildRepechage(
   categoryId: string,

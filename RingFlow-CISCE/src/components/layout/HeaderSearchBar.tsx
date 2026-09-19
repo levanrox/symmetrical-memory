@@ -154,18 +154,34 @@ export default function HeaderSearchBar({
     const runSearch = async () => {
       try {
         const supabase = createClient();
-        const isNumeric = /^\d+$/.test(cleanQ);
-        const nameFilter = isNumeric
-          ? `name.ilike.%${cleanQ}%,chest_number.eq.${cleanQ}`
-          : `name.ilike.%${cleanQ}%,chest_number.ilike.%${cleanQ}%`;
 
-        // 1. Direct name or exact chest number match
-        const directPromise = supabase
-          .from("athletes")
-          .select("id, name, chest_number, category_id, categories(id, name, doc_url)")
-          .eq("tournament_id", tournamentId)
-          .or(nameFilter)
-          .limit(25);
+        // Same rules as the public search: the term is passed as a filter value
+        // (never interpolated into or=(…), where , . ( ) and spaces are syntax),
+        // and `*` is the wildcard alias so nothing needs percent-encoding.
+        // Words are matched separately so a name stored with non-breaking
+        // spaces still matches what someone types with ordinary ones.
+        const words = cleanQ.split(/[\s\u00A0\u2000-\u200B]+/).filter(Boolean);
+        const pattern = words.length > 1 ? `*${words.join("*")}*` : `*${cleanQ}*`;
+        const columns = "id, name, chest_number, category_id, categories(id, name, doc_url)";
+
+        // 1. Direct name match and chest-number match, merged.
+        const directPromise = Promise.all([
+          supabase
+            .from("athletes")
+            .select(columns)
+            .eq("tournament_id", tournamentId)
+            .ilike("name", pattern)
+            .limit(25),
+          supabase
+            .from("athletes")
+            .select(columns)
+            .eq("tournament_id", tournamentId)
+            .ilike("chest_number", pattern)
+            .limit(25),
+        ]).then(([byName, byChest]) => ({
+          data: [...(byName.data ?? []), ...(byChest.data ?? [])],
+          error: byName.error ?? byChest.error ?? null,
+        }));
 
         // 2. Ensure categories are loaded for category-based matching
         let categoriesToSearch = cachedCategories;
@@ -189,7 +205,7 @@ export default function HeaderSearchBar({
         if (matchingCatIds.length > 0) {
           catPromise = supabase
             .from("athletes")
-            .select("id, name, chest_number, category_id, categories(id, name, doc_url)")
+            .select(columns)
             .eq("tournament_id", tournamentId)
             .in("category_id", matchingCatIds.slice(0, 50))
             .limit(40);
@@ -199,6 +215,10 @@ export default function HeaderSearchBar({
           directPromise,
           catPromise ? catPromise : Promise.resolve({ data: null, error: null }),
         ]);
+
+        if (directRes.error) {
+          console.error("Header search failed:", directRes.error.message);
+        }
 
         const combined: SearchAthlete[] = [];
         const seen = new Set<string>();

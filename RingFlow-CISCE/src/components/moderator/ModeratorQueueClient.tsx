@@ -4,12 +4,21 @@ import React, { useState, useEffect } from "react";
 import { createClient } from "@/utils/supabase/client";
 import { useRouter } from "next/navigation";
 import { startCategory, reorderCategory } from "@/actions/moderator";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 export default function ModeratorQueueClient({ ringId, initialAssignments }: { ringId: string, initialAssignments: any[] }) {
   const [assignments, setAssignments] = useState(initialAssignments);
   const [loading, setLoading] = useState(false);
   const router = useRouter();
   const supabase = createClient();
+
+  // The server component owns this list; adopt it whenever it is re-fetched.
+  useEffect(() => {
+    setAssignments(initialAssignments);
+  }, [initialAssignments]);
+
+  // A change on this mat re-reads the queue — no waiting on a poll.
+  useLiveEvents({ ringId }, () => router.refresh());
 
   useEffect(() => {
     const channel = supabase.channel(`queue_${ringId}`)

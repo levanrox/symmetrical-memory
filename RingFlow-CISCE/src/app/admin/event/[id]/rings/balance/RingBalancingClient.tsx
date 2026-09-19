@@ -5,6 +5,8 @@ import { useRouter } from "next/navigation";
 import { DragDropContext, Droppable, Draggable, DropResult } from "@hello-pangea/dnd";
 import { saveAssignments } from "@/actions/balancing";
 import { createClient } from "@/utils/supabase/client";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
+import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import StagerStatusIndicator from "@/components/ui/StagerStatusIndicator";
 import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
 import { SegmentedProgressBar } from "@/components/ui/SegmentedProgressBar";
@@ -80,6 +82,31 @@ export default function RingBalancingClient({
   const [pendingDragResult, setPendingDragResult] = useState<DropResult | null>(null);
   const [confirmText, setConfirmText] = useState("");
   const [viewingPdf, setViewingPdf] = useState<{ url: string; title: string } | null>(null);
+  // Which category's live draw is open on top of the board.
+  const [bracketCategory, setBracketCategory] = useState<{ id: string; name: string } | null>(null);
+
+  /**
+   * One small draw button, used on every card in this screen (idle pool, queue
+   * rail, ring queue, history). It opens the live bracket — current scores,
+   * winners and repechage — not a static sheet.
+   */
+  const renderDrawButton = (cat: Category, size: "xs" | "sm" = "xs") => (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        setBracketCategory({ id: cat.id, name: cat.name });
+      }}
+      title="View live draw"
+      aria-label={`View live draw for ${cat.name}`}
+      className={`material-symbols-outlined text-outline hover:text-[#0E9C7C] transition-colors shrink-0 cursor-pointer ${
+        size === "xs" ? "text-[13px]" : "text-[15px]"
+      }`}
+      style={{ fontVariationSettings: "'FILL' 0" }}
+    >
+      account_tree
+    </button>
+  );
 
   // History popover state
   const [historyOpenForRing, setHistoryOpenForRing] = useState<string | null>(null);
@@ -183,6 +210,40 @@ export default function RingBalancingClient({
     });
     setAssignmentsMap(map);
   }, [initialAssignments]);
+
+  // Live progress for the whole board: match counts, statuses and stager
+  // hand-offs land the moment they happen, without disturbing a drag in flight.
+  const refreshAssignments = useCallback(async () => {
+    const ringIds = initialRings.map((r) => r.id);
+    if (ringIds.length === 0) return;
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase
+        .from("category_assignments")
+        .select("*")
+        .in("ring_id", ringIds);
+      if (error) {
+        console.error("[balancing] live refresh failed:", error.message);
+        return;
+      }
+      const map: Record<string, { matches_completed: number; status: string; ring_id: string; queue_order: number; stager_status: string | null; stager_name: string | null }> = {};
+      for (const row of data ?? []) {
+        map[row.category_id] = {
+          matches_completed: row.matches_completed || 0,
+          status: row.status || "pending",
+          ring_id: row.ring_id,
+          queue_order: row.queue_order ?? 0,
+          stager_status: row.stager_status ?? null,
+          stager_name: row.stager_name ?? null,
+        };
+      }
+      setAssignmentsMap(map);
+    } catch (err) {
+      console.error("[balancing] live refresh failed:", err);
+    }
+  }, [initialRings]);
+
+  useLiveEvents({ tournamentId }, refreshAssignments);
 
   useEffect(() => {
     const supabase = createClient();
@@ -901,6 +962,7 @@ export default function RingBalancingClient({
       <h4 className="text-[12.5px] font-bold text-primary mb-1.5 leading-snug">
         <span className="flex items-center gap-1.5 flex-wrap">
           {cat.name}
+          {renderDrawButton(cat)}
           {cat.doc_url && (
             <button
               type="button"
@@ -1061,6 +1123,7 @@ export default function RingBalancingClient({
                 {ringName}
               </span>
               <div className="flex items-center gap-1.5">
+                {renderDrawButton(cat)}
                 {cat.doc_url && (
                   <button
                     type="button"
@@ -1729,6 +1792,7 @@ export default function RingBalancingClient({
                               <div className="flex justify-between items-center">
                                 <h5 className="text-xs font-bold text-primary flex items-center gap-1">
                                   {cat.name}
+                                  {renderDrawButton(cat)}
                                   {cat.doc_url && (
                                     <button
                                       type="button"
@@ -1937,20 +2001,23 @@ export default function RingBalancingClient({
                                     <div className="p-3">
                                       <div className="flex justify-between items-start gap-1.5 mb-1.5">
                                         <h5 className="text-xs font-bold text-[#1B1815] leading-snug line-clamp-1">{cat.name}</h5>
-                                        {cat.doc_url && (
-                                          <button
-                                            type="button"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              setViewingPdf({ url: cat.doc_url!, title: cat.name });
-                                            }}
-                                            title="View athlete list PDF"
-                                            className="material-symbols-outlined text-[13px] text-outline hover:text-primary transition-colors shrink-0 cursor-pointer"
-                                            style={{ fontVariationSettings: "'FILL' 0" }}
-                                          >
-                                            article
-                                          </button>
-                                        )}
+                                        <div className="flex items-center gap-1.5 shrink-0">
+                                          {renderDrawButton(cat)}
+                                          {cat.doc_url && (
+                                            <button
+                                              type="button"
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                setViewingPdf({ url: cat.doc_url!, title: cat.name });
+                                              }}
+                                              title="View athlete list PDF"
+                                              className="material-symbols-outlined text-[13px] text-outline hover:text-primary transition-colors shrink-0 cursor-pointer"
+                                              style={{ fontVariationSettings: "'FILL' 0" }}
+                                            >
+                                              article
+                                            </button>
+                                          )}
+                                        </div>
                                       </div>
 
                                       <div className="flex items-center gap-1 text-[10px] font-data-mono text-[#68645A] mb-1.5">
@@ -1986,6 +2053,7 @@ export default function RingBalancingClient({
                                       {(cat.age_bracket || (cat.age_min !== null && cat.age_max !== null ? `${cat.age_min}-${cat.age_max}` : ""))} | {cat.weight_class || cat.belt || "-"}
                                     </span>
                                     <div className="flex items-center gap-1.5 shrink-0">
+                                      {renderDrawButton(cat)}
                                       {cat.doc_url && (
                                         <button
                                           type="button"
@@ -2181,6 +2249,16 @@ export default function RingBalancingClient({
         title={viewingPdf?.title}
         onClose={() => setViewingPdf(null)}
       />
+
+      {/* Live draw for whichever category the board asked for */}
+      {bracketCategory && (
+        <DrawBracketModal
+          categoryId={bracketCategory.id}
+          categoryName={bracketCategory.name}
+          isOpen={Boolean(bracketCategory)}
+          onClose={() => setBracketCategory(null)}
+        />
+      )}
     </div>
   );
 }

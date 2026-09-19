@@ -386,9 +386,10 @@ export async function confirmBoutResult(
       }
     }
 
-    // 5. Update matchesCompleted on category_assignments to true confirmed count!
+    // 5. matchesCompleted counts bouts actually fought, so it lines up with the
+    //    expected_matches the draw wrote (which excludes byes/walkovers).
     const totalConfirmed = allMatches.filter(
-      (m) => m.id === matchId || m.status === "CONFIRMED" || m.status === "BYE"
+      (m) => (m.id === matchId || m.status === "CONFIRMED") && m.status !== "BYE"
     ).length;
 
     const [assignment] = await tx

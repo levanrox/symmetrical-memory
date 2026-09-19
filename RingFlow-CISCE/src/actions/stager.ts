@@ -110,7 +110,8 @@ export async function requestStagerAccess(
   if (hasActiveSession) {
     return {
       success: false,
-      error: "This stager code is already in use by an active session. Each code allows one user at a time.",
+      error:
+        "This stager code already has an approved session. Ask the admin to revoke that stager (Event → Access → Stagers), or use a different code.",
     };
   }
 

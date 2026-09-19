@@ -44,14 +44,17 @@ export function generateDraw(input: DrawInput, ruleset: Ruleset): DrawGraph {
 
   const build = buildEliminationBracket(input.categoryId, participantBySeed, size);
 
-  // Repechage is what makes a karate category award two bronzes; a format that
-  // does not have it gets no bronze matches at all.
+  // Repechage is what makes a karate category award two bronzes. A format
+  // without it, or an organiser who asked for no bronze at all, gets neither
+  // the ladder nor the bronze bouts.
   const roundsTotal = totalRounds(size);
+  const bronzeMedals = input.options?.bronzeMedals ?? 2;
+  const awardsBronze = bronzeMedals === 1 || bronzeMedals === 2;
   const repechage =
-    input.format === 'SINGLE_ELIM_REPECHAGE'
+    input.format === 'SINGLE_ELIM_REPECHAGE' && awardsBronze
       ? buildRepechage(input.categoryId, {
           roundsTotal,
-          bronzeMedals: input.options?.bronzeMedals ?? 2,
+          bronzeMedals,
           firstMatchNo: build.matches.length + 1,
         })
       : { matches: [], slots: [] };

@@ -21,6 +21,143 @@
   --idle-deep: #59564C;
   --idle-soft: #ECE9DF;
   --idle-line: #D9D5C7;
+
+  /* Competition corners: the red and blue the athletes actually wear. */
+  --aka: #C0392B;
+  --aka-deep: #8E2E27;
+  --aka-soft: #FBEDEB;
+  --ao: #1D4ED8;
+  --ao-deep: #1E3A8A;
+  --ao-soft: #EBF0FE;
+}
+
+/* ---------- Current bout, inside a mat card ---------- */
+.spectator-bout {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+  overflow: hidden;
+}
+
+.spectator-bout__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  background: #FAF9F5;
+}
+
+.spectator-bout__label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.spectator-bout__pip {
+  width: 7px;
+  height: 7px;
+  border-radius: 9999px;
+  background: var(--run);
+  box-shadow: 0 0 0 0 rgba(46, 122, 79, 0.5);
+  animation: spectator-pulse-ring 1.8s ease-out infinite;
+}
+
+/*
+ * AKA above AO at every width. Side-by-side reads as two columns to compare;
+ * stacked reads as one bout, in fighting order, which is what a spectator is
+ * looking at.
+ */
+.spectator-bout__sides {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.spectator-bout__side {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.spectator-bout__side + .spectator-bout__side {
+  border-top: 1px dashed var(--line);
+}
+
+.spectator-bout__side--aka {
+  border-left: 3px solid var(--aka);
+  background: linear-gradient(to right, var(--aka-soft), transparent 70%);
+}
+
+.spectator-bout__side--ao {
+  border-left: 3px solid var(--ao);
+  background: linear-gradient(to right, var(--ao-soft), transparent 70%);
+}
+
+.spectator-bout__corner {
+  display: block;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.spectator-bout__side--aka .spectator-bout__corner {
+  color: var(--aka-deep);
+}
+
+.spectator-bout__side--ao .spectator-bout__corner {
+  color: var(--ao-deep);
+}
+
+.spectator-bout__name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spectator-bout__club {
+  font-size: 10px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.spectator-bout__score {
+  flex-shrink: 0;
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+.spectator-bout__side--aka .spectator-bout__score {
+  color: var(--aka);
+}
+
+.spectator-bout__side--ao .spectator-bout__score {
+  color: var(--ao);
+}
+
+/*
+ * The bout block stays a single column at every width — see .spectator-bout__sides.
+ * Only the spacing grows on a wider screen.
+ */
+@media (min-width: 480px) {
+  .spectator-bout__side {
+    padding: 10px 14px;
+  }
 }
 
 .spectator-root {

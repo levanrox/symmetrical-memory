@@ -53,7 +53,7 @@ export function BoutHeader({
       </div>
 
       <div
-        className={`flex shrink-0 items-center gap-[clamp(0.4rem,1.2vmin,1rem)] transition-opacity duration-300 ${
+        className={`group/fullscreen flex shrink-0 items-center gap-[clamp(0.4rem,1.2vmin,1rem)] transition-opacity duration-300 ${
           chromeVisible ? "opacity-100" : "opacity-0"
         }`}
       >
@@ -73,13 +73,18 @@ export function BoutHeader({
           type="button"
           onClick={onToggleFullscreen}
           aria-pressed={isFullscreen}
-          className="flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#2A2622] bg-[#221F1C] px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-[#E7E5E4] transition-colors hover:border-[#0E9C7C] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-          title="Full screen (F)"
+          // In fullscreen the arena should be nothing but the bout, so the way
+          // out stays invisible until the pointer reaches this corner (Esc and
+          // F both work too). Outside fullscreen it is a normal button.
+          className={`flex min-h-[44px] items-center gap-1.5 rounded-lg border border-[#2A2622] bg-[#221F1C] px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-[#E7E5E4] transition-all hover:border-[#0E9C7C] hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+            isFullscreen ? "opacity-0 group-hover/fullscreen:opacity-100" : "opacity-100"
+          }`}
+          title={isFullscreen ? "Exit full screen (Esc)" : "Full screen (F)"}
         >
           <span className="material-symbols-outlined text-[18px]">
             {isFullscreen ? "fullscreen_exit" : "fullscreen"}
           </span>
-          {isFullscreen ? "Exit" : "Full screen"}
+          {isFullscreen ? "Esc to exit" : "Full screen"}
         </button>
       </div>
     </header>

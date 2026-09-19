@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { createClient } from "@/utils/supabase/client";
 import { checkStagerStatus } from "@/actions/stager";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 export default function StagerWaitingRoom() {
   const { id } = useParams() as { id: string };
@@ -24,10 +25,27 @@ export default function StagerWaitingRoom() {
     }
 
     setStatus("approved");
+    // A full navigation, not a client transition: this one-shot handoff must
+    // land even if the router is busy with the approval round trip.
     setTimeout(() => {
-      router.replace(`/stager/event/${tournamentId}/balance`);
-    }, 1500);
+      window.location.replace(`/stager/event/${tournamentId}/balance`);
+    }, 800);
   };
+
+  // Approval lands here the instant an admin grants it.
+  useLiveEvents({ requestId: id }, () => {
+    void checkStagerStatus(id)
+      .then((res) => {
+        if (res.status === "approved" && res.tournamentId) {
+          handleApproved(res.tournamentId, res.sessionToken || undefined, res.stagerName || undefined);
+        } else if (res.status === "rejected") {
+          setStatus("rejected");
+        }
+      })
+      .catch(() => {
+        // The poll below will pick it up.
+      });
+  });
 
   useEffect(() => {
     let isCancelled = false;
@@ -49,9 +67,9 @@ export default function StagerWaitingRoom() {
     // 1. Initial status check
     checkStatus();
 
-    // 2. Fallback polling every 6s — Realtime is primary; this catches edge cases
-    //    where the websocket misses an event. Lower frequency = fewer DB queries.
-    const pollInterval = setInterval(checkStatus, 6000);
+    // 2. Approval arrives over the live feed; the poll is only the safety net
+    //    for a dropped stream.
+    const pollInterval = setInterval(checkStatus, 20000);
 
 
     // 3. Realtime listener

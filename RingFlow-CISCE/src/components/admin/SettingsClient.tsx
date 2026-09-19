@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { updateTournamentSettings, deleteTournament } from "@/actions/settings";
 import { 
   approveOrganiserRequest, 
@@ -9,6 +9,7 @@ import {
   regenerateOrganiserCode 
 } from "@/actions/organiser";
 import { createClient } from "@/utils/supabase/client";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { useRouter } from "next/navigation";
 
 export interface OrganiserRequest {
@@ -33,6 +34,7 @@ interface Tournament {
   organiser_code?: string | null;
   show_public_draws?: boolean;
   show_public_scoreboard?: boolean;
+  default_bronze_medals?: number | null;
 }
 
 interface Props {
@@ -52,6 +54,7 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
     city: tournament.city || "",
     show_public_draws: tournament.show_public_draws === true,
     show_public_scoreboard: tournament.show_public_scoreboard === true,
+    default_bronze_medals: (tournament.default_bronze_medals ?? 2) as 0 | 1 | 2,
   });
   
   const [organiserCode, setOrganiserCode] = useState(tournament.organiser_code || "------");
@@ -70,6 +73,27 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
   useEffect(() => {
     setRequests(initialOrganiserRequests);
   }, [initialOrganiserRequests]);
+
+  const refreshRequests = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from("organiser_requests")
+        .select("*")
+        .eq("tournament_id", tournament.id)
+        .order("created_at", { ascending: false })
+        .limit(20);
+      if (error) {
+        console.error("[settings] live refresh failed:", error.message);
+        return;
+      }
+      if (data) setRequests(data as OrganiserRequest[]);
+    } catch (err) {
+      console.error("[settings] live refresh failed:", err);
+    }
+  }, [supabase, tournament.id]);
+
+  // A request arrives over the live feed; the poll below is the safety net.
+  useLiveEvents({ tournamentId: tournament.id }, refreshRequests);
 
   useEffect(() => {
     const channel = supabase
@@ -107,7 +131,7 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
         .limit(20);
 
       if (data) setRequests(data as OrganiserRequest[]);
-    }, 6000);
+    }, 15000);
 
     return () => {
       clearInterval(poll);
@@ -337,6 +361,45 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
                     }`}
                   />
                 </button>
+              </div>
+
+              {/* Bronze medal default for every draw in this event */}
+              <div className="pt-6 border-t border-outline-variant/60">
+                <div className="flex items-start gap-2">
+                  <span className="material-symbols-outlined text-[18px] text-[#C08A5A]">workspace_premium</span>
+                  <div className="flex-1">
+                    <label className="font-label-caps text-[11px] font-bold text-primary">
+                      BRONZE MEDALS PER CATEGORY
+                    </label>
+                    <p className="text-body-xs text-on-surface-variant max-w-xl mt-1">
+                      Applies to categories that have no setting of their own. Two bronzes uses repechage,
+                      where everyone beaten by the two finalists gets another route to a medal. One bronze
+                      runs the two losing semifinalists against each other. None stops at the final.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {([
+                    { value: 0, label: "No bronze" },
+                    { value: 1, label: "One bronze" },
+                    { value: 2, label: "Two bronzes (repechage)" },
+                  ] as const).map((option) => (
+                    <button
+                      key={option.value}
+                      type="button"
+                      aria-pressed={form.default_bronze_medals === option.value}
+                      onClick={() => setForm((f) => ({ ...f, default_bronze_medals: option.value }))}
+                      className={`min-h-[44px] rounded-lg border px-4 text-xs font-bold transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-secondary focus-visible:ring-offset-2 ${
+                        form.default_bronze_medals === option.value
+                          ? "border-[#0E9C7C] bg-[#E3F6F0] text-[#0B7C63]"
+                          : "border-outline-variant bg-white text-on-surface-variant hover:bg-surface-container-low"
+                      }`}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               {/* Arena scoreboard access */}

@@ -6,11 +6,14 @@ import { createClient } from "@/utils/supabase/client";
 import { updateCategoryStagerStatus } from "@/actions/stager";
 import StagerStatusIndicator from "@/components/ui/StagerStatusIndicator";
 import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
+import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
+import { downloadCategoryDrawPdf } from "@/actions/drawPdfs";
 import { SegmentedProgressBar } from "@/components/ui/SegmentedProgressBar";
 import BuiltByCrux from "@/components/layout/BuiltByCrux";
 import HeaderSearchBar from "@/components/layout/HeaderSearchBar";
 import BackNavigationGuard from "@/components/common/BackNavigationGuard";
 import LogoutConfirmModal from "@/components/ui/LogoutConfirmModal";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -73,6 +76,46 @@ export default function StagerBalancingClient({
   const [viewingPdf, setViewingPdf] = useState<{ url: string; title: string } | null>(null);
   const [historyOpenForRing, setHistoryOpenForRing] = useState<string | null>(null);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
+
+  // Draw sheets: what the stager reads out when calling athletes in.
+  const [isDrawsOpen, setIsDrawsOpen] = useState(false);
+  const [drawsQuery, setDrawsQuery] = useState("");
+  // The queue is the job: show the categories this board is actually running
+  // first, with the whole tournament one tap away.
+  const [drawsScope, setDrawsScope] = useState<"queue" | "all">("queue");
+  const [bracketCategory, setBracketCategory] = useState<{ id: string; name: string } | null>(null);
+  const [loadingDrawPdfFor, setLoadingDrawPdfFor] = useState<string | null>(null);
+
+  /** Opens a category's generated draw sheet in the PDF viewer. */
+  const openDrawSheet = async (cat: Category) => {
+    setLoadingDrawPdfFor(cat.id);
+    try {
+      const res = await downloadCategoryDrawPdf(cat.id);
+      if (!res.success || !res.base64) {
+        alert("No draw sheet available for this category yet.");
+        return;
+      }
+
+      const bytes = atob(res.base64);
+      const buffer = new Uint8Array(bytes.length);
+      for (let i = 0; i < bytes.length; i += 1) buffer[i] = bytes.charCodeAt(i);
+
+      const url = URL.createObjectURL(new Blob([buffer], { type: "application/pdf" }));
+      setViewingPdf({ url, title: `${cat.name} · Draw sheet` });
+    } catch (err: any) {
+      alert(err?.message || "Could not open the draw sheet.");
+    } finally {
+      setLoadingDrawPdfFor(null);
+    }
+  };
+
+  /** Blob URLs we created must be released, or the tab leaks a file each time. */
+  const closePdfViewer = () => {
+    if (viewingPdf?.url?.startsWith("blob:")) {
+      URL.revokeObjectURL(viewingPdf.url);
+    }
+    setViewingPdf(null);
+  };
 
   useEffect(() => {
     if ((!currentStagerName || currentStagerName === "Stager") && typeof window !== "undefined") {
@@ -283,6 +326,37 @@ export default function StagerBalancingClient({
     };
   }, [tournamentId, initialRings]);
 
+  // Live board: a category starting, finishing, pausing or moving between mats
+  // shows up here the moment it happens.
+  const refreshAssignments = useCallback(async () => {
+    const ringIds = initialRings.map((r) => r.id);
+    if (ringIds.length === 0) return;
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase.from("category_assignments").select("*").in("ring_id", ringIds);
+      if (error) {
+        console.error("[stager] live refresh failed:", error.message);
+        return;
+      }
+      const map: Record<string, any> = {};
+      for (const row of data ?? []) {
+        map[row.category_id] = {
+          matches_completed: row.matches_completed || 0,
+          status: row.status || "pending",
+          ring_id: row.ring_id,
+          queue_order: row.queue_order ?? 0,
+          stager_status: row.stager_status ?? null,
+          stager_name: row.stager_name ?? null,
+        };
+      }
+      setAssignmentsMap(map);
+    } catch (err) {
+      console.error("[stager] live refresh failed:", err);
+    }
+  }, [initialRings]);
+
+  useLiveEvents({ tournamentId }, refreshAssignments);
+
   // ── Stager action handler ──────────────────────────────────────────────────
   const handleStagerAction = useCallback(
     async (categoryId: string, requestedStatus: "calling" | "ready") => {
@@ -336,6 +410,11 @@ export default function StagerBalancingClient({
   );
 
   // ── Render category card (within a ring queue) ─────────────────────────────
+  const queuedDrawCategories = initialCategories.filter((cat) => {
+    const assignment = assignmentsMap[cat.id];
+    return Boolean(assignment) && assignment.status !== "completed";
+  });
+
   const renderCategoryCard = (cat: Category, ringId: string) => {
     const catAssignment = assignmentsMap[cat.id];
     const status = catAssignment?.status;
@@ -404,20 +483,35 @@ export default function StagerBalancingClient({
           <div className="p-3">
             <div className="flex justify-between items-start gap-1.5 mb-1.5">
               <h5 className="text-xs font-bold text-[#1B1815] leading-snug line-clamp-1">{cat.name}</h5>
-              {cat.doc_url && (
+              <div className="flex items-center gap-1.5 shrink-0">
                 <button
                   type="button"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setViewingPdf({ url: cat.doc_url!, title: cat.name });
+                    setBracketCategory({ id: cat.id, name: cat.name });
                   }}
-                  title="View athlete list PDF"
-                  className="material-symbols-outlined text-[13px] text-outline hover:text-primary transition-colors shrink-0 cursor-pointer"
+                  title="View live draw"
+                  aria-label={`View live draw for ${cat.name}`}
+                  className="material-symbols-outlined text-[15px] text-[#0E9C7C] hover:text-[#0B7C63] transition-colors shrink-0 cursor-pointer"
                   style={{ fontVariationSettings: "'FILL' 0" }}
                 >
-                  article
+                  account_tree
                 </button>
-              )}
+                {cat.doc_url && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setViewingPdf({ url: cat.doc_url!, title: cat.name });
+                    }}
+                    title="View athlete list PDF"
+                    className="material-symbols-outlined text-[13px] text-outline hover:text-primary transition-colors shrink-0 cursor-pointer"
+                    style={{ fontVariationSettings: "'FILL' 0" }}
+                  >
+                    article
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="flex items-center gap-1 text-[10px] font-data-mono text-[#68645A] mb-2">
@@ -510,6 +604,19 @@ export default function StagerBalancingClient({
             | {cat.weight_class || cat.belt || "–"}
           </span>
           <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setBracketCategory({ id: cat.id, name: cat.name });
+              }}
+              title="View live draw"
+              aria-label={`View live draw for ${cat.name}`}
+              className="material-symbols-outlined text-[15px] text-[#0E9C7C] hover:text-[#0B7C63] transition-colors shrink-0 cursor-pointer"
+              style={{ fontVariationSettings: "'FILL' 0" }}
+            >
+              account_tree
+            </button>
             {cat.doc_url && (
               <button
                 type="button"
@@ -632,11 +739,27 @@ export default function StagerBalancingClient({
             </span>
           </div>
 
-          {/* ─── Center / Action: Small Search Button (with icon & "Search" written) ─── */}
-          {!isSearchOpen && (
+          {/* ─── Center / Action: Draw sheets + Small Search Button ─── */}
+          <div className="flex items-center gap-2 shrink-0">
             <button
               type="button"
-              onClick={() => setIsSearchOpen(true)}
+              onClick={() => setIsDrawsOpen((open) => !open)}
+              aria-expanded={isDrawsOpen}
+              className={`flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-lg text-[12px] sm:text-[12.5px] font-semibold border shadow-2xs transition-all cursor-pointer shrink-0 select-none ${
+                isDrawsOpen
+                  ? "bg-[#E3F6F0] border-[#0E9C7C] text-[#0B7C63]"
+                  : "bg-[#ECE9DF] hover:bg-[#E2DFD4] border-[#E1DDCF] text-[#68645A] hover:text-[#1B1815]"
+              }`}
+              title="Draw sheets — read out who is called where"
+            >
+              <span className="material-symbols-outlined text-[16px]">account_tree</span>
+              <span className="hidden min-[420px]:inline">Draw sheets</span>
+            </button>
+
+            {!isSearchOpen && (
+              <button
+                type="button"
+                onClick={() => setIsSearchOpen(true)}
               className="flex items-center gap-1.5 px-2.5 py-1 sm:px-3 sm:py-1.5 rounded-lg text-[12px] sm:text-[12.5px] font-semibold text-[#68645A] hover:text-[#1B1815] bg-[#ECE9DF] hover:bg-[#E2DFD4] border border-[#E1DDCF] shadow-2xs transition-all cursor-pointer shrink-0 select-none"
               title="Search athletes & categories"
             >
@@ -650,9 +773,10 @@ export default function StagerBalancingClient({
                 <circle cx="11" cy="11" r="7" />
                 <path d="M21 21l-4.3-4.3" />
               </svg>
-              <span>Search</span>
-            </button>
-          )}
+                <span>Search</span>
+              </button>
+            )}
+          </div>
 
           {/* ─── Right: Stager Role Pill + CruxStudios Badge ─── */}
           <div className="flex items-center gap-1.5 sm:gap-4 shrink-0 self-stretch">
@@ -702,6 +826,136 @@ export default function StagerBalancingClient({
                   <path d="M18 6L6 18M6 6l12 12" />
                 </svg>
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* ─── Pop-down Draw sheets: who to call, and where they sit in the draw ─── */}
+        {isDrawsOpen && (
+          <div className="border-t border-[#E1DDCF] bg-[#FAF9F5] shadow-xs animate-in fade-in slide-in-from-top-1 duration-150 relative z-[90]">
+            <div className="px-3.5 sm:px-6 py-2.5 flex flex-wrap items-center gap-2 sm:gap-3 border-b border-[#E1DDCF]/70">
+              <span className="material-symbols-outlined text-[18px] text-[#0E9C7C]">account_tree</span>
+              <div className="min-w-0">
+                <p className="text-xs font-black uppercase tracking-wider text-[#1B1815]">Draw sheets</p>
+                <p className="text-[11px] text-[#68645A]">
+                  {queuedDrawCategories.length} in the queue
+                  {drawsScope === "all" ? ` of ${initialCategories.length} categories` : ""} · open a bracket to see who
+                  is next
+                </p>
+              </div>
+
+              {/* The queue is the job; the rest of the tournament is one tap away. */}
+              <div className="flex items-center gap-1 rounded-lg border border-[#E1DDCF] bg-white p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setDrawsScope("queue")}
+                  aria-pressed={drawsScope === "queue"}
+                  className={`min-h-[30px] rounded-md px-2.5 text-[11px] font-bold transition-colors cursor-pointer ${
+                    drawsScope === "queue" ? "bg-[#0E9C7C] text-white" : "text-[#68645A] hover:text-[#1B1815]"
+                  }`}
+                >
+                  Queue
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawsScope("all")}
+                  aria-pressed={drawsScope === "all"}
+                  className={`min-h-[30px] rounded-md px-2.5 text-[11px] font-bold transition-colors cursor-pointer ${
+                    drawsScope === "all" ? "bg-[#0E9C7C] text-white" : "text-[#68645A] hover:text-[#1B1815]"
+                  }`}
+                >
+                  All
+                </button>
+              </div>
+
+              <div className="relative flex-1 min-w-[180px] max-w-xs ml-auto">
+                <span className="material-symbols-outlined pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[16px] text-[#8C877C]">
+                  search
+                </span>
+                <input
+                  type="text"
+                  value={drawsQuery}
+                  onChange={(e) => setDrawsQuery(e.target.value)}
+                  placeholder="Find a category…"
+                  aria-label="Find a category in the draw sheets"
+                  className="w-full rounded-lg border border-[#E1DDCF] bg-white py-1.5 pl-8 pr-2 text-base text-[#1B1815] outline-none focus:border-[#0E9C7C] focus:ring-2 focus:ring-[#0E9C7C]/20 sm:text-sm"
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsDrawsOpen(false)}
+                className="w-9 h-9 rounded-lg border border-[#E1DDCF] bg-white hover:bg-[#ECE9DF] text-[#68645A] hover:text-[#1B1815] flex items-center justify-center shrink-0 transition-colors shadow-2xs cursor-pointer"
+                title="Close draw sheets"
+                aria-label="Close draw sheets"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="w-4 h-4">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="max-h-[46vh] overflow-y-auto px-3.5 sm:px-6 py-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-2.5">
+                {initialCategories
+                  .filter((cat) => {
+                    if (drawsScope === "queue") {
+                      const assignment = assignmentsMap[cat.id];
+                      if (!assignment || assignment.status === "completed") return false;
+                    }
+                    const q = drawsQuery.trim().toLowerCase().replace(/[\s\u00A0]+/g, " ");
+                    if (!q) return true;
+                    const hay = [cat.name, cat.age_bracket, cat.weight_class, cat.belt, cat.sex, cat.day]
+                      .filter(Boolean)
+                      .join(" ")
+                      .toLowerCase()
+                      .replace(/[\s\u00A0]+/g, " ");
+                    return hay.includes(q);
+                  })
+                  .map((cat) => {
+                    const ringId = assignmentsMap[cat.id]?.ring_id;
+                    const ring = initialRings.find((r) => r.id === ringId);
+                    return (
+                      <div
+                        key={cat.id}
+                        className="flex flex-col gap-2 rounded-xl border border-[#E1DDCF] bg-white p-3 shadow-xs"
+                      >
+                        <div className="min-w-0">
+                          <h5 className="text-xs font-bold leading-snug text-[#1B1815] line-clamp-1" title={cat.name}>
+                            {cat.name}
+                          </h5>
+                          <p className="mt-0.5 text-[10px] font-semibold uppercase tracking-wider text-[#8C877C]">
+                            {ring ? ring.name.replace(/Ring/i, "Tatami") : "Not on a mat"} · {cat.athletes_count} athletes
+                          </p>
+                        </div>
+
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setBracketCategory({ id: cat.id, name: cat.name })}
+                            className="flex min-h-[36px] flex-1 items-center justify-center gap-1.5 rounded-lg border border-[#0E9C7C] bg-[#E3F6F0] px-2 text-[11px] font-bold text-[#0B7C63] transition-colors hover:bg-[#d3f0e7] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                          >
+                            <span className="material-symbols-outlined text-[15px]">account_tree</span>
+                            Bracket
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => void openDrawSheet(cat)}
+                            disabled={loadingDrawPdfFor === cat.id}
+                            className="flex min-h-[36px] flex-1 items-center justify-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] px-2 text-[11px] font-bold text-[#3D3A33] transition-colors hover:bg-[#ECE9DF] disabled:opacity-50 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                            title="Open the printable draw sheet"
+                          >
+                            <span className="material-symbols-outlined text-[15px]">
+                              {loadingDrawPdfFor === cat.id ? "progress_activity" : "picture_as_pdf"}
+                            </span>
+                            Sheet
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+              </div>
             </div>
           </div>
         )}
@@ -1062,8 +1316,18 @@ export default function StagerBalancingClient({
       <PdfViewerModal
         url={viewingPdf?.url || null}
         title={viewingPdf?.title}
-        onClose={() => setViewingPdf(null)}
+        onClose={closePdfViewer}
       />
+
+      {/* Interactive bracket for a category: who is fighting, and who is next */}
+      {bracketCategory && (
+        <DrawBracketModal
+          categoryId={bracketCategory.id}
+          categoryName={bracketCategory.name}
+          isOpen={Boolean(bracketCategory)}
+          onClose={() => setBracketCategory(null)}
+        />
+      )}
 
       <LogoutConfirmModal
         isOpen={showLogoutConfirm}

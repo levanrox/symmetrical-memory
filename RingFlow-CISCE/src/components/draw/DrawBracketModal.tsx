@@ -15,6 +15,8 @@ interface Props {
   athleteId?: string | null;
   /** Extra line under the title, e.g. "Showing <name>'s path". */
   subtitle?: string;
+  /** Draw sheets are an official artifact; the public side does not get them. */
+  allowPdf?: boolean;
 }
 
 export function DrawBracketModal({
@@ -25,6 +27,7 @@ export function DrawBracketModal({
   onSelectMatch,
   athleteId,
   subtitle,
+  allowPdf = true,
 }: Props) {
   const [loading, setLoading] = useState(true);
   const [drawData, setDrawData] = useState<any>(null);
@@ -147,8 +150,10 @@ export function DrawBracketModal({
               matches={drawData.matches}
               categoryName={categoryName || drawData.categoryName || "Draw"}
               tournamentSize={drawData.draw?.tournamentSize}
+              bronzeMedals={drawData.bronzeMedals ?? 2}
+              podium={drawData.podium ?? null}
               highlightAthleteId={drawData.highlightAthleteId ?? athleteId ?? null}
-              onDownloadPdf={handleDownloadPdf}
+              onDownloadPdf={allowPdf ? handleDownloadPdf : undefined}
               isDownloadingPdf={isDownloadingPdf}
               onSelectMatch={
                 onSelectMatch

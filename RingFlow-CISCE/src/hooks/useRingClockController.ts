@@ -94,6 +94,15 @@ export function useRingClockController(options: {
     }
   }, [initialClock, initialSidesSwapped]);
 
+  // The clock and the TV sides travel together, but a swap can happen while the
+  // clock itself is unchanged (paused, idle), so sides are adopted on their own
+  // too — whoever flipped them, this desk ends up showing the same thing.
+  useEffect(() => {
+    if (typeof initialSidesSwapped !== "boolean") return;
+    if (Date.now() - lastWriteRef.current < 1500) return;
+    setSidesSwappedState((prev) => (prev === initialSidesSwapped ? prev : initialSidesSwapped));
+  }, [initialSidesSwapped]);
+
   // Every server stamp is a fresh timing sample, whether or not the clock state
   // itself changed — a running clock keeps the same state for minutes.
   useEffect(() => {

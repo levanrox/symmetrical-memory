@@ -1,7 +1,8 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/utils/supabase/client";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 
 interface LogEvent {
   id: string;
@@ -24,6 +25,30 @@ export default function LiveActivityFeed({
   const [logs, setLogs] = useState<LogEvent[]>(initialLogs);
   const [isExpanded, setIsExpanded] = useState<boolean>(true);
   const supabase = createClient();
+
+  // The feed should show what just happened, the moment it happened.
+  const refreshLogs = useCallback(async () => {
+    try {
+      const { data, error } = await supabase
+        .from("event_log")
+        .select("*")
+        .eq("tournament_id", tournamentId)
+        .order("created_at", { ascending: false })
+        .limit(200);
+      if (error) {
+        console.error("[activity] live refresh failed:", error.message);
+        return;
+      }
+      if (data) {
+        setLogs(data as LogEvent[]);
+        setIsExpanded(true);
+      }
+    } catch (err) {
+      console.error("[activity] live refresh failed:", err);
+    }
+  }, [supabase, tournamentId]);
+
+  useLiveEvents({ tournamentId }, refreshLogs);
 
   useEffect(() => {
     // Subscribe to new event logs for this tournament

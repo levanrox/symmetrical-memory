@@ -5,9 +5,10 @@ import { createClient } from "@/utils/supabase/client";
 import { useRouter } from "next/navigation";
 import { adjustMatchCount, finishCategory, setRingStatus, returnCategoryToQueue, logRingEvent, logoutModerator } from "@/actions/moderator";
 import { getRingActiveBout, setActiveBout } from "@/actions/matches";
-import { getRingClock } from "@/actions/clock";
+import { getRingClock, setRingSidesSwapped } from "@/actions/clock";
 import { normalizeClock, type RingClock } from "@/lib/matchClock";
 import { getCategoryDraw } from "@/actions/draws";
+import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { BoutScoringPad } from "@/components/moderator/BoutScoringPad";
 import { BoutPickerModal } from "@/components/moderator/BoutPickerModal";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
@@ -62,6 +63,28 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
     await loadBoutData(matchId);
   };
 
+  /**
+   * Mirror the arena screen. This is the action the scoreboard reads, so the
+   * left-rail button and the pad's own swap control stay in lockstep; the value
+   * is confirmed by the next refresh.
+   */
+  const handleSwapSides = async () => {
+    const next = !sidesSwapped;
+    setBoutData((prev: any) =>
+      prev ? { ...prev, ring: { ...prev.ring, sidesSwapped: next } } : prev
+    );
+    try {
+      const res = await setRingSidesSwapped(ringId, next);
+      if (!res?.success) throw new Error(res?.error || "Swap rejected");
+    } catch (err) {
+      console.error("Could not swap the arena sides:", err);
+      setBoutData((prev: any) =>
+        prev ? { ...prev, ring: { ...prev.ring, sidesSwapped: !next } } : prev
+      );
+      alert("Could not swap the TV sides. Please try again.");
+    }
+  };
+
   useEffect(() => {
     loadBoutData();
   }, [loadBoutData]);
@@ -93,6 +116,10 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
     };
   }, [ringId, supabase]);
 
+  // The desk follows every change on this mat immediately — bout swaps from the
+  // picker, scores, clock, and the queue behind it.
+  useLiveEvents({ ringId }, loadBoutData);
+
   // Keep this desk's clock tied to the server: realtime push where available,
   // a cheap single-row poll where it is not (local PostgREST has no realtime).
   useEffect(() => {
@@ -115,12 +142,19 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       )
       .subscribe();
 
-    const poll = setInterval(async () => {
+    // Adaptive cadence: a running clock re-anchors every second, otherwise the
+    // desk barely needs to ask, and a hidden tab hardly at all.
+    let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout>;
+
+    const poll = async () => {
       const sentAt = Date.now();
+      let running = false;
       try {
         const res = await getRingClock(ringId);
         const receivedAt = Date.now();
         if (res.success && res.clock) {
+          running = res.clock.status === "running";
           setBoutData((prev: any) =>
             prev
               ? {
@@ -136,11 +170,20 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       } catch {
         /* transient — the next tick retries */
       }
-    }, 1000);
+
+      if (cancelled) return;
+      // The live feed carries changes instantly; this is the safety net when it
+      // is unavailable, so an idle desk barely asks at all.
+      const delay = document.hidden ? 45000 : running ? 1000 : 20000;
+      pollTimer = setTimeout(poll, delay);
+    };
+
+    pollTimer = setTimeout(poll, 1000);
 
     return () => {
+      cancelled = true;
+      clearTimeout(pollTimer);
       supabase.removeChannel(channel);
-      clearInterval(poll);
     };
   }, [ringId, supabase]);
 
@@ -309,6 +352,8 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
   const currentCompleted = activeAssignment.matches_completed;
   const percentage = totalMatches > 0 ? (currentCompleted / totalMatches) * 100 : 0;
   const isPaused = activeAssignment.status === 'paused';
+  // Which corner the arena screen shows on the left.
+  const sidesSwapped = Boolean(boutData?.ring?.sidesSwapped);
 
   return (
     <div className="space-y-0">
@@ -335,7 +380,81 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
 
       {/* One DOM order for phones; explicit columns from lg up (status rail · desk · queue rail) */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-12 lg:items-start lg:gap-8">
-      <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 sm:p-card-padding shadow-sm relative overflow-hidden mb-6 sm:mb-10 lg:col-span-3 lg:col-start-1 lg:row-start-1 lg:mb-0">
+
+      {/*
+        Laptop/desktop control cluster: everything the desk reaches for sits in
+        the left column, above the category card, so nothing has to be scrolled
+        for. Left changes the bout, the right rail shows who is next.
+      */}
+      {boutData?.hasDraw && (
+        <div className="hidden lg:col-span-3 lg:col-start-1 lg:row-start-1 lg:mb-0 lg:flex lg:flex-col lg:gap-2">
+          <div className="rounded-xl border border-[#E1DDCF] bg-white p-3 shadow-2xs">
+            {/* Small, quiet mode toggle */}
+            <div className="mb-2 flex items-center rounded-lg border border-[#E1DDCF] bg-[#F5F3EC] p-0.5">
+              <button
+                onClick={() => setActiveMode("digital")}
+                aria-pressed={activeMode === "digital"}
+                className={`flex min-h-[32px] flex-1 items-center justify-center gap-1 rounded-md px-2 text-[11px] font-bold transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+                  activeMode === "digital"
+                    ? "bg-[#0E9C7C] text-white shadow-xs"
+                    : "text-[#68645A] hover:text-[#1B1815]"
+                }`}
+              >
+                <span className="material-symbols-outlined text-[14px]">edit_note</span>
+                Runner
+              </button>
+              <button
+                onClick={() => setActiveMode("counter")}
+                aria-pressed={activeMode === "counter"}
+                className={`flex min-h-[32px] flex-1 items-center justify-center gap-1 rounded-md px-2 text-[11px] font-bold transition-all cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+                  activeMode === "counter"
+                    ? "bg-[#0E9C7C] text-white shadow-xs"
+                    : "text-[#68645A] hover:text-[#1B1815]"
+                }`}
+              >
+                <span className="material-symbols-outlined text-[14px]">bolt</span>
+                Counter
+              </button>
+            </div>
+
+            {/* Change bout is the action this desk performs most */}
+            <button
+              onClick={() => setShowBoutSelector(true)}
+              className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-lg bg-[#0E9C7C] px-3 text-sm font-black uppercase tracking-wide text-white shadow-sm transition-colors hover:bg-[#0B7C63] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
+            >
+              <span className="material-symbols-outlined text-[20px]">grid_view</span>
+              Change bout
+            </button>
+
+            <div className="mt-2 flex items-center gap-2">
+              <button
+                onClick={() => setShowBracketModal(true)}
+                className="flex min-h-[36px] flex-1 items-center justify-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-white px-2 text-[11px] font-bold text-[#3D3A33] transition-colors hover:bg-[#FAF9F5] cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+              >
+                <span className="material-symbols-outlined text-[15px]">account_tree</span>
+                Bracket
+              </button>
+
+              {/* Mirrors the TV: same one action the pad's swap button calls. */}
+              <button
+                onClick={() => void handleSwapSides()}
+                aria-pressed={sidesSwapped}
+                title="Mirror which corner appears on the left of the arena screen"
+                className={`flex min-h-[36px] flex-1 items-center justify-center gap-1.5 rounded-lg border px-2 text-[11px] font-bold transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+                  sidesSwapped
+                    ? "border-[#0E9C7C] bg-[#E3F6F0] text-[#0B7C63]"
+                    : "border-[#E1DDCF] bg-white text-[#3D3A33] hover:bg-[#FAF9F5]"
+                }`}
+              >
+                <span className="material-symbols-outlined text-[15px]">swap_horiz</span>
+                {sidesSwapped ? "AO left" : "AKA left"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="bg-surface-container-lowest border border-outline-variant rounded-xl p-4 sm:p-card-padding shadow-sm relative overflow-hidden mb-6 sm:mb-10 lg:col-span-3 lg:col-start-1 lg:row-start-2 lg:mb-0">
         <div className={`absolute top-0 left-0 w-1 h-full ${isPaused ? 'bg-error' : 'bg-secondary'}`}></div>
         <div className="flex justify-between items-start mb-4 gap-2">
           <div className="min-w-0">
@@ -380,10 +499,11 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
         </div>
       </div>
 
-      <div className="lg:col-span-6 lg:col-start-4 lg:row-span-2 lg:row-start-1">
-      {/* Mode Switcher & Bracket Button (When digital draw exists) */}
+      <div className="lg:col-span-6 lg:col-start-4 lg:row-span-3 lg:row-start-1">
+      {/* Phone/tablet controls. On a laptop these live in the left column, so the
+          scoring pad starts at the top of the centre and needs no scrolling. */}
       {boutData?.hasDraw && (
-        <div className="flex flex-wrap items-center justify-between gap-3 mb-6 bg-white p-3 rounded-xl border border-[#E1DDCF] shadow-2xs">
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3 bg-white p-3 rounded-xl border border-[#E1DDCF] shadow-2xs lg:hidden">
           <div className="flex items-center gap-1 bg-[#F5F3EC] p-1 rounded-lg border border-[#E1DDCF]">
             <button
               onClick={() => setActiveMode("digital")}
@@ -566,7 +686,7 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       </div>
       </div>
 
-      <div className="mt-8 bg-surface-container-low p-4 rounded-xl border border-outline-variant flex flex-col gap-4 lg:col-span-3 lg:col-start-1 lg:row-start-2 lg:mt-0">
+      <div className="mt-8 bg-surface-container-low p-4 rounded-xl border border-outline-variant flex flex-col gap-4 lg:col-span-3 lg:col-start-1 lg:row-start-3 lg:mt-0">
         <div className="flex items-center gap-4">
           <span className="material-symbols-outlined text-secondary opacity-50">visibility</span>
           <div className="flex-1">
@@ -594,7 +714,26 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       </div>
 
       {/* Queue rail: what is coming on this tatami, and the arena screen link */}
-      <aside className="mt-8 space-y-4 lg:col-span-3 lg:col-start-10 lg:row-span-2 lg:row-start-1 lg:mt-0">
+      <aside className="mt-8 space-y-4 lg:col-span-3 lg:col-start-10 lg:row-span-3 lg:row-start-1 lg:mt-0">
+        {/* The next bout to run, first thing in the rail — "who is next" is the
+            question this side of the desk answers. */}
+        {boutData?.hasDraw &&
+          (() => {
+            const nextReady = boutData.matches?.find(
+              (m: any) => m.isReady && m.id !== boutData.currentMatch?.id
+            );
+            if (!nextReady) return null;
+            return (
+              <button
+                onClick={() => void handleSelectBout(nextReady.id)}
+                className="flex min-h-[52px] w-full items-center justify-center gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 text-sm font-extrabold text-amber-900 transition-colors hover:bg-amber-100 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400"
+              >
+                <span className="material-symbols-outlined text-[18px]">bolt</span>
+                Next ready · Bout #{nextReady.matchNo}
+              </button>
+            );
+          })()}
+
         <div className="rounded-xl border border-outline-variant bg-surface-container-lowest p-4 shadow-sm">
           <h3 className="font-label-caps text-label-caps tracking-widest text-on-surface-variant">UP NEXT</h3>
           <div className="mt-3 space-y-2">
@@ -661,6 +800,7 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
           bouts={boutData.matches}
           drawMatches={drawData?.matches || []}
           tournamentSize={drawData?.draw?.tournamentSize}
+          bronzeMedals={drawData?.bronzeMedals ?? 2}
           activeMatchId={boutData.currentMatch?.id}
           onSelect={(matchId) => void handleSelectBout(matchId)}
         />

@@ -1,0 +1,130 @@
+import { EventEmitter } from "node:events";
+import postgres from "postgres";
+
+/**
+ * One LISTEN connection per server process, fanning Postgres NOTIFY payloads
+ * out to every SSE subscriber.
+ *
+ * Row changes reach the browser through `migration8_realtime_notify.sql`, which
+ * raises `ringflow_events` on the tables live screens read. A single connection
+ * carries all of them, so ten open screens cost one database connection rather
+ * than ten pollers.
+ */
+
+export interface LiveEvent {
+  table: string;
+  op: "INSERT" | "UPDATE" | "DELETE";
+  id?: string;
+  ringId?: string;
+  tournamentId?: string;
+  categoryId?: string;
+  matchId?: string;
+  sessionToken?: string;
+}
+
+const CHANNEL = "ringflow_events";
+
+type Bus = {
+  emitter: EventEmitter;
+  start: () => Promise<void>;
+  stop: () => Promise<void>;
+  subscribers: number;
+};
+
+const globalForBus = globalThis as unknown as { ringflowLiveBus?: Bus };
+
+function createBus(): Bus {
+  const emitter = new EventEmitter();
+  // A screen can hold several subscriptions (a mat page watches rings and
+  // assignments); 100 listeners is well past anything real and still warns if
+  // something leaks.
+  emitter.setMaxListeners(100);
+
+  let sql: ReturnType<typeof postgres> | null = null;
+  let listenPromise: Promise<void> | null = null;
+
+  const start = async () => {
+    if (sql) return;
+    if (listenPromise) return listenPromise;
+
+    const connectionString =
+      process.env.DATABASE_URL || "postgres://event_suite:event_suite@127.0.0.1:5432/ringflow";
+
+    listenPromise = (async () => {
+      try {
+        const conn = postgres(connectionString, { max: 1, idle_timeout: 0 });
+        await conn.listen(CHANNEL, (raw: string) => {
+          try {
+            const event = JSON.parse(raw) as LiveEvent;
+            if (event && typeof event.table === "string") emitter.emit("event", event);
+          } catch (err) {
+            console.error("[live] could not parse a notification payload:", err, raw);
+          }
+        });
+        sql = conn;
+      } catch (err) {
+        // The stream simply never announces anything; every screen still has its
+        // polling fallback, so this is a degradation, not an outage.
+        console.error("[live] LISTEN failed, falling back to polling:", err);
+      } finally {
+        listenPromise = null;
+      }
+    })();
+
+    return listenPromise;
+  };
+
+  const stop = async () => {
+    const conn = sql;
+    sql = null;
+    if (!conn) return;
+    try {
+      await conn.end({ timeout: 5 });
+    } catch (err) {
+      console.error("[live] could not close the LISTEN connection:", err);
+    }
+  };
+
+  return { emitter, start, stop, subscribers: 0 };
+}
+
+export const bus: Bus = globalForBus.ringflowLiveBus ?? createBus();
+if (process.env.NODE_ENV !== "production") globalForBus.ringflowLiveBus = bus;
+
+/**
+ * Subscribe to change events. Returns an unsubscribe function; the LISTEN
+ * connection is opened on the first subscriber and closed with the last.
+ */
+export function subscribeToLiveEvents(listener: (event: LiveEvent) => void): () => void {
+  bus.subscribers += 1;
+  void bus.start();
+
+  bus.emitter.on("event", listener);
+
+  let closed = false;
+  return () => {
+    if (closed) return;
+    closed = true;
+    bus.emitter.off("event", listener);
+    bus.subscribers = Math.max(0, bus.subscribers - 1);
+    if (bus.subscribers === 0) void bus.stop();
+  };
+}
+
+/** True when an event is relevant to a screen that scoped itself to these ids. */
+export function eventMatchesScope(
+  event: LiveEvent,
+  scope: { ringId?: string | null; tournamentId?: string | null; categoryId?: string | null; requestId?: string | null }
+): boolean {
+  if (scope.ringId) return event.ringId === scope.ringId;
+  if (scope.requestId) return event.id === scope.requestId;
+  if (scope.categoryId) return event.categoryId === scope.categoryId || event.id === scope.categoryId;
+  if (scope.tournamentId) {
+    // A tournament screen cares about anything that names it. Rows that only
+    // carry a ring or category id are resolved by the screen's own queries, so
+    // they are forwarded too when no narrower scope was given.
+    if (event.tournamentId) return event.tournamentId === scope.tournamentId;
+    return true;
+  }
+  return true;
+}

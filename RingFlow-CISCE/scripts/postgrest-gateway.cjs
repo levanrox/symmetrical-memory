@@ -62,6 +62,31 @@ const server = http.createServer((req, res) => {
   req.pipe(proxyReq, { end: true });
 });
 
+server.on("error", (err) => {
+  if (err.code === "EADDRINUSE") {
+    // Running `npm run gateway` twice is a normal thing to do while developing.
+    // Say what is happening instead of throwing a stack trace.
+    console.log(
+      `PostgREST gateway is already listening on 127.0.0.1:${PROXY_PORT}. Nothing to do.`
+    );
+    console.log(
+      `If you need to restart it, stop the running process first (e.g. \`lsof -ti tcp:${PROXY_PORT} | xargs kill\`).`
+    );
+    process.exit(0);
+  }
+
+  console.error("PostgREST gateway failed:", err);
+  process.exit(1);
+});
+
 server.listen(PROXY_PORT, "127.0.0.1", () => {
   console.log(`PostgREST gateway listening on 127.0.0.1:${PROXY_PORT} -> forwarding to port ${TARGET_PORT}`);
 });
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => {
+    server.close(() => process.exit(0));
+    // Do not hang if a keep-alive connection refuses to close.
+    setTimeout(() => process.exit(0), 500).unref();
+  });
+}

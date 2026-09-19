@@ -8,7 +8,14 @@ import { RingFlowLogo } from "@/components/ui/ringflow-logo";
 import LogoutConfirmModal from "@/components/ui/LogoutConfirmModal";
 import { validateOrganiserSessionAction, logoutOrganiser } from "@/actions/organiser";
 
-export default function OrganiserSidebar() {
+interface SidebarCounts {
+  name: string;
+  ringsCount: number;
+  categoriesCount: number;
+  athletesCount: number;
+}
+
+export default function OrganiserSidebar({ initialCounts }: { initialCounts?: SidebarCounts }) {
   const pathname = usePathname();
   const params = useParams();
   const router = useRouter();
@@ -17,17 +24,14 @@ export default function OrganiserSidebar() {
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [organiserName, setOrganiserName] = useState<string>("Organiser");
-  const [tournamentData, setTournamentData] = useState<{
-    name: string;
-    ringsCount: number;
-    categoriesCount: number;
-    athletesCount: number;
-  }>({
-    name: "Tournament",
-    ringsCount: 0,
-    categoriesCount: 0,
-    athletesCount: 0,
-  });
+  const [tournamentData, setTournamentData] = useState<SidebarCounts>(
+    initialCounts ?? {
+      name: "Tournament",
+      ringsCount: 0,
+      categoriesCount: 0,
+      athletesCount: 0,
+    }
+  );
 
   useEffect(() => {
     const saved = localStorage.getItem("ringflow_sidebar_collapsed");
@@ -174,28 +178,35 @@ export default function OrganiserSidebar() {
           .eq("id", id)
           .maybeSingle();
 
-        const { count: rings } = await supabase
+        const { count: rings, error: ringsError } = await supabase
           .from("rings")
           .select("*", { count: "exact", head: true })
           .eq("tournament_id", id);
 
-        const { count: cats } = await supabase
+        const { count: cats, error: catsError } = await supabase
           .from("categories")
           .select("*", { count: "exact", head: true })
           .eq("tournament_id", id);
 
-        const { count: athletes } = await supabase
+        const { count: athletes, error: athletesError } = await supabase
           .from("athletes")
           .select("*", { count: "exact", head: true })
           .eq("tournament_id", id);
 
         if (isMounted) {
-          setTournamentData({
-            name: tourney?.name || "Tournament",
-            ringsCount: rings || 0,
-            categoriesCount: cats || 0,
-            athletesCount: athletes || 0,
-          });
+          if (ringsError || catsError || athletesError) {
+            console.error(
+              "Sidebar counts could not be refreshed:",
+              ringsError?.message || catsError?.message || athletesError?.message
+            );
+          }
+
+          setTournamentData((prev) => ({
+            name: tourney?.name || prev.name,
+            ringsCount: rings ?? prev.ringsCount,
+            categoriesCount: cats ?? prev.categoriesCount,
+            athletesCount: athletes ?? prev.athletesCount,
+          }));
 
           // Fetch the organiser name entered during code entry for this tournament
           const { data: latestOrg } = await supabase

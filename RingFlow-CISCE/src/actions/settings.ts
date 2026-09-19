@@ -17,6 +17,8 @@ export async function updateTournamentSettings(
     city: string;
     show_public_draws?: boolean;
     show_public_scoreboard?: boolean;
+    /** 0 = no bronze bout, 1 = single bronze, 2 = repechage with two bronzes. */
+    default_bronze_medals?: 0 | 1 | 2;
   }
 ) {
   await ensureAdminOwnsTournament(tournamentId);
@@ -33,6 +35,10 @@ export async function updateTournamentSettings(
       city: data.city || null,
       showPublicDraws: data.show_public_draws ?? true,
       showPublicScoreboard: data.show_public_scoreboard ?? false,
+      defaultBronzeMedals:
+        data.default_bronze_medals === 0 || data.default_bronze_medals === 1 || data.default_bronze_medals === 2
+          ? data.default_bronze_medals
+          : 2,
       updatedAt: new Date(),
     })
     .where(eq(tournaments.id, tournamentId));

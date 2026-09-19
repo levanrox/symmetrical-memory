@@ -10,6 +10,7 @@
     "dev": "NODE_ENV=development next dev",
     "dev:local": "docker compose up -d --wait postgrest && node scripts/dev-local.mjs",
     "build": "next build",
+    "build:verify": "next build --debug-prerender",
     "start": "next start",
     "lint": "eslint",
     "db:push": "drizzle-kit push",
