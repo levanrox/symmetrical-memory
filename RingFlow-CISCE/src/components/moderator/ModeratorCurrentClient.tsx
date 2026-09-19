@@ -43,6 +43,57 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
   const [showBoutSelector, setShowBoutSelector] = useState(false);
   const [activeMode, setActiveMode] = useState<"digital" | "counter">("digital");
   const [showBracketModal, setShowBracketModal] = useState(false);
+  const [showDisplayPanel, setShowDisplayPanel] = useState(false);
+  const [deskSidesSwapped, setDeskSidesSwapped] = useState<boolean>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        return localStorage.getItem("ringflow_desk_sides_swapped") === "true";
+      } catch {}
+    }
+    return false;
+  });
+  const toggleDeskSides = () => {
+    setDeskSidesSwapped((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("ringflow_desk_sides_swapped", String(next));
+      } catch {}
+      return next;
+    });
+  };
+  const [tvScale, setTvScale] = useState<number>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("ringflow_tv_scale");
+        if (saved) {
+          const val = parseFloat(saved);
+          if (!isNaN(val) && val >= 0.5 && val <= 2) return val;
+        }
+      } catch {}
+    }
+    return 1;
+  });
+  const handleSetTvScale = (newScale: number) => {
+    setTvScale(newScale);
+    try {
+      localStorage.setItem("ringflow_tv_scale", String(newScale));
+    } catch {}
+  };
+  const [deskFontSize, setDeskFontSize] = useState<"compact" | "normal" | "large">(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const saved = localStorage.getItem("ringflow_desk_font_size");
+        if (saved === "compact" || saved === "normal" || saved === "large") return saved;
+      } catch {}
+    }
+    return "normal";
+  });
+  const handleSetDeskFontSize = (size: "compact" | "normal" | "large") => {
+    setDeskFontSize(size);
+    try {
+      localStorage.setItem("ringflow_desk_font_size", size);
+    } catch {}
+  };
   const router = useRouter();
 
   const loadBoutData = React.useCallback(async (targetMatchId?: string) => {
@@ -525,6 +576,9 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
               serverNowReceivedAt={boutData.serverNowReceivedAt}
               sidesSwapped={boutData.ring?.sidesSwapped ?? false}
               nextBout={boutData.nextBout}
+              deskSidesSwapped={deskSidesSwapped}
+              onToggleDeskSides={toggleDeskSides}
+              deskFontSize={deskFontSize}
               onBoutCompleted={() => {
                 // Instantly increment match count on client for immediate UI feedback
                 setAssignments((prev) =>
@@ -727,6 +781,98 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
           <span className="material-symbols-outlined text-[16px]">tv</span>
           Open TV scoreboard
         </a>
+
+        {/* Corner & Display controls — collapsible accordion */}
+        <div className="rounded-xl border border-[#E1DDCF] bg-white shadow-sm overflow-hidden">
+          {/* Accordion header / toggle */}
+          <button
+            type="button"
+            onClick={() => setShowDisplayPanel((p) => !p)}
+            className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left transition-colors hover:bg-[#FAF9F5] cursor-pointer"
+          >
+            <span className="flex items-center gap-2">
+              <span className="material-symbols-outlined text-[17px] text-[#0E9C7C]">tune</span>
+              <span className="text-[11px] font-black uppercase tracking-wider text-[#8C877C]">Corner &amp; Display</span>
+            </span>
+            <span className="material-symbols-outlined text-[16px] text-[#8C877C] transition-transform duration-200" style={{ transform: showDisplayPanel ? "rotate(180deg)" : "rotate(0deg)" }}>
+              expand_more
+            </span>
+          </button>
+
+          {/* Collapsible body */}
+          {showDisplayPanel && (
+            <div className="border-t border-[#F0EDE4] px-1 pb-2 pt-1">
+              {/* TV screen side flip */}
+              <button
+                type="button"
+                onClick={handleSwapSides}
+                className="flex w-full items-center justify-between gap-2 rounded-lg p-2 text-left text-xs font-semibold text-[#1B1815] hover:bg-[#FAF9F5] transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[18px] text-[#0E9C7C]">tv</span>
+                  <span>Arena TV Screen</span>
+                </span>
+                <span className="rounded bg-[#FAF9F5] border border-[#E1DDCF] px-1.5 py-0.5 text-[10px] font-black">
+                  {sidesSwapped ? "AO Left" : "AKA Left"}
+                </span>
+              </button>
+
+              {/* Desk scoring pad layout flip */}
+              <button
+                type="button"
+                onClick={toggleDeskSides}
+                className="flex w-full items-center justify-between gap-2 rounded-lg p-2 text-left text-xs font-semibold text-[#1B1815] hover:bg-[#FAF9F5] transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[18px] text-[#2563EB]">touch_app</span>
+                  <span>Desk Layout</span>
+                </span>
+                <span className="rounded bg-[#FAF9F5] border border-[#E1DDCF] px-1.5 py-0.5 text-[10px] font-black">
+                  {deskSidesSwapped ? "AO Left" : "AKA Left"}
+                </span>
+              </button>
+
+              {/* Scoreboard Zoom */}
+              <div className="flex items-center justify-between gap-2 rounded-lg px-2 py-1.5">
+                <span className="flex items-center gap-2 text-xs font-semibold text-[#1B1815]">
+                  <span className="material-symbols-outlined text-[18px] text-[#7C3AED]">fit_screen</span>
+                  <span>Scoreboard Zoom</span>
+                </span>
+                <select
+                  value={tvScale}
+                  onChange={(e) => handleSetTvScale(parseFloat(e.target.value))}
+                  className="rounded-lg border border-[#E1DDCF] bg-[#FAF9F5] px-2 py-0.5 text-[10px] font-black text-[#1B1815] cursor-pointer focus:outline-none focus:ring-1 focus:ring-[#0E9C7C]"
+                >
+                  <option value="0.85">85% · Compact</option>
+                  <option value="1">100% · Standard</option>
+                  <option value="1.15">115% · Large TV</option>
+                  <option value="1.3">130% · Arena Wall</option>
+                </select>
+              </div>
+
+              {/* Desk font size */}
+              <div className="mt-1 border-t border-[#F0EDE4] pt-2 px-1">
+                <p className="mb-1.5 text-[10px] font-bold text-[#8C877C]">Desk Font</p>
+                <div className="flex gap-1">
+                  {(["compact", "normal", "large"] as const).map((size) => (
+                    <button
+                      key={size}
+                      type="button"
+                      onClick={() => handleSetDeskFontSize(size)}
+                      className={`flex-1 rounded-lg border py-1.5 text-[10px] font-bold capitalize transition-colors cursor-pointer ${
+                        deskFontSize === size
+                          ? "border-[#0E9C7C] bg-[#E3F6F0] text-[#0B7C63]"
+                          : "border-[#E1DDCF] bg-white text-[#68645A] hover:bg-[#FAF9F5]"
+                      }`}
+                    >
+                      {size === "compact" ? "S" : size === "normal" ? "M" : "L"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
       </aside>
       </div>
 

@@ -43,16 +43,21 @@ export function ScoreboardClient({ ringId, initialData }: Props) {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [scale, setScale] = useState<number>(1);
 
+  // Read on mount + react instantly when another tab (the moderator desk) changes it
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      const saved = localStorage.getItem("ringflow_tv_scale");
-      if (saved) {
-        const val = parseFloat(saved);
-        if (!isNaN(val) && val >= 0.5 && val <= 2) {
-          setScale(val);
-        }
-      }
-    }
+    const applyScale = (raw: string | null) => {
+      if (!raw) return;
+      const val = parseFloat(raw);
+      if (!isNaN(val) && val >= 0.5 && val <= 2) setScale(val);
+    };
+
+    applyScale(localStorage.getItem("ringflow_tv_scale"));
+
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "ringflow_tv_scale") applyScale(e.newValue);
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   const handleSetScale = (newScale: number) => {

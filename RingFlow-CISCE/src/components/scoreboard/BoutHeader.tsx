@@ -73,19 +73,24 @@ export function BoutHeader({
           {connection === "live" ? "Connected" : "Reconnecting"}
         </span>
 
-        <select
-          value={scale}
-          onChange={(e) => onSetScale(parseFloat(e.target.value))}
-          className={`flex min-h-[44px] cursor-pointer items-center rounded-lg border border-[#2A2622] bg-[#221F1C] px-2.5 py-1.5 text-xs font-bold uppercase tracking-wider text-[#E7E5E4] transition-all hover:border-[#0E9C7C] hover:text-white focus-visible:opacity-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] ${
+        <label className={`flex items-center gap-1.5 transition-opacity ${
             isFullscreen ? "opacity-0 group-hover/fullscreen:opacity-100" : "opacity-100"
           }`}
-          title="Adjust arena display scale"
+          style={{ fontSize: "clamp(0.6rem,1.1vmin,0.85rem)" }}
         >
-          <option value="0.85">85% (Compact)</option>
-          <option value="1">100% (Standard)</option>
-          <option value="1.15">115% (Large TV)</option>
-          <option value="1.3">130% (Arena Wall)</option>
-        </select>
+          <span className="font-bold uppercase tracking-wider text-[#8C877C]">Zoom</span>
+          <select
+            value={scale}
+            onChange={(e) => onSetScale(parseFloat(e.target.value))}
+            className="cursor-pointer rounded-lg border border-[#2A2622] bg-[#221F1C] px-2.5 py-1.5 font-bold uppercase tracking-wider text-[#E7E5E4] transition-all hover:border-[#0E9C7C] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+            title="Scoreboard display zoom"
+          >
+            <option value="0.85">85% · Compact</option>
+            <option value="1">100% · Standard</option>
+            <option value="1.15">115% · Large TV</option>
+            <option value="1.3">130% · Arena Wall</option>
+          </select>
+        </label>
 
         <button
           type="button"

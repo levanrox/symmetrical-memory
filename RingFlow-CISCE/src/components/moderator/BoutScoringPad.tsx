@@ -41,6 +41,11 @@ interface Props {
   } | null;
   onBoutCompleted: () => void;
   onClose?: () => void;
+  /** When provided by a parent sidebar, desk-side swap is controlled externally */
+  deskSidesSwapped?: boolean;
+  onToggleDeskSides?: () => void;
+  /** Controls the display size of names and scores on the scoring pad */
+  deskFontSize?: "compact" | "normal" | "large";
 }
 
 const PRESETS = [
@@ -107,6 +112,9 @@ export function BoutScoringPad({
   sidesSwapped: initialSidesSwapped,
   nextBout,
   onBoutCompleted,
+  deskSidesSwapped: externalDeskSidesSwapped,
+  onToggleDeskSides,
+  deskFontSize = "normal",
 }: Props) {
   const [akaPoints, setAkaPoints] = useState(match.akaScore ?? 0);
   const [aoPoints, setAoPoints] = useState(match.aoScore ?? 0);
@@ -163,7 +171,7 @@ export function BoutScoringPad({
     setEditMilliseconds(String(total % 1000).padStart(3, "0"));
   }, [clock.clock.durationMs]);
 
-  const [showDisplayMenu, setShowDisplayMenu] = useState(false);
+
 
   const openClockSettings = () => {
     if (clock.running) {
@@ -176,7 +184,7 @@ export function BoutScoringPad({
     setShowSettings(true);
   };
 
-  const [deskSidesSwapped, setDeskSidesSwapped] = useState<boolean>(() => {
+  const [localDeskSidesSwapped, setLocalDeskSidesSwapped] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
       try {
         return localStorage.getItem("ringflow_desk_sides_swapped") === "true";
@@ -185,15 +193,18 @@ export function BoutScoringPad({
     return false;
   });
 
-  const toggleDeskSides = () => {
-    setDeskSidesSwapped((prev) => {
+  // Prefer externally-controlled state (from sidebar) over local state
+  const deskSidesSwapped = externalDeskSidesSwapped ?? localDeskSidesSwapped;
+
+  const toggleDeskSides = onToggleDeskSides ?? (() => {
+    setLocalDeskSidesSwapped((prev) => {
       const next = !prev;
       try {
         localStorage.setItem("ringflow_desk_sides_swapped", String(next));
       } catch {}
       return next;
     });
-  };
+  });
 
   const syncLiveState = useCallback(
     (aP: number, oP: number, aPen: number, oPen: number, sen: "AKA" | "AO" | null) => {
@@ -393,6 +404,12 @@ export function BoutScoringPad({
           ? "Time up"
           : "Ready";
 
+  /* ─────── Font size maps driven by deskFontSize prop ─────── */
+  const compactNameSize = deskFontSize === "compact" ? "text-[10px]" : deskFontSize === "large" ? "text-[13px]" : "text-[11px]";
+  const compactScoreSize = deskFontSize === "compact" ? "text-3xl" : deskFontSize === "large" ? "text-5xl" : "text-4xl";
+  const fullNameSize = deskFontSize === "compact" ? "text-lg sm:text-xl" : deskFontSize === "large" ? "text-2xl sm:text-3xl" : "text-xl sm:text-2xl";
+  const fullScoreSize = deskFontSize === "compact" ? "text-5xl sm:text-6xl" : deskFontSize === "large" ? "text-7xl sm:text-8xl" : "text-6xl sm:text-7xl";
+
   /* ─────── Compact mobile competitor card (side-by-side layout) ─────── */
   const renderCompactCompetitor = (side: "AKA" | "AO") => {
     const isAka = side === "AKA";
@@ -433,13 +450,13 @@ export function BoutScoringPad({
         </div>
 
         {/* Name */}
-        <p className="truncate text-[11px] font-bold text-[#1B1815] leading-tight mb-1">
+        <p className={`truncate font-bold text-[#1B1815] leading-tight mb-1 ${compactNameSize}`}>
           {ath.name || "TBD"}
         </p>
 
         {/* Score */}
         <div className={`flex items-center justify-center rounded-lg border bg-[#FAF9F5] py-1.5 mb-1.5 ${accentBorder}`}>
-          <span className={`font-data-mono text-4xl font-black tabular-nums ${accentText}`}>
+          <span className={`font-data-mono font-black tabular-nums ${accentText} ${compactScoreSize}`}>
             {points}
           </span>
         </div>
@@ -537,7 +554,7 @@ export function BoutScoringPad({
         </div>
 
         <div className="mb-4 min-w-0">
-          <h3 className="truncate text-xl font-black tracking-tight text-[#1B1815] sm:text-2xl">
+          <h3 className={`truncate font-black tracking-tight text-[#1B1815] ${fullNameSize}`}>
             {ath.name || "Competitor TBD"}
           </h3>
           <p className="truncate text-xs font-semibold uppercase text-[#68645A]">
@@ -546,7 +563,7 @@ export function BoutScoringPad({
         </div>
 
         <div className={`mb-4 flex w-full items-center justify-center rounded-xl border-2 bg-[#FAF9F5] py-3 sm:py-4 ${accentBorder}`}>
-          <span className={`font-data-mono text-6xl font-black tabular-nums sm:text-7xl ${accentText}`}>
+          <span className={`font-data-mono font-black tabular-nums ${accentText} ${fullScoreSize}`}>
             {points}
           </span>
         </div>
@@ -848,69 +865,6 @@ export function BoutScoringPad({
         <div className="flex items-center gap-2">
           {/* Tools row — scrollable on mobile */}
           <div className="flex flex-1 items-center gap-1.5 overflow-x-auto scrollbar-none sm:gap-2">
-            {/* Corners & Display Dropdown Menu */}
-            <div className="relative shrink-0">
-              <button
-                type="button"
-                onClick={() => setShowDisplayMenu(!showDisplayMenu)}
-                aria-haspopup="true"
-                aria-expanded={showDisplayMenu}
-                className="flex min-h-[40px] items-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-white px-2.5 py-1.5 text-xs font-bold text-[#1B1815] transition-all hover:bg-[#FAF9F5] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] sm:min-h-[44px] sm:rounded-xl sm:px-3 sm:py-2 cursor-pointer"
-                title="Corner display and layout settings"
-              >
-                <span className="material-symbols-outlined text-[17px] text-[#0E9C7C]">tune</span>
-                <span className="hidden sm:inline">Corners</span>
-                <span className="material-symbols-outlined text-[15px] text-[#8C877C]">
-                  {showDisplayMenu ? "expand_less" : "expand_more"}
-                </span>
-              </button>
-
-              {showDisplayMenu && (
-                <>
-                  <div className="fixed inset-0 z-30" onClick={() => setShowDisplayMenu(false)} />
-                  <div className="absolute bottom-12 left-0 z-40 w-60 rounded-xl border border-[#E1DDCF] bg-white p-2 shadow-2xl animate-in fade-in zoom-in-95">
-                    <p className="px-2 py-1 text-[10px] font-black uppercase tracking-wider text-[#8C877C]">
-                      Corner & Display Controls
-                    </p>
-                    {/* TV corner mirror */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void clock.setSwapped(!sidesSwapped);
-                        setShowDisplayMenu(false);
-                      }}
-                      className="flex w-full items-center justify-between gap-2 rounded-lg p-2 text-left text-xs font-semibold text-[#1B1815] hover:bg-[#FAF9F5] transition-colors cursor-pointer"
-                    >
-                      <span className="flex items-center gap-2">
-                        <span className="material-symbols-outlined text-[18px] text-[#0E9C7C]">tv</span>
-                        <span>Arena TV Screen</span>
-                      </span>
-                      <span className="rounded bg-[#FAF9F5] border border-[#E1DDCF] px-1.5 py-0.5 text-[10px] font-black font-data-mono">
-                        {sidesSwapped ? "AO Left" : "AKA Left"}
-                      </span>
-                    </button>
-
-                    {/* Desk buttons flip */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        toggleDeskSides();
-                        setShowDisplayMenu(false);
-                      }}
-                      className="flex w-full items-center justify-between gap-2 rounded-lg p-2 text-left text-xs font-semibold text-[#1B1815] hover:bg-[#FAF9F5] transition-colors cursor-pointer"
-                    >
-                      <span className="flex items-center gap-2">
-                        <span className="material-symbols-outlined text-[18px] text-[#2563EB]">touch_app</span>
-                        <span>Desk Layout</span>
-                      </span>
-                      <span className="rounded bg-[#FAF9F5] border border-[#E1DDCF] px-1.5 py-0.5 text-[10px] font-black font-data-mono">
-                        {deskSidesSwapped ? "AO Left" : "AKA Left"}
-                      </span>
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
 
             {/* Hantei */}
             <button
