@@ -1,262 +1,199 @@
-# Quickstart Guide: Local Setup (Docker)
+# Quickstart Guide: Local Setup & Feature Testing
 
-How to run RingFlow on your machine. Requires a PostgreSQL database, the PostgREST
-container from `docker-compose.yml`, and the little gateway script.
-
----
-
-## How the database actually works (read this first)
-
-RingFlow talks to PostgreSQL through **two different layers**. This is the part that
-confuses everyone, so it is worth two minutes.
-
-| Layer | Config | Connects to | Used by |
-| :--- | :--- | :--- | :--- |
-| **Drizzle ORM** | `DATABASE_URL` | `127.0.0.1:5432` | Server actions, scripts, seeding, draws |
-| **Supabase JS** | `NEXT_PUBLIC_SUPABASE_URL` | `127.0.0.1:54321` (gateway) | Almost every page, live subscriptions, PDF storage |
-
-Both point at the **same** database — they are just different doors into it.
-
-Three consequences you must know:
-
-1. **PostgREST must be running**, or pages that use the Supabase client will error.
-   That is the `postgrest` service in `docker-compose.yml`.
-2. **The URL must be the gateway on port 54321, not PostgREST directly.**
-   `supabase-js` requests paths like `/rest/v1/tournaments`, but PostgREST serves at
-   the *root* (`/tournaments`). `scripts/postgrest-gateway.cjs` strips the `/rest/v1`
-   prefix and forwards to PostgREST — that is why it exists and why you run `npm run gateway`.
-3. **PostgREST is bound to 54323, not the usual 54322.** 54322 frequently collides with
-   other local tooling. `PGRST_SERVER_PORT` overrides it in both the compose file and the gateway.
+This guide walks you through running RingFlow on your local machine (`localhost`), seeding a complete realistic karate championship, and testing every major operational feature—from admin balancing and bracket generation to live WKF bout scoring and real-time arena scoreboards.
 
 ---
 
-## Step 0: Check you have a database
+## Prerequisites
 
-The setup assumes a PostgreSQL with role `event_suite`, database `ringflow`:
-
-```bash
-PGPASSWORD=event_suite psql -h 127.0.0.1 -p 5432 -U event_suite -d ringflow -c '\dt'
-```
-
-If that lists tables (or errors with "database does not exist"), continue below. If you
-have **no** PostgreSQL at all, use the optional container instead — see
-"Option B: no Postgres installed" at the end.
+* **Node.js**: Version `22.0.0` or higher (`node -v`)
+* **Docker Desktop** (or a local PostgreSQL 16 installation)
 
 ---
 
-## Step-by-step
+## 5-Minute Quick Setup
 
-### 1. Install dependencies
+### 1. Install Dependencies
+
+From the `RingFlow-CISCE` directory:
 
 ```bash
 npm install
 ```
 
-### 2. Configure the environment
+### 2. Configure Environment
+
+Copy the environment template:
 
 ```bash
 cp .env.example .env.local
 ```
 
-The template already contains working local values: `DATABASE_URL`, the gateway URL, and
-the two local JWTs signed with the PostgREST secret from `docker-compose.yml`. Normally
-nothing needs changing.
+The default values in `.env.example` point to `127.0.0.1:5432` with username/password `event_suite:event_suite` and database `ringflow`.
 
-### 3. Start PostgREST (leave it running)
+> [!NOTE]
+> If you are running Docker inside **WSL2** and accessing it from Windows, ensure your `DATABASE_URL` uses the reachable container or WSL IP (e.g. `postgres://event_suite:event_suite@<IP>:5432/ringflow`).
 
-```bash
-docker compose up -d postgrest
-```
+### 3. Start PostgreSQL
 
-It runs in the host network namespace so it can reach a PostgreSQL listening on the host's
-loopback (the native Ubuntu package does, and loopback is not reachable from the docker
-bridge), and binds `127.0.0.1:54323`.
-
-Check it connected:
+Use the provided Docker Compose service to start a dedicated PostgreSQL container:
 
 ```bash
-docker compose logs --tail=5 postgrest      # look for "Successfully connected to PostgreSQL"
+docker compose up -d db
 ```
 
-### 4. Start the gateway (second terminal, leave it running)
+Verify that the database is healthy:
 
 ```bash
-npm run gateway
+npx tsx scripts/test-db.ts
 ```
 
-### 5. Create the tables — only if the database is empty
+### 4. Push Schema & Seed Realistic Demo Championship
+
+Apply the Drizzle database schema and seed a full tournament:
 
 ```bash
 npm run db:push
-npm run db:seed        # optional demo data: admin@ringflow.org / admin123
+npm run db:seed
 ```
 
-> **Do not run `supabase/master.sql` locally.** It creates `ENUM` types and a `storage`
-> schema that only exist on a real Supabase project, and its columns do not match the
-> Drizzle schema. `db:push` is the correct local path.
+The seed script creates:
+* 👤 **Administrator**: `admin@ringflow.org` / `admin123`
+* 🏆 **Tournament**: *CISCE National Karate Championship 2026* (Organiser code: `ORG001`)
+* 🥋 **4 Rings (Tatami)**:
+  * Tatami 1 (Code: `RING01`)
+  * Tatami 2 (Code: `RING02`)
+  * Tatami 3 (Code: `RING03`)
+  * Tatami 4 (Code: `RING04`)
+* 📋 **Official Categories & Roster**: Boys & Girls U14 divisions with Kata and Kumite entries
+* 🌳 **Digital Brackets**: Pre-generated single-elimination tournament draws
+* 🎛️ **Pre-Approved Ring 1 Session**: Instant testing of the live scoring pad without waiting for approval
 
-### 6. Run the app (third terminal)
+> [!TIP]
+> Need a completely fresh start at any time? Run:
+> ```bash
+> npm run db:reset
+> ```
+> This safely empties all test tables and re-seeds the clean demo championship.
+
+### 5. Start the Application
+
+Start the Next.js development server:
 
 ```bash
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-### Or: one command
-
-Steps 3, 4 and 6 are bundled:
-
-```bash
-npm run dev:local
-```
-
-This starts `postgrest` (waiting for health), then the gateway and `next dev` together.
+*(Or to test in production mode: `npm run build && npm run start`)*
 
 ---
 
-## Where to go in the app
+## Feature Testing & Guided Tour
 
-| Surface | URL | Notes |
-| :--- | :--- | :--- |
-| Public home | `/` | No login |
-| Admin login | `/login/admin` | Seeded credentials are `admin@ringflow.org` / `admin123` |
-| Admin dashboard | `/admin` | Pick a tournament |
-| Moderator login | `/login/mod` | Needs a ring access code (`RING01`…) |
-| Ring / scoreboard | linked from the admin dashboard | Uses ring IDs from the database |
+Once the server is running, you can test every persona simultaneously by opening different browser windows or tabs.
+
+### Tour 1: Admin Command Room
+1. Go to [http://localhost:3000/login/admin](http://localhost:3000/login/admin).
+2. Sign in with:
+   * **Email**: `admin@ringflow.org`
+   * **Password**: `admin123`
+3. Click into the **CISCE National Karate Championship 2026**.
+4. Explore:
+   * **Live Ring Monitor**: View real-time status, active bouts, and progress across all 4 tatamis.
+   * **Ring Balancing**: Open `/admin/event/[id]/rings/balance` to visually drag and balance categories across rings.
+   * **Moderator Approvals**: Ring requests from table officials appear here for instant one-click approval.
 
 ---
 
-## Environment variables
+### Tour 2: Tournament Organiser Desk
+1. Go to [http://localhost:3000/login/organiser](http://localhost:3000/login/organiser).
+2. Enter the access code: `ORG001` and your name.
+3. Submit the request (if not pre-approved, approve it from the Admin tab).
+4. In the Organiser portal:
+   * **Category Definitions**: View official age, weight, and rules presets.
+   * **Athletes Roster**: Review multi-event athletes participating in Kata and Kumite.
+   * **Draws & Brackets**: Inspect generated brackets, seeds, and byes.
+   * **PDF & Excel Export**: Download high-resolution draw sheets and tournament results.
 
-| Variable | Purpose |
+---
+
+### Tour 3: Real-Time Bout Scoring Pad & Arena Scoreboard (Side-by-Side Test)
+
+This is the core experience. Open two side-by-side browser windows:
+
+* **Window 1 (Table Official / Moderator)**:
+  Open [http://localhost:3000/moderator/ring/f1bd9c67-1f67-4981-897f-ddf298a67533/current](http://localhost:3000/moderator/ring/f1bd9c67-1f67-4981-897f-ddf298a67533/current) (Tatami 1).
+  *(Or log in at `/login/mod` using access code `RING01`)*.
+
+* **Window 2 (Arena TV Scoreboard)**:
+  Open [http://localhost:3000/scoreboard/f1bd9c67-1f67-4981-897f-ddf298a67533](http://localhost:3000/scoreboard/f1bd9c67-1f67-4981-897f-ddf298a67533).
+  *(Press `F11` for broadcast fullscreen)*.
+
+#### Interactive Actions to Test:
+1. **Clock Control**: Click **Start** on the moderator pad. Watch the timer count down with millisecond precision in both windows simultaneously!
+2. **Audio Buzzer**: Let the timer reach 0:00 or click reset/adjust to hear the ring bell buzzer sound.
+3. **Point Scoring**:
+   * Click **+1** (Yuko) for Aka (Red).
+   * Click **+2** (Waza-ari) or **+3** (Ippon) for Ao (Blue).
+   * Notice that the Scoreboard updates immediately without reloading.
+4. **Senshu Advantage**: Toggle Senshu (first-uncontested point advantage) on either athlete.
+5. **Penalties**: Click **C1** or **C2** penalty buttons and observe the visual penalty indicators on the arena board.
+6. **Side Swapping**: Click **Swap Sides** to instantly mirror the red and blue positions on the TV scoreboard to match the referee's visual orientation on the mat.
+7. **Bout Completion**: Declare a winner (Points, Hantei, Kiken, Hansoku). Confirm the result to automatically advance the bracket to the next round!
+
+---
+
+### Tour 4: Public Spectator & Athlete Portal
+1. Open [http://localhost:3000](http://localhost:3000) or open `/public/event/<tournament-id>`.
+2. No login is required.
+3. Search for any competitor by chest number (e.g. `101`, `102`, `201`) or athlete name (e.g. `Mohammed`, `Ananya`).
+4. View live mat assignment, estimated start time, and bracket progression.
+
+---
+
+## How Real-Time Synchronization Works
+
+RingFlow uses a zero-delay **Server-Sent Events (SSE)** architecture:
+
+* **Endpoint**: `/api/live` connects the browser to an in-memory event bus and PostgreSQL `LISTEN/NOTIFY`.
+* **Zero Polling Overhead**: Changes made by table officials trigger immediate broadcast events to all active scoreboard, admin, and spectator clients.
+* **Resilient Fallback**: If a connection drops temporarily, the client automatically falls back to periodic validation before silently reconnecting.
+
+---
+
+## Useful NPM Scripts
+
+| Script | Description |
 | :--- | :--- |
-| `DATABASE_URL` | Drizzle / `postgres` driver → Postgres on `:5432` |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase JS client → the gateway on `:54321` |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Local JWT (role `event_suite`) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Same local JWT; used for elevated actions |
-| `PGRST_SERVER_PORT` | Optional. Port PostgREST binds / the gateway targets (default 54323) |
-| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` / `TURNSTILE_SECRET_KEY` | Cloudflare test keys (always pass) |
+| `npm run dev` | Start Next.js development server on `http://localhost:3000` |
+| `npm run build` | Compile Next.js production build with strict type-checking and standalone bundling |
+| `npm run start` | Run the compiled production application |
+| `npm run lint` | Run ESLint 9 validation |
+| `npm run db:push` | Synchronize the Drizzle schema directly to PostgreSQL |
+| `npm run db:seed` | Seed realistic demo tournament, rings, categories, and draws |
+| `npm run db:reset` | Cleanly wipe and re-seed the demo database |
+| `npm run test:e2e` | Run end-to-end automated verification script |
 
 ---
 
-## Useful npm scripts
+## Troubleshooting FAQ
 
-| Script | What it does |
-| :--- | :--- |
-| `npm run dev` | Next.js dev server on `:3000` (forces `NODE_ENV=development`) |
-| `npm run dev:local` | postgrest + gateway + Next, one command |
-| `npm run gateway` | PostgREST gateway (`:54321` → PostgREST) |
-| `npm run db:push` | Apply the Drizzle schema to the database |
-| `npm run db:seed` | Seed the demo tournament |
-| `npm run build` / `npm run start` | Production build and serve |
-| `npm run lint` | ESLint |
+### 1. Database connection failed / Connection refused
+* Verify Docker is running: `docker compose ps`
+* Test database connectivity: `npx tsx scripts/test-db.ts`
+* If using WSL2, check that `DATABASE_URL` uses the correct IP address or `127.0.0.1`.
 
----
+### 2. Audio buzzer doesn't sound when timer expires
+Modern browsers block autoplaying audio until the user interacts with the page. Click anywhere on the scoreboard or moderator page once to grant browser audio permissions.
 
-## Troubleshooting
+### 3. Port 3000 or 5432 is already in use
+* Change the database port in `docker-compose.yml` (e.g., `"5433:5432"`) and update `DATABASE_URL` in `.env.local`.
+* To run Next.js on a different port: `npx next dev -p 3001`.
 
-**Everything looks fine but pages show no data, or actions fail.**
-The gateway is the usual culprit:
-
-```bash
-curl -s "http://127.0.0.1:54321/rest/v1/tournaments?limit=1"
-```
-
-* `200` with JSON → good.
-* `404` → the request isn't reaching the gateway, or `NEXT_PUBLIC_SUPABASE_URL` is not `http://127.0.0.1:54321`.
-* `502` / connection error → the gateway is running but PostgREST is not (`docker compose ps`).
-
-**`docker compose up` fails with "address already in use".**
-Another process owns the port. Check who with `ss -ltnp | grep <port>`. If it's 54322,
-that is exactly why this repo uses 54323; set `PGRST_SERVER_PORT` to a free port for both
-the compose file and the gateway.
-
-**PostgREST logs "connection refused" to the database.**
-It cannot reach PostgreSQL. Confirm the database is listening (`pg_isready -h 127.0.0.1 -p 5432`)
-and that `PGRST_DB_URI` points at it.
-
-**Buttons do nothing / the login form doesn't submit when opened from another device or IP.**
-Next's dev server blocks requests to `/_next/*` that carry an `Origin` from a host it does not
-know, so the page's JavaScript never loads and nothing is interactive. Add the host you open the
-app from to `allowedDevOrigins` in `next.config.ts` (top level, not under `experimental`) and
-restart the dev server:
-
-```ts
-const nextConfig: NextConfig = {
-  allowedDevOrigins: ["localhost", "127.0.0.1", "192.168.1.9", "100.111.174.126"],
-  // ...
-};
-```
-
-Do not add a separate `next.config.js` alongside `next.config.ts` — Next only loads one config.
-
-**Login appears to succeed but you bounce straight back to the login page.**
-The session cookie is marked `Secure` when `NODE_ENV=production`, and browsers drop `Secure`
-cookies over plain HTTP on a non-localhost address. `npm run dev` forces
-`NODE_ENV=development`, which avoids this. If you start the server another way, unset
-`NODE_ENV` first.
-
-**Next prints "non-standard NODE_ENV value".**
-Something exported `NODE_ENV` (often an IDE terminal). `npm run dev` now forces
-`NODE_ENV=development`, so you should not see this; if you do, run `unset NODE_ENV` first.
-
-**`npm run build` complains about `NODE_ENV`.**
-Never run `next build` with a hand-set `NODE_ENV`; leave it to the script.
-
----
-
-## Limitations of the local Docker setup
-
-These are inherent to not running a full Supabase stack, not bugs:
-
-* **Live updates do not work.** The `postgres_changes` subscriptions are a Supabase
-  Realtime feature that PostgREST does not provide. A few pages poll as a fallback
-  (e.g. the waiting rooms); the rest will not refresh on their own.
-* **PDF upload fails.** Category documents are stored in a Supabase Storage bucket
-  (`category-docs`), which plain Postgres does not have.
-* **Google OAuth is disabled** in this mode; admin auth is email + password.
-
-If you need those, use a hosted Supabase project instead (below).
-
----
-
-## Option B: no Postgres installed
-
-`docker-compose.yml` has an optional database container for machines without a native
-PostgreSQL. It publishes `5433` on the host so it can never collide with one on `5432`:
-
-```bash
-docker compose --profile docker-db up -d db postgrest
-```
-
-Then point both layers at it in `.env.local`:
-
-```ini
-DATABASE_URL="postgres://event_suite:event_suite@127.0.0.1:5433/ringflow"
-```
-
-and start PostgREST with the matching URI:
-
-```bash
-PGRST_DB_URI=postgres://event_suite:event_suite@127.0.0.1:5433/ringflow docker compose up -d postgrest
-npm run db:push && npm run db:seed
-```
-
----
-
-## Appendix: using hosted Supabase instead
-
-1. Create a project at [supabase.com](https://supabase.com).
-2. Apply the schema: open the SQL Editor and run `supabase/master.sql` (or apply
-   `supabase/migrations/*.sql` in order).
-3. In `.env.local`, replace `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-   and `SUPABASE_SERVICE_ROLE_KEY` with your project's values, and set `DATABASE_URL`
-   to your project's Postgres connection string.
-4. You no longer need the gateway or the local containers.
-5. To sign in as an admin, insert your user into the allow-list:
-
-```sql
-INSERT INTO public.admins (id, email)
-VALUES ('YOUR_USER_UUID', 'your.email@example.com');
-```
+### 4. Preparing for Multi-Device / Network Testing (Next Phase)
+When you are ready to test connecting other devices (tablets, TV screens, mobile phones) over your local WiFi network:
+* Find your computer's local IP address (`ipconfig` on Windows or `ifconfig` / `hostname -I` on Linux/Mac).
+* Verify that your local IP is included in `allowedDevOrigins` inside `next.config.ts`.
+* Other devices on the same WiFi can access `http://<YOUR-IP>:3000`.

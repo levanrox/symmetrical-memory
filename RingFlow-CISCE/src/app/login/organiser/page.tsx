@@ -11,7 +11,7 @@ import { v4 as uuidv4 } from "uuid";
 function parseUserAgent(ua: string) {
   let browser = "Unknown";
   let os = "Unknown";
-  let deviceType = /Mobile|Android|iP(ad|hone)/.test(ua) ? "Mobile" : "Desktop";
+  const deviceType = /Mobile|Android|iP(ad|hone)/.test(ua) ? "Mobile" : "Desktop";
 
   if (ua.includes("Chrome")) browser = "Chrome";
   else if (ua.includes("Firefox")) browser = "Firefox";

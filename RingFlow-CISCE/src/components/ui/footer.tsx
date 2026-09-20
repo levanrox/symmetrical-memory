@@ -1,4 +1,5 @@
 import React from "react"
+import Link from "next/link"
 import { cn } from "@/lib/utils"
 import { RingFlowLogo } from "./ringflow-logo"
 
@@ -68,14 +69,14 @@ export function Footer({
           <div className="bg-[#F5F3EC]/80 backdrop-blur-md border border-[#E1DDCF]/90 rounded-xl overflow-hidden shadow-[0_8px_30px_rgba(27,24,21,0.06)]">
             {/* ── Row 1: Brand & Social Links ── */}
             <div className="flex items-center justify-between px-6 py-3.5">
-              <a
+              <Link
                 href="/"
                 aria-label={brandName}
                 className="font-bold text-[19px] leading-none tracking-tight text-[#1B1815] hover:text-black transition-colors duration-150 flex items-center gap-2.5"
               >
                 <RingFlowLogo className="h-[26px] w-[26px] text-[#1B1815] shrink-0" />
                 <span className="font-black tracking-tight">{brandName}</span>
-              </a>
+              </Link>
 
               {socialLinks.length > 0 && (
                 <ul className="flex items-center gap-3 list-none m-0 p-0">

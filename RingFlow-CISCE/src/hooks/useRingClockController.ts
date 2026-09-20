@@ -79,9 +79,11 @@ export function useRingClockController(options: {
 
   const lastWriteRef = useRef(0);
   const adoptedKeyRef = useRef(keyOf(initialClock));
-  const sentAtRef = useRef(Date.now());
+  const sentAtRef = useRef(0);
   const onElapsedRef = useRef(onElapsed);
-  onElapsedRef.current = onElapsed;
+  useEffect(() => {
+    onElapsedRef.current = onElapsed;
+  }, [onElapsed]);
 
   // Adopt fresh server state, but never let a slow refresh undo a fresh action.
   useEffect(() => {

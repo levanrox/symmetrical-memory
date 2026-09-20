@@ -1,53 +1,133 @@
 # RingFlow
 
-**Real-Time Tournament Floor Management Platform**
+**High-Performance Real-Time Tournament Floor Management & Scoring Platform**
 
-RingFlow is a real-time event floor operations platform designed specifically for multi-ring martial arts competitions (Karate, Taekwondo, etc.). It acts as the command center for tournament directors, provides a zero-training mobile interface for ring operators, and offers live status updates to athletes and spectators via shareable links.
-
----
-
-## The Problem
-
-Traditional tournament software manages registrations, brackets, and static schedules. However, during large events, organizers struggle to:
-1. **Balance Workloads**: Distribute categories evenly across rings to avoid bottlenecks.
-2. **Monitor Progress**: Keep track of which rings are running, paused, or finished.
-3. **Coordinate Officials**: Keep track of volunteer staff without requiring complex training or accounts.
-4. **Communicate Live**: Inform athletes and parents when their division will start, preventing ring crowding and missed slots.
-
-RingFlow solves these challenges by centralizing live mat operations on a single unified platform.
+RingFlow is a modern, real-time tournament operations and scoring platform purpose-built for multi-ring martial arts championships (Karate WKF Kumite/Kata, Taekwondo, and combat sports). It unifies tournament directors, registration organisers, staging marshalls, mat-side table officials, arena TV scoreboards, and public spectators into a single coordinated, sub-millisecond digital ecosystem.
 
 ---
 
-## Core Principles
+## Key Capabilities
 
-* **Coarse Progress Tracking**: We track completed-match counts per division, not individual match scores, points, or winners.
-* **Zero Training for Ring Staff**: The operator's layout is mobile-first and optimized for high-stress environments.
-* **No Apps/Logins for the Public**: Spectators can view live status and search for athletes simply by scanning a QR code.
-* **Event-Sourced Architecture**: Every state change (start, increment progress, pause, resume, complete) is recorded as an immutable event. Dashboards compile these events dynamically so data never drifts.
-
----
-
-## User Roles & Access
-
-| Role | Access Model | Primary Capabilities |
-| :--- | :--- | :--- |
-| **Admin** | Google OAuth + Email Allow-List | Create/manage tournaments, assign categories to rings, live-monitor all mats, approve moderator access requests. |
-| **Moderator** | EPHEMERAL Session (Code-based) | Enter ring-side access code, request admin approval, track match progress (`+1`/`-1`/`+5`), pause/resume ring. |
-| **Public** | Public Read-Only URL / QR Code | Scan to view live mat updates, check estimated category start times, search athletes by name or chest number. |
+* 🥊 **Official WKF Bout Scoring Pad**: Dedicated ring-side controller for table officials supporting 1-point (Yuko), 2-point (Waza-ari), and 3-point (Ippon) scores, Senshu (first-uncontested point advantage), Category 1 & Category 2 penalties, official decision methods (Points, Hantei, Kiken, Hansoku, Shikaku), and side-swapping for custom display orientations.
+* ⏱️ **Synchronized Match Clock & Buzzer**: Authoritative millisecond-precision ring clock with sound buzzer notifications, pause/resume, run segment accumulation, and network drift compensation.
+* 📺 **Broadcast-Grade Arena Scoreboards**: Fullscreen, responsive TV displays for each tatami/ring showing active scores, live timer, athlete names, schools/countries, penalties, and winner announcements with customizable scaling.
+* 🌳 **Automated Draw & Bracket Engine**: Instant single-elimination, repechage, and round-robin bracket generation with intelligent bye distribution, seeding, and automatic winner progression to subsequent rounds.
+* ⚖️ **Dynamic Ring Balancing**: Visual drag-and-drop category load balancer allowing tournament directors to distribute divisions across rings and predict estimated completion times.
+* 📋 **Multi-Role Marshalling & Staging**: Dedicated stager interface for call-ups, on-deck athlete tracking, and category queue sequencing.
+* 📱 **Zero-Install Public Portal**: Spectators and athletes scan a QR code to view live ring progression, bracket status, and search for competitors by chest number or name with zero login required.
+* ⚡ **Real-Time Architecture**: Powered by Next.js Server-Sent Events (SSE) via `/api/live`, PostgreSQL `LISTEN/NOTIFY`, and an in-memory event bus—delivering instant screen updates with zero polling lag.
+* 📄 **Professional Reporting & Exports**: High-resolution printable draw sheet PDFs and tournament results export to Excel (XLSX).
 
 ---
 
-## Tech Stack
+## System Architecture
 
-* **Frontend**: Next.js (App Router), TypeScript, Tailwind CSS
-* **Backend**: Supabase (PostgreSQL database, authentication, and Realtime replication)
-* **Security**: Cloudflare Turnstile (spam/bot protection for login flows)
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              RINGFLOW CLIENTS                               │
+│  Admin Console  │  Organiser Desk  │  Stager View  │  Moderator Pad  │ Scoreboard  │ Spectator Web
+└───────┬─────────┴────────┬─────────┴───────┬───────┴────────┬────────┴──────┬──────┴───────┬─────┘
+        │                  │                 │                │               │              │
+        ▼                  ▼                 ▼                ▼               ▼              ▼
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                                   NEXT.JS APPLICATION SERVER                                     │
+│  - App Router & React 19 Server Components                                                       │
+│  - Type-safe Server Actions (admin, organiser, stager, moderator, matches, clock, draws)         │
+│  - Server-Sent Events (SSE) live endpoint (/api/live) with real-time scope filtering             │
+│  - Standalone production output for minimal footprint                                            │
+└─────────────────────────────────┬───────────────────────────────┬────────────────────────────────┘
+                                  │                               │
+                                  ▼                               ▼
+                 ┌─────────────────────────────────┐   ┌────────────────────────────────┐
+                 │     DRIZZLE ORM ENGINE          │   │  REALTIME BUS (LISTEN/NOTIFY)  │
+                 │   Sub-millisecond queries,      │   │  Single-conn listener with     │
+                 │   type-safe relational schema   │   │  instant in-memory fanout      │
+                 └────────────────┬────────────────┘   └───────────────┬────────────────┘
+                                  │                                    │
+                                  └─────────────────┬──────────────────┘
+                                                    │
+                                                    ▼
+                               ┌────────────────────────────────────────┐
+                               │           POSTGRESQL DATABASE          │
+                               │   Tables: tournaments, rings, matches, │
+                               │   categories, draws, athletes, logs    │
+                               └────────────────────────────────────────┘
+```
+
+---
+
+## User Roles & Operational Workflows
+
+| Persona | Access Route | Authentication / Access Model | Primary Capabilities |
+| :--- | :--- | :--- | :--- |
+| **Tournament Director (Admin)** | `/admin` | Email + Password (`admin@ringflow.org`) | Full tournament oversight, create/edit rings and categories, monitor live tatami statuses, approve moderator/stager access requests, balance categories across rings, configure audit settings. |
+| **Tournament Organiser** | `/organiser` | Code-based request (`ORG001`) with Admin approval | Configure category definitions (CISCE & custom weight/age presets), import multi-event athlete rosters (Kumite & Kata), generate brackets, download bulk PDF draw packages, export official Excel results. |
+| **Staging Marshall** | `/stager` | Code-based request (`STAGE01`) with Admin approval | Marshalling area view to call up competitors, inspect category bout sequences, verify athlete presence, and ready divisions for tatami assignment. |
+| **Tatami Table Official (Moderator)** | `/moderator/ring/[ringId]/current` | Ring Access Code (`RING01`…) with Admin approval | Control active bout: Yuko/Waza-ari/Ippon points, Senshu advantage, C1/C2 penalties, start/stop match timer, swap display sides, record bout outcome, advance to next match. |
+| **Arena TV Scoreboard** | `/scoreboard/[ringId]` | Direct URL / Mat-side display | Fullscreen spectator and athlete-facing display showing live scores, names, schools, match timer, penalty markers, and winner cards. |
+| **Public Spectators & Athletes** | `/public/event/[id]` | Public URL / QR Code (No login required) | Real-time mat tracker, live bout status, category bracket viewer, athlete search by name or chest number. |
+
+---
+
+## Technology Stack
+
+* **Core Framework**: [Next.js](https://nextjs.org/) (App Router, Server Actions, Standalone output)
+* **Frontend Library**: [React](https://react.dev/) 19 & TypeScript
+* **Styling**: [Tailwind CSS](https://tailwindcss.com/) v4
+* **Database & ORM**: [PostgreSQL](https://www.postgresql.org/) (v16) with [Drizzle ORM](https://orm.drizzle.team/)
+* **Realtime Sync**: Server-Sent Events (SSE) via `/api/live` backed by Postgres `LISTEN/NOTIFY` and an in-memory event bus
+* **PDF & Document Engine**: `pdf-lib` for dynamic tournament bracket sheet generation and `xlsx` for official tournament result exports
+* **Security & Bot Protection**: Cloudflare Turnstile (with automated local development bypass)
+
+---
+
+## Production Readiness
+
+RingFlow is optimized for production deployment via Docker containerization or standalone Node.js execution.
+
+### 1. Docker Production Build (Multi-Stage)
+
+RingFlow includes a multi-stage [Dockerfile](Dockerfile) based on Node.js 22 Alpine leveraging Next.js standalone output:
+
+```bash
+# Build the production image
+docker build -t ringflow:latest .
+
+# Run the production container
+docker run -d \
+  --name ringflow-app \
+  -p 3000:3000 \
+  -e DATABASE_URL="postgres://event_suite:event_suite@<DB_HOST>:5432/ringflow" \
+  -e NEXT_PUBLIC_SUPABASE_URL="http://<SERVER_HOST>:3000" \
+  ringflow:latest
+```
+
+### 2. Standalone Bare-Metal / PM2 Deployment
+
+```bash
+# 1. Install production dependencies and build
+npm ci
+npm run build
+
+# 2. Run with Node or PM2
+NODE_ENV=production node .next/standalone/server.js
+# Or with PM2:
+pm2 start .next/standalone/server.js --name "ringflow"
+```
+
+### 3. Verification & Code Quality
+
+The codebase enforces strict production build and linting standards:
+
+```bash
+npm run lint          # ESLint 9 validation (0 errors)
+npm run build         # Next.js compilation, route validation & typecheck
+npm run test:e2e      # End-to-end automated functional test suite
+```
 
 ---
 
 ## Quick Navigation
 
-* **Local Installation & Setup**: Follow the [QUICKSTART.md](file:///d:/Programming/RingFlowDevelopment/docs/RingFlow/QUICKSTART.md) guide to configure environment variables, databases, and OAuth.
-* **Contribution & Coding Guidelines**: Review [CONTRIBUTING.md](file:///d:/Programming/RingFlowDevelopment/docs/RingFlow/CONTRIBUTING.md) to understand project conventions, branching strategies, and architecture guidelines.
-
- 
+* **Local Installation & Setup**: Follow the [QUICKSTART.md](QUICKSTART.md) guide to spin up PostgreSQL, seed demo data, and run RingFlow locally.
+* **Contributing**: Review [CONTRIBUTING.md](CONTRIBUTING.md) for architecture guidelines, coding conventions, and pull request workflows.
