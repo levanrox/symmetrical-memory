@@ -25,6 +25,8 @@ interface Props {
     akaPenalties?: number;
     aoPenalties?: number;
     senshu?: "AKA" | "AO" | null;
+    status?: string;
+    winnerId?: string | null;
   };
   ringId?: string;
   categoryName: string;
@@ -375,6 +377,13 @@ export function BoutScoringPad({
       return;
     }
 
+    if (match.status === "CONFIRMED" && match.winnerId && winnerId !== match.winnerId) {
+      const confirmed = window.confirm(
+        "Notice: You are changing the winner of this previously confirmed bout.\n\nDownstream matches will be updated to advance the new winner. Proceed?"
+      );
+      if (!confirmed) return;
+    }
+
     try {
       setConfirming(true);
       await confirmBoutResult(match.id, winnerId, {
@@ -653,6 +662,12 @@ export function BoutScoringPad({
               <span className="truncate text-[10px] font-bold uppercase text-neutral-400 sm:text-xs">
                 {match.roundName}
               </span>
+              {match.status === "CONFIRMED" && (
+                <span className="rounded-full bg-amber-500/20 border border-amber-500/40 text-amber-300 px-2 py-0.5 text-[9px] font-black uppercase tracking-wider flex items-center gap-1">
+                  <span className="material-symbols-outlined text-[12px]">edit_note</span>
+                  Correction Mode
+                </span>
+              )}
             </div>
             <h2 className="mt-0.5 truncate text-xs font-bold text-white sm:text-sm md:text-base">
               {categoryName}
@@ -915,11 +930,21 @@ export function BoutScoringPad({
               setShowFinishModal(true);
             }}
             disabled={confirming}
-            className="flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl bg-[#0E9C7C] px-4 py-2.5 text-xs font-extrabold uppercase text-white shadow-sm transition-transform active:scale-95 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2 sm:px-6 sm:text-sm"
+            className={`flex min-h-[44px] shrink-0 items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-xs font-extrabold uppercase text-white shadow-sm transition-transform active:scale-95 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 sm:px-6 sm:text-sm ${
+              match.status === "CONFIRMED"
+                ? "bg-amber-600 hover:bg-amber-700 focus-visible:ring-amber-500"
+                : "bg-[#0E9C7C] hover:bg-[#0B7C63] focus-visible:ring-[#0E9C7C]"
+            }`}
           >
-            <span className="material-symbols-outlined text-[16px] sm:text-[18px]">verified</span>
-            <span className="hidden sm:inline">Confirm result</span>
-            <span className="sm:hidden">Confirm</span>
+            <span className="material-symbols-outlined text-[16px] sm:text-[18px]">
+              {match.status === "CONFIRMED" ? "edit" : "verified"}
+            </span>
+            <span className="hidden sm:inline">
+              {match.status === "CONFIRMED" ? "Update Result" : "Confirm result"}
+            </span>
+            <span className="sm:hidden">
+              {match.status === "CONFIRMED" ? "Update" : "Confirm"}
+            </span>
           </button>
         </div>
       </div>
@@ -1057,10 +1082,12 @@ export function BoutScoringPad({
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="w-full max-w-md rounded-2xl border border-[#E1DDCF] bg-white p-6 shadow-2xl">
             <h3 className="text-lg font-extrabold text-[#1B1815]">
-              Confirm bout #{match.matchNo}
+              {match.status === "CONFIRMED" ? `Update Bout #${match.matchNo} Result` : `Confirm bout #${match.matchNo}`}
             </h3>
             <p className="mb-4 text-xs text-[#68645A]">
-              Pick the winner and the decision method to advance the bracket.
+              {match.status === "CONFIRMED"
+                ? "This bout was already confirmed. Updating the winner will recalculate advancement and replace the athlete downstream."
+                : "Pick the winner and the decision method to advance the bracket."}
             </p>
 
             <div className="mb-4 grid grid-cols-2 gap-3">
@@ -1130,9 +1157,13 @@ export function BoutScoringPad({
                 type="button"
                 onClick={() => selectedWinnerSide && handleConfirmWinner(selectedWinnerSide)}
                 disabled={!selectedWinnerSide || confirming}
-                className="min-h-[44px] rounded-xl bg-[#0E9C7C] px-5 py-2 text-xs font-black uppercase text-white hover:bg-[#0B7C63] disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C] focus-visible:ring-offset-2"
+                className={`min-h-[44px] rounded-xl px-5 py-2 text-xs font-black uppercase text-white disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${
+                  match.status === "CONFIRMED"
+                    ? "bg-amber-600 hover:bg-amber-700 focus-visible:ring-amber-500"
+                    : "bg-[#0E9C7C] hover:bg-[#0B7C63] focus-visible:ring-[#0E9C7C]"
+                }`}
               >
-                {confirming ? "Advancing…" : "Confirm & advance"}
+                {confirming ? "Updating…" : match.status === "CONFIRMED" ? "Update & Re-Advance" : "Confirm & advance"}
               </button>
             </div>
           </div>

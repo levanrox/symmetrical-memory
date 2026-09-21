@@ -435,7 +435,7 @@ export default function CategoriesClient({
    * it takes effect the next time the draw is generated.
    */
   const handleBronzeChange = async (cat: any, value: string) => {
-    const bronzeMedals = value === "inherit" ? null : (Number(value) as 0 | 1 | 2);
+    const bronzeMedals = value === "inherit" ? null : (Number(value) as 0 | 1 | 2 | 3);
     const res = await setCategoryDrawOption(cat.id, bronzeMedals);
     if (!res.success) {
       alert(res.error || "Could not save the bronze setting.");
@@ -752,10 +752,11 @@ export default function CategoriesClient({
                             onChange={(e) => void handleBronzeChange(cat, e.target.value)}
                             className="cursor-pointer rounded border border-outline-variant bg-white px-1.5 py-1 font-data-mono text-[11px] font-bold text-[#3D3A33] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
                           >
-                            <option value="inherit">Event default</option>
-                            <option value="0">No bronze</option>
-                            <option value="1">One bronze</option>
-                            <option value="2">Two bronzes</option>
+                            <option value="inherit">Default (Inherit)</option>
+                            <option value="2">Official WKF (2 Bronzes · Full)</option>
+                            <option value="1">Local Official (1 Bronze Playoff)</option>
+                            <option value="3">Local Official (Joint 3rd · 2 Bronzes)</option>
+                            <option value="0">No Bronze</option>
                           </select>
                         </label>
 

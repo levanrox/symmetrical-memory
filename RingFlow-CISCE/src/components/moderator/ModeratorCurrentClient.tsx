@@ -580,16 +580,20 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
               onToggleDeskSides={toggleDeskSides}
               deskFontSize={deskFontSize}
               onBoutCompleted={() => {
-                // Instantly increment match count on client for immediate UI feedback
-                setAssignments((prev) =>
-                  prev.map((a) =>
-                    a.id === activeAssignment.id
-                      ? { ...a, matches_completed: Math.min((activeAssignment.categories?.expected_matches || 99), (a.matches_completed || 0) + 1) }
-                      : a
-                  )
-                );
+                const wasAlreadyConfirmed = boutData?.currentMatch?.status === "CONFIRMED";
+                if (!wasAlreadyConfirmed) {
+                  // Instantly increment match count on client for immediate UI feedback
+                  setAssignments((prev) =>
+                    prev.map((a) =>
+                      a.id === activeAssignment.id
+                        ? { ...a, matches_completed: Math.min((activeAssignment.categories?.expected_matches || 99), (a.matches_completed || 0) + 1) }
+                        : a
+                    )
+                  );
+                }
                 setSelectedMatchId(null);
                 loadBoutData();
+                refreshAssignments();
                 router.refresh();
               }}
             />

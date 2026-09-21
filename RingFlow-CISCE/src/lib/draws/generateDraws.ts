@@ -23,7 +23,7 @@ import { revalidatePath } from "next/cache";
  */
 export async function performCategoryDraw(
   categoryId: string,
-  options?: { bronzeMedals?: 0 | 1 | 2; separateByClub?: boolean }
+  options?: { bronzeMedals?: 0 | 1 | 2 | 3; separateByClub?: boolean }
 ) {
   // 1. Fetch category
   const [cat] = await db
@@ -40,15 +40,16 @@ export async function performCategoryDraw(
     .from(tournaments)
     .where(eq(tournaments.id, cat.tournamentId));
 
-  const bronzeMedals: 0 | 1 | 2 =
+  const bronzeMedals: 0 | 1 | 2 | 3 =
     options?.bronzeMedals ??
-    (cat.bronzeMedals === 0 || cat.bronzeMedals === 1 || cat.bronzeMedals === 2
-      ? (cat.bronzeMedals as 0 | 1 | 2)
+    (cat.bronzeMedals === 0 || cat.bronzeMedals === 1 || cat.bronzeMedals === 2 || cat.bronzeMedals === 3
+      ? (cat.bronzeMedals as 0 | 1 | 2 | 3)
       : undefined) ??
     (tournament?.defaultBronzeMedals === 0 ||
     tournament?.defaultBronzeMedals === 1 ||
-    tournament?.defaultBronzeMedals === 2
-      ? (tournament.defaultBronzeMedals as 0 | 1 | 2)
+    tournament?.defaultBronzeMedals === 2 ||
+    tournament?.defaultBronzeMedals === 3
+      ? (tournament.defaultBronzeMedals as 0 | 1 | 2 | 3)
       : 2);
 
   // 2. Fetch category entries with athlete details
@@ -225,7 +226,7 @@ export async function performCategoryDraw(
 
 export async function performGenerateAllTournamentDraws(
   tournamentId: string,
-  options?: { bronzeMedals?: 0 | 1 | 2; separateByClub?: boolean }
+  options?: { bronzeMedals?: 0 | 1 | 2 | 3; separateByClub?: boolean }
 ) {
   const allCats = await db
     .select()

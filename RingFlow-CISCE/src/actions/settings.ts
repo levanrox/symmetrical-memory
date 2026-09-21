@@ -17,8 +17,8 @@ export async function updateTournamentSettings(
     city: string;
     show_public_draws?: boolean;
     show_public_scoreboard?: boolean;
-    /** 0 = no bronze bout, 1 = single bronze, 2 = repechage with two bronzes. */
-    default_bronze_medals?: 0 | 1 | 2;
+    /** 0 = no bronze, 1 = local official (1 bronze), 2 = official WKF (2 bronzes), 3 = local official (joint 2 bronzes). */
+    default_bronze_medals?: 0 | 1 | 2 | 3;
   }
 ) {
   await ensureAdminOwnsTournament(tournamentId);

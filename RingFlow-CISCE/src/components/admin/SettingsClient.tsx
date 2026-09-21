@@ -53,7 +53,7 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
     city: tournament.city || "",
     show_public_draws: tournament.show_public_draws === true,
     show_public_scoreboard: tournament.show_public_scoreboard === true,
-    default_bronze_medals: (tournament.default_bronze_medals ?? 2) as 0 | 1 | 2,
+    default_bronze_medals: (tournament.default_bronze_medals ?? 2) as 0 | 1 | 2 | 3,
   });
   
   const [organiserCode, setOrganiserCode] = useState(tournament.organiser_code || "------");
@@ -321,34 +321,50 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
                   <span className="material-symbols-outlined text-[18px] text-[#C08A5A]">workspace_premium</span>
                   <div className="flex-1">
                     <label className="font-label-caps text-[11px] font-bold text-primary">
-                      BRONZE MEDALS PER CATEGORY
+                      REPECHAGE & BRONZE FORMAT
                     </label>
                     <p className="text-body-xs text-on-surface-variant max-w-xl mt-1">
-                      Applies to categories that have no setting of their own. Two bronzes uses repechage,
-                      where everyone beaten by the two finalists gets another route to a medal. One bronze
-                      runs the two losing semifinalists against each other. None stops at the final.
+                      Event default for tournament categories. Choose between standard WKF repechage, local official express formats (only semifinal losers fight for bronze, or joint bronzes), or no bronze.
                     </p>
                   </div>
                 </div>
 
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {([
-                    { value: 0, label: "No bronze" },
-                    { value: 1, label: "One bronze" },
-                    { value: 2, label: "Two bronzes (repechage)" },
-                  ] as const).map((option) => (
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  {[
+                    {
+                      value: 2,
+                      title: "Official WKF (2 Bronzes)",
+                      desc: "Full repechage ladders for everyone beaten by finalists.",
+                    },
+                    {
+                      value: 1,
+                      title: "Local Official (1 Bronze Playoff)",
+                      desc: "Earlier losers eliminated; losing semi-finalists play a single bronze match.",
+                    },
+                    {
+                      value: 3,
+                      title: "Local Official (Joint 3rd · 2 Bronzes)",
+                      desc: "Both semi-final losers awarded bronze directly (no extra bouts).",
+                    },
+                    {
+                      value: 0,
+                      title: "No Bronze",
+                      desc: "Single elimination stopping at the final.",
+                    },
+                  ].map((option) => (
                     <button
                       key={option.value}
                       type="button"
                       aria-pressed={form.default_bronze_medals === option.value}
-                      onClick={() => setForm((f) => ({ ...f, default_bronze_medals: option.value }))}
-                      className={`min-h-[44px] rounded-lg border px-4 text-xs font-bold transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-secondary focus-visible:ring-offset-2 ${
+                      onClick={() => setForm((f) => ({ ...f, default_bronze_medals: option.value as 0 | 1 | 2 | 3 }))}
+                      className={`min-h-[60px] rounded-xl border p-3 text-left transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-secondary focus-visible:ring-offset-2 ${
                         form.default_bronze_medals === option.value
                           ? "border-[#0E9C7C] bg-[#E3F6F0] text-[#0B7C63]"
                           : "border-outline-variant bg-white text-on-surface-variant hover:bg-surface-container-low"
                       }`}
                     >
-                      {option.label}
+                      <div className="font-bold text-xs text-primary">{option.title}</div>
+                      <div className="text-[11px] text-on-surface-variant mt-0.5 leading-snug">{option.desc}</div>
                     </button>
                   ))}
                 </div>

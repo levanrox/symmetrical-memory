@@ -65,7 +65,7 @@ export async function generateCategoryDraw(
 }
 export async function setCategoryDrawOption(
   categoryId: string,
-  bronzeMedals: 0 | 1 | 2 | null
+  bronzeMedals: 0 | 1 | 2 | 3 | null
 ) {
   const [cat] = await db
     .select({ tournamentId: categories.tournamentId })
@@ -76,8 +76,8 @@ export async function setCategoryDrawOption(
 
   await ensureAdminOwnsTournament(cat.tournamentId);
 
-  if (bronzeMedals !== null && ![0, 1, 2].includes(bronzeMedals)) {
-    return { success: false, error: "Bronze medals must be 0, 1, 2 or null" };
+  if (bronzeMedals !== null && ![0, 1, 2, 3].includes(bronzeMedals)) {
+    return { success: false, error: "Bronze medals must be 0, 1, 2, 3 or null" };
   }
 
   await db.update(categories).set({ bronzeMedals }).where(eq(categories.id, categoryId));
