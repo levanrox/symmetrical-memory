@@ -13,8 +13,9 @@ import { generateDraw } from "@/engine/draw-engine";
 import type { DrawGraph, Participant } from "@/engine/draw-engine/types";
 import { foughtBoutCount } from "@/lib/draws/boutCount";
 import { WKF_KATA_2026, WKF_KUMITE_2026 } from "@/engine/rules-engine";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
+import { syncTournamentCategoryCounts, getActiveAthleteCounts } from "@/lib/categories/syncCounts";
 
 /**
  * The unimplemented-by-design core of draw generation: pure database work with
@@ -23,7 +24,11 @@ import { revalidatePath } from "next/cache";
  */
 export async function performCategoryDraw(
   categoryId: string,
-  options?: { bronzeMedals?: 0 | 1 | 2 | 3; separateByClub?: boolean }
+  options?: {
+    bronzeMedals?: 0 | 1 | 2 | 3;
+    separateByClub?: boolean;
+    forceRegenerate?: boolean;
+  }
 ) {
   // 1. Fetch category
   const [cat] = await db
@@ -32,6 +37,42 @@ export async function performCategoryDraw(
     .where(eq(categories.id, categoryId));
 
   if (!cat) throw new Error("Category not found");
+
+  // Safety protection: check existing draw lock and completed/live matches
+  const [existingDraw] = await db
+    .select()
+    .from(draws)
+    .where(eq(draws.categoryId, categoryId));
+
+  const [matchStats] = await db
+    .select({
+      confirmed: sql<number>`count(*) filter (where ${matches.status} = 'CONFIRMED')`,
+      live: sql<number>`count(*) filter (where ${matches.status} = 'LIVE')`,
+    })
+    .from(matches)
+    .where(eq(matches.categoryId, categoryId));
+
+  const confirmedCount = Number(matchStats?.confirmed ?? 0);
+  const liveCount = Number(matchStats?.live ?? 0);
+  const activeBoutCount = confirmedCount + liveCount;
+
+  if (existingDraw?.state === "LOCKED" && !options?.forceRegenerate) {
+    return {
+      success: false,
+      error: `Draw for "${cat.name}" is LOCKED. Unlock it first if you wish to regenerate.`,
+      isLocked: true,
+      activeBoutCount,
+    };
+  }
+
+  if (activeBoutCount > 0 && !options?.forceRegenerate) {
+    return {
+      success: false,
+      error: `Cannot regenerate: Category "${cat.name}" already has ${confirmedCount} confirmed and ${liveCount} live bout(s). Regenerating would erase all tournament results.`,
+      isLocked: existingDraw?.state === "LOCKED",
+      activeBoutCount,
+    };
+  }
 
   // The bronze choice resolves in order: explicit override → this category's
   // setting → the tournament default → WKF's two.
@@ -97,6 +138,15 @@ export async function performCategoryDraw(
     clubId: p.school || p.dojo || "Independent",
     districtId: null,
   }));
+
+  // Synchronize category table with verified participant count
+  await db
+    .update(categories)
+    .set({
+      athletesCount: participantList.length,
+      expectedMatches: Math.max(0, participantList.length - 1),
+    })
+    .where(eq(categories.id, categoryId));
 
   // 4. Select ruleset
   const isKata = cat.name.toLowerCase().includes("kata");
@@ -233,11 +283,67 @@ export async function performGenerateAllTournamentDraws(
     .from(categories)
     .where(eq(categories.tournamentId, tournamentId));
 
+  if (allCats.length === 0) {
+    return {
+      success: true,
+      totalCategories: 0,
+      generatedCount: 0,
+      protectedCount: 0,
+      skippedCount: 0,
+      errors: [],
+      protectedCategories: [],
+    };
+  }
+
+  const catIds = allCats.map((c) => c.id);
+
+  // Fetch all existing draws and match stats for this tournament's categories
+  const allDraws = await db
+    .select()
+    .from(draws)
+    .where(inArray(draws.categoryId, catIds));
+
+  const drawByCat = new Map(allDraws.map((d) => [d.categoryId, d]));
+
+  const matchCounts = await db
+    .select({
+      categoryId: matches.categoryId,
+      confirmed: sql<number>`count(*) filter (where ${matches.status} = 'CONFIRMED')`,
+      live: sql<number>`count(*) filter (where ${matches.status} = 'LIVE')`,
+    })
+    .from(matches)
+    .where(inArray(matches.categoryId, catIds))
+    .groupBy(matches.categoryId);
+
+  const matchStatsByCat = new Map(
+    matchCounts.map((m) => [
+      m.categoryId,
+      { confirmed: Number(m.confirmed ?? 0), live: Number(m.live ?? 0) },
+    ])
+  );
+
   let generatedCount = 0;
+  let protectedCount = 0;
   let skippedCount = 0;
   const errors: string[] = [];
+  const protectedCategories: string[] = [];
 
   for (const cat of allCats) {
+    const existingDraw = drawByCat.get(cat.id);
+    const stats = matchStatsByCat.get(cat.id) || { confirmed: 0, live: 0 };
+    const hasActiveMatches = stats.confirmed > 0 || stats.live > 0;
+    const isLocked = existingDraw?.state === "LOCKED";
+
+    // CRITICAL PROTECTION: Skip and preserve categories that are locked or have live/confirmed bouts!
+    if (isLocked || hasActiveMatches) {
+      protectedCount++;
+      const reason = hasActiveMatches
+        ? `${stats.confirmed} bouts completed`
+        : "draw locked";
+      protectedCategories.push(`"${cat.name}" (${reason})`);
+      continue;
+    }
+
     try {
       const res = await performCategoryDraw(cat.id, options);
       if (res.success) {
@@ -255,11 +361,166 @@ export async function performGenerateAllTournamentDraws(
   try {
     revalidatePath(`/admin/event/${tournamentId}/categories`);
   } catch {}
+
   return {
     success: true,
     totalCategories: allCats.length,
     generatedCount,
+    protectedCount,
     skippedCount,
     errors,
+    protectedCategories,
+  };
+}
+
+export type DrawPreflightItem = {
+  id: string;
+  name: string;
+  athletesCount: number;
+  drawState: "NO_DRAW" | "DRAFT" | "LOCKED" | "IN_PROGRESS" | "COMPLETED";
+  confirmedMatches: number;
+  liveMatches: number;
+  totalMatches: number;
+  action: "GENERATE" | "PROTECT" | "SKIP";
+  reason: string;
+};
+
+export type DrawPreflightReport = {
+  total: number;
+  toGenerate: DrawPreflightItem[];
+  protected: DrawPreflightItem[];
+  skipped: DrawPreflightItem[];
+};
+
+export async function performGetTournamentDrawPreflight(
+  tournamentId: string
+): Promise<DrawPreflightReport> {
+  const allCats = await db
+    .select()
+    .from(categories)
+    .where(eq(categories.tournamentId, tournamentId));
+
+  if (allCats.length === 0) {
+    return {
+      total: 0,
+      toGenerate: [],
+      protected: [],
+      skipped: [],
+    };
+  }
+
+  // Ensure DB counts are synchronized and query real active counts per category
+  await syncTournamentCategoryCounts(tournamentId);
+  const activeCountMap = await getActiveAthleteCounts(tournamentId);
+
+  const catIds = allCats.map((c) => c.id);
+
+  const allDraws = await db
+    .select()
+    .from(draws)
+    .where(inArray(draws.categoryId, catIds));
+
+  const drawByCat = new Map(allDraws.map((d) => [d.categoryId, d]));
+
+  const matchCounts = await db
+    .select({
+      categoryId: matches.categoryId,
+      confirmed: sql<number>`count(*) filter (where ${matches.status} = 'CONFIRMED')`,
+      live: sql<number>`count(*) filter (where ${matches.status} = 'LIVE')`,
+      total: sql<number>`count(*)`,
+    })
+    .from(matches)
+    .where(inArray(matches.categoryId, catIds))
+    .groupBy(matches.categoryId);
+
+  const matchStatsByCat = new Map(
+    matchCounts.map((m) => [
+      m.categoryId,
+      {
+        confirmed: Number(m.confirmed ?? 0),
+        live: Number(m.live ?? 0),
+        total: Number(m.total ?? 0),
+      },
+    ])
+  );
+
+  const toGenerate: DrawPreflightItem[] = [];
+  const protectedItems: DrawPreflightItem[] = [];
+  const skipped: DrawPreflightItem[] = [];
+
+  for (const cat of allCats) {
+    const existingDraw = drawByCat.get(cat.id);
+    const stats = matchStatsByCat.get(cat.id) || { confirmed: 0, live: 0, total: 0 };
+    const athletesCount = activeCountMap.get(cat.id) ?? cat.athletesCount ?? 0;
+
+    let lifecycleState: "NO_DRAW" | "DRAFT" | "LOCKED" | "IN_PROGRESS" | "COMPLETED" = "NO_DRAW";
+    if (existingDraw) {
+      if (stats.total > 0 && stats.confirmed === stats.total) {
+        lifecycleState = "COMPLETED";
+      } else if (stats.confirmed > 0 || stats.live > 0) {
+        lifecycleState = "IN_PROGRESS";
+      } else if (existingDraw.state === "LOCKED") {
+        lifecycleState = "LOCKED";
+      } else {
+        lifecycleState = "DRAFT";
+      }
+    }
+
+    if (athletesCount < 2) {
+      skipped.push({
+        id: cat.id,
+        name: cat.name,
+        athletesCount,
+        drawState: lifecycleState,
+        confirmedMatches: stats.confirmed,
+        liveMatches: stats.live,
+        totalMatches: stats.total,
+        action: "SKIP",
+        reason: "Fewer than 2 athletes registered",
+      });
+    } else if (lifecycleState === "IN_PROGRESS" || lifecycleState === "COMPLETED") {
+      protectedItems.push({
+        id: cat.id,
+        name: cat.name,
+        athletesCount,
+        drawState: lifecycleState,
+        confirmedMatches: stats.confirmed,
+        liveMatches: stats.live,
+        totalMatches: stats.total,
+        action: "PROTECT",
+        reason: `${stats.confirmed}/${stats.total} matches completed`,
+      });
+    } else if (lifecycleState === "LOCKED") {
+      protectedItems.push({
+        id: cat.id,
+        name: cat.name,
+        athletesCount,
+        drawState: lifecycleState,
+        confirmedMatches: stats.confirmed,
+        liveMatches: stats.live,
+        totalMatches: stats.total,
+        action: "PROTECT",
+        reason: "Official draw is locked",
+      });
+    } else {
+      toGenerate.push({
+        id: cat.id,
+        name: cat.name,
+        athletesCount,
+        drawState: lifecycleState,
+        confirmedMatches: stats.confirmed,
+        liveMatches: stats.live,
+        totalMatches: stats.total,
+        action: "GENERATE",
+        reason: existingDraw ? "Draft bracket will be updated" : "Initial bracket will be generated",
+      });
+    }
+  }
+
+  return {
+    total: allCats.length,
+    toGenerate,
+    protected: protectedItems,
+    skipped,
   };
 }

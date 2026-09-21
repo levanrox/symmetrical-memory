@@ -7,6 +7,7 @@ import { db } from "@/db";
 import { tournaments as tournamentsTable, categories as categoriesTable } from "@/db/schema";
 import { eq, desc } from "drizzle-orm";
 import { serializeCategory } from "@/lib/serializers";
+import { syncTournamentCategoryCounts, getActiveAthleteCounts } from "@/lib/categories/syncCounts";
 
 export default async function OrganiserCategoriesPage({ params }: { params: Promise<{ id: string }> }) {
   const { id: tournamentId } = await params;
@@ -17,7 +18,10 @@ export default async function OrganiserCategoriesPage({ params }: { params: Prom
     redirect("/");
   }
 
-  const [tournamentRows, catRows] = await Promise.all([
+  // Ensure DB athletes_count is synchronized with active athletes
+  await syncTournamentCategoryCounts(tournamentId);
+
+  const [tournamentRows, catRows, activeCounts] = await Promise.all([
     db
       .select({ name: tournamentsTable.name })
       .from(tournamentsTable)
@@ -28,17 +32,27 @@ export default async function OrganiserCategoriesPage({ params }: { params: Prom
       .from(categoriesTable)
       .where(eq(categoriesTable.tournamentId, tournamentId))
       .orderBy(desc(categoriesTable.createdAt)),
+    getActiveAthleteCounts(tournamentId),
   ]);
 
   const tournament = tournamentRows[0];
   if (!tournament) redirect("/");
+
+  const categories = catRows.map((c) => {
+    const realAthleteCount = activeCounts.get(c.id) ?? c.athletesCount ?? 0;
+    return serializeCategory({
+      ...c,
+      athletesCount: realAthleteCount,
+      expectedMatches: Math.max(0, realAthleteCount - 1),
+    });
+  });
 
   return (
     <>
       <OrganiserHeader title="Categories" eventName={tournament.name} />
       <CategoriesClient 
         tournamentId={tournamentId} 
-        initialCategories={catRows.map(serializeCategory)} 
+        initialCategories={categories} 
         readOnly={true} 
       />
     </>

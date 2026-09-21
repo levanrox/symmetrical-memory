@@ -386,7 +386,7 @@ export function BoutScoringPad({
 
     try {
       setConfirming(true);
-      await confirmBoutResult(match.id, winnerId, {
+      const res = await confirmBoutResult(match.id, winnerId, {
         side: winnerSide,
         akaPoints,
         aoPoints,
@@ -395,6 +395,41 @@ export function BoutScoringPad({
         senshu,
         method,
       });
+
+      if (res && !res.success && (res as any).requiresRollbackConfirmation) {
+        const conflictMatches = (res as any).conflictMatches || [];
+        const matchNames = conflictMatches.map((m: any) => `• Bout #${m.matchNo} (${m.roundName}) [${m.status}]`).join("\n");
+        const proceedRollback = window.confirm(
+          `CRITICAL CASCADE CONFLICT:\n\nReversing this bout affects ${conflictMatches.length} downstream match(es) that have ALREADY BEEN FOUGHT or are currently live:\n\n${matchNames}\n\nProceeding will ROLL BACK these matches and reset them to Ready so the new winner can compete.\n\nDo you confirm this official match rollback?`
+        );
+        if (!proceedRollback) {
+          setConfirming(false);
+          return;
+        }
+
+        // Re-run with allowRollback: true
+        const retryRes = await confirmBoutResult(match.id, winnerId, {
+          side: winnerSide,
+          akaPoints,
+          aoPoints,
+          akaPenalties,
+          aoPenalties,
+          senshu,
+          method,
+          allowRollback: true,
+        });
+
+        if (!retryRes.success) {
+          alert((retryRes as any).error || "Failed to execute rollback.");
+          setConfirming(false);
+          return;
+        }
+      } else if (res && !res.success) {
+        alert((res as any).error || "Failed to confirm match.");
+        setConfirming(false);
+        return;
+      }
+
       setShowFinishModal(false);
       onBoutCompleted();
     } catch (err) {

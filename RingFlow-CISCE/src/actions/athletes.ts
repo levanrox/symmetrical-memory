@@ -5,6 +5,7 @@ import { athletes, categories } from "@/db/schema";
 import { eq, and, sql, or, inArray } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { ensureAdminOwnsTournament } from "./admin";
+import { syncTournamentCategoryCounts } from "@/lib/categories/syncCounts";
 
 export type AthleteInput = {
   name: string;
@@ -87,7 +88,9 @@ export async function addAthlete(tournamentId: string, input: AthleteInput) {
     dojo: input.school?.trim().slice(0, 200) || null,
   });
 
+  await syncTournamentCategoryCounts(tournamentId);
   revalidatePath(`/admin/event/${tournamentId}/athletes`);
+  revalidatePath(`/admin/event/${tournamentId}/categories`);
 }
 
 export async function deleteAthlete(athleteId: string, tournamentId: string) {
@@ -99,7 +102,9 @@ export async function deleteAthlete(athleteId: string, tournamentId: string) {
       and(eq(athletes.id, athleteId), eq(athletes.tournamentId, tournamentId))
     );
 
+  await syncTournamentCategoryCounts(tournamentId);
   revalidatePath(`/admin/event/${tournamentId}/athletes`);
+  revalidatePath(`/admin/event/${tournamentId}/categories`);
 }
 
 export async function updateAthleteCategory(
@@ -131,7 +136,9 @@ export async function updateAthleteCategory(
       and(eq(athletes.id, athleteId), eq(athletes.tournamentId, tournamentId))
     );
 
+  await syncTournamentCategoryCounts(tournamentId);
   revalidatePath(`/admin/event/${tournamentId}/athletes`);
+  revalidatePath(`/admin/event/${tournamentId}/categories`);
   revalidatePath(`/admin/event/${tournamentId}/rings/balance`);
 }
 
@@ -189,6 +196,7 @@ export async function bulkAddAthletes(
     await db.insert(athletes).values(toInsert);
   }
 
+  await syncTournamentCategoryCounts(tournamentId);
   revalidatePath(`/admin/event/${tournamentId}/athletes`);
   revalidatePath(`/admin/event/${tournamentId}/categories`);
   return { success: true, count: toInsert.length };
@@ -276,7 +284,9 @@ export async function bulkAddMasterAthletes(
     await db.insert(athletes).values(toInsert);
   }
 
+  await syncTournamentCategoryCounts(tournamentId);
   revalidatePath(`/admin/event/${tournamentId}/athletes`);
+  revalidatePath(`/admin/event/${tournamentId}/categories`);
   return { success: true, count: toInsert.length };
 }
 

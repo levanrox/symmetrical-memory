@@ -1,9 +1,10 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { getAthleteDraw, getCategoryDraw } from "@/actions/draws";
+import { getAthleteDraw, getCategoryDraw, toggleCategoryDrawLock } from "@/actions/draws";
 import { downloadCategoryDrawPdf } from "@/actions/drawPdfs";
 import { DrawBracket } from "./DrawBracket";
+import { useRouter } from "next/navigation";
 
 interface Props {
   categoryId: string;
@@ -31,9 +32,11 @@ export function DrawBracketModal({
   subtitle,
   allowPdf = true,
 }: Props) {
+  const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [drawData, setDrawData] = useState<any>(null);
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
+  const [isTogglingLock, setIsTogglingLock] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -85,6 +88,34 @@ export function DrawBracketModal({
     }
   };
 
+  const handleToggleLock = async () => {
+    if (!categoryId) return;
+    setIsTogglingLock(true);
+    try {
+      const res = await toggleCategoryDrawLock(categoryId);
+      if (res.success) {
+        const isLocked = res.state === "LOCKED";
+        setDrawData((prev: any) =>
+          prev
+            ? {
+                ...prev,
+                isDrawLocked: isLocked,
+                drawState: res.state,
+                draw: prev.draw ? { ...prev.draw, state: res.state } : prev.draw,
+              }
+            : prev
+        );
+        router.refresh();
+      } else {
+        alert(res.error || "Failed to update draw lock state.");
+      }
+    } catch (err: any) {
+      alert(err?.message || "Failed to toggle lock.");
+    } finally {
+      setIsTogglingLock(false);
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -97,9 +128,17 @@ export function DrawBracketModal({
               <span className="material-symbols-outlined text-[20px]">account_tree</span>
             </span>
             <div>
-              <h2 className="font-bold text-base text-[#1B1815]">
-                {categoryName || drawData?.categoryName || "Draw bracket"}
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2 className="font-bold text-base text-[#1B1815]">
+                  {categoryName || drawData?.categoryName || "Draw bracket"}
+                </h2>
+                {drawData?.isDrawLocked && (
+                  <span className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded text-[10px] font-bold font-data-mono bg-amber-50 text-amber-800 border border-amber-200">
+                    <span className="material-symbols-outlined text-[12px]">lock</span>
+                    LOCKED
+                  </span>
+                )}
+              </div>
               <p className="text-xs text-[#68645A]">
                 {subtitle ||
                   (athleteId
@@ -110,6 +149,29 @@ export function DrawBracketModal({
           </div>
 
           <div className="flex items-center gap-2">
+            {allowPdf && drawData?.draw && (
+              <button
+                type="button"
+                onClick={handleToggleLock}
+                disabled={isTogglingLock}
+                title={
+                  drawData.isDrawLocked
+                    ? "Draw is LOCKED (Protected from bulk regeneration). Click to unlock."
+                    : "Draw is in DRAFT. Click to lock and protect this bracket."
+                }
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold font-data-mono transition-colors cursor-pointer border ${
+                  drawData.isDrawLocked
+                    ? "bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100"
+                    : "bg-[#F5F3EC] text-[#504C42] border-[#E1DDCF] hover:bg-[#ECE8DD]"
+                } ${isTogglingLock ? "opacity-60 cursor-not-allowed" : ""}`}
+              >
+                <span className="material-symbols-outlined text-[16px]">
+                  {drawData.isDrawLocked ? "lock" : "lock_open"}
+                </span>
+                <span>{drawData.isDrawLocked ? "Locked" : "Lock Draw"}</span>
+              </button>
+            )}
+
             <button
               onClick={onClose}
               className="p-2 text-[#68645A] hover:text-[#1B1815] rounded-lg hover:bg-[#F5F3EC] transition-colors cursor-pointer"

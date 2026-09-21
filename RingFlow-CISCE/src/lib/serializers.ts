@@ -65,6 +65,12 @@ export function serializeCategory(c: any) {
     expected_matches: c.expectedMatches ?? 0,
     doc_url: c.docUrl,
     custom_rules: c.customRules,
+    bronze_medals: c.bronzeMedals ?? c.bronze_medals ?? null,
+    draw_state: c.drawState ?? c.draw_state ?? null,
+    is_locked: (c.drawState ?? c.draw_state) === "LOCKED",
+    confirmed_matches: c.confirmedMatches ?? c.confirmed_matches ?? 0,
+    live_matches: c.liveMatches ?? c.live_matches ?? 0,
+    has_draw: c.hasDraw ?? c.has_draw ?? false,
     created_at: c.createdAt ? new Date(c.createdAt).toISOString() : null,
   };
 }

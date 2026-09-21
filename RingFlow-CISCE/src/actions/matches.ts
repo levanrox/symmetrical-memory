@@ -12,6 +12,7 @@ import {
   draws,
   drawVersions,
   tournaments,
+  eventLog,
 } from "@/db/schema";
 import { resolveDraw } from "@/engine/draw-engine";
 import type { DrawGraph } from "@/engine/draw-engine/types";
@@ -347,6 +348,7 @@ export async function confirmBoutResult(
     aoPenalties?: number;
     senshu?: "AKA" | "AO" | null;
     method?: string;
+    allowRollback?: boolean;
   }
 ) {
   // 1. Fetch match
@@ -360,6 +362,13 @@ export async function confirmBoutResult(
   const categoryId = match.categoryId;
 
   // 2. Fetch category and draw graph
+  const [cat] = await db
+    .select({ tournamentId: categories.tournamentId })
+    .from(categories)
+    .where(eq(categories.id, categoryId));
+
+  if (!cat) throw new Error("Category not found");
+
   const [draw] = await db
     .select()
     .from(draws)
@@ -396,6 +405,54 @@ export async function confirmBoutResult(
 
   const isAlreadyConfirmed = match.status === "CONFIRMED";
   const isReversingWinner = isAlreadyConfirmed && Boolean(match.winnerId && match.winnerId !== winnerId);
+
+  // Pre-flight check: If winner is being reversed, check for downstream match conflicts
+  if (isReversingWinner) {
+    const allCategoryMatches = await db
+      .select()
+      .from(matches)
+      .where(eq(matches.categoryId, categoryId));
+
+    const allCategorySlots = await db
+      .select()
+      .from(matchSlots)
+      .where(
+        inArray(
+          matchSlots.matchId,
+          allCategoryMatches.map((m) => m.id)
+        )
+      );
+
+    const downstreamMatchIds = new Set<string>();
+    const queue = [matchId];
+    while (queue.length > 0) {
+      const curr = queue.shift()!;
+      for (const slot of allCategorySlots) {
+        if (slot.sourceMatchId === curr && !downstreamMatchIds.has(slot.matchId)) {
+          downstreamMatchIds.add(slot.matchId);
+          queue.push(slot.matchId);
+        }
+      }
+    }
+
+    const completedDownstream = allCategoryMatches.filter(
+      (m) => downstreamMatchIds.has(m.id) && (m.status === "CONFIRMED" || m.status === "LIVE")
+    );
+
+    if (completedDownstream.length > 0 && !details?.allowRollback) {
+      return {
+        success: false,
+        requiresRollbackConfirmation: true,
+        conflictMatches: completedDownstream.map((m) => ({
+          matchId: m.id,
+          matchNo: m.matchNo,
+          roundName: m.roundName,
+          status: m.status,
+        })),
+        error: `Reversing Bout #${match.matchNo} winner affects ${completedDownstream.length} downstream bout(s) that have already been fought or are live. An administrative rollback is required to proceed.`,
+      };
+    }
+  }
 
   // 3. Commit match confirmation in transaction
   await db.transaction(async (tx) => {
@@ -438,8 +495,15 @@ export async function confirmBoutResult(
         isCorrection: isAlreadyConfirmed,
         isReversingWinner,
         previousWinnerId: isAlreadyConfirmed ? match.winnerId : null,
+        rollbackApplied: Boolean(details?.allowRollback),
       },
     });
+
+    // Auto-lock draw on match confirmation to protect bracket from accidental regeneration
+    await tx
+      .update(draws)
+      .set({ state: "LOCKED", lockedAt: new Date() })
+      .where(and(eq(draws.categoryId, categoryId), eq(draws.state, "DRAFT")));
 
     // 4. Bracket advancement: resolve graph with ALL confirmed outcomes
     const allMatches = await tx
@@ -612,6 +676,23 @@ export async function confirmBoutResult(
         op: "UPDATE",
         ringId: assignment.ringId,
         categoryId,
+      });
+
+      await tx.insert(eventLog).values({
+        tournamentId: cat.tournamentId,
+        ringId: assignment.ringId,
+        categoryId,
+        action: isAlreadyConfirmed ? "BOUT_RESULT_CORRECTED" : "BOUT_RESULT_CONFIRMED",
+        metadata: {
+          matchId,
+          matchNo: match.matchNo,
+          roundName: match.roundName,
+          winnerId,
+          winningSide,
+          isCorrection: isAlreadyConfirmed,
+          isReversingWinner,
+          rollbackApplied: Boolean(details?.allowRollback),
+        },
       });
     }
   });

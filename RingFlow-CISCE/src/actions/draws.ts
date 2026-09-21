@@ -19,6 +19,7 @@ import { ensureAdminOwnsTournament } from "./admin";
 import {
   performCategoryDraw,
   performGenerateAllTournamentDraws,
+  performGetTournamentDrawPreflight,
 } from "@/lib/draws/generateDraws";
 import { isAnyStaff } from "@/lib/staffAccess";
 
@@ -51,7 +52,7 @@ async function publicDrawsEnabledForCategory(categoryId: string): Promise<boolea
  */
 export async function generateCategoryDraw(
   categoryId: string,
-  options?: { bronzeMedals?: 0 | 1 | 2; separateByClub?: boolean }
+  options?: { bronzeMedals?: 0 | 1 | 2 | 3; separateByClub?: boolean; forceRegenerate?: boolean }
 ) {
   const [cat] = await db
     .select({ tournamentId: categories.tournamentId })
@@ -90,17 +91,22 @@ export async function setCategoryDrawOption(
 }
 
 /**
- * Bulk generate draws for all categories in a tournament in one go!
- */
-/**
  * Bulk generate draws for every category in a tournament. Admin only.
  */
 export async function generateAllTournamentDraws(
   tournamentId: string,
-  options?: { bronzeMedals?: 0 | 1 | 2; separateByClub?: boolean }
+  options?: { bronzeMedals?: 0 | 1 | 2 | 3; separateByClub?: boolean }
 ) {
   await ensureAdminOwnsTournament(tournamentId);
   return performGenerateAllTournamentDraws(tournamentId, options);
+}
+
+/**
+ * Pre-flight preview report of what "Generate All Draws" will do. Admin only.
+ */
+export async function getTournamentDrawPreflight(tournamentId: string) {
+  await ensureAdminOwnsTournament(tournamentId);
+  return performGetTournamentDrawPreflight(tournamentId);
 }
 
 /**
@@ -155,10 +161,75 @@ export async function getAthleteDraw(athleteId: string) {
 }
 
 export async function lockCategoryDraw(categoryId: string) {
+  const [cat] = await db
+    .select({ tournamentId: categories.tournamentId })
+    .from(categories)
+    .where(eq(categories.id, categoryId));
+
+  if (!cat) return { success: false, error: "Category not found" };
+  await ensureAdminOwnsTournament(cat.tournamentId);
+
   await db
     .update(draws)
     .set({ state: "LOCKED", lockedAt: new Date() })
     .where(eq(draws.categoryId, categoryId));
 
+  try {
+    revalidatePath(`/admin/event/${cat.tournamentId}/categories`);
+  } catch {}
+
   return { success: true };
+}
+
+export async function unlockCategoryDraw(categoryId: string) {
+  const [cat] = await db
+    .select({ tournamentId: categories.tournamentId })
+    .from(categories)
+    .where(eq(categories.id, categoryId));
+
+  if (!cat) return { success: false, error: "Category not found" };
+  await ensureAdminOwnsTournament(cat.tournamentId);
+
+  await db
+    .update(draws)
+    .set({ state: "DRAFT", lockedAt: null })
+    .where(eq(draws.categoryId, categoryId));
+
+  try {
+    revalidatePath(`/admin/event/${cat.tournamentId}/categories`);
+  } catch {}
+
+  return { success: true };
+}
+
+export async function toggleCategoryDrawLock(categoryId: string) {
+  const [cat] = await db
+    .select({ tournamentId: categories.tournamentId })
+    .from(categories)
+    .where(eq(categories.id, categoryId));
+
+  if (!cat) return { success: false, error: "Category not found" };
+  await ensureAdminOwnsTournament(cat.tournamentId);
+
+  const [draw] = await db
+    .select()
+    .from(draws)
+    .where(eq(draws.categoryId, categoryId));
+
+  if (!draw) return { success: false, error: "No draw generated yet for this category" };
+
+  const isLocked = draw.state === "LOCKED";
+  const nextState = isLocked ? "DRAFT" : "LOCKED";
+  const lockedAt = isLocked ? null : new Date();
+
+  await db
+    .update(draws)
+    .set({ state: nextState, lockedAt })
+    .where(eq(draws.id, draw.id));
+
+  try {
+    revalidatePath(`/admin/event/${cat.tournamentId}/categories`);
+  } catch {}
+
+  return { success: true, isLocked: !isLocked, state: nextState };
 }
