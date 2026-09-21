@@ -192,9 +192,9 @@ services:
       SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:?missing - run scripts/gen-supabase-secrets.mjs}"
       NEXT_PUBLIC_SUPABASE_ANON_KEY: "${NEXT_PUBLIC_SUPABASE_ANON_KEY:?missing - run scripts/gen-supabase-secrets.mjs}"
       # Signs admin/mod session cookies. Generated into .env by
-      # gen-supabase-secrets.mjs; when unset the app falls back to
-      # SECRET_KEY_BASE (already required above for realtime).
-      SESSION_SECRET: ${SESSION_SECRET:-}
+      # gen-supabase-secrets.mjs. Required: never share SECRET_KEY_BASE
+      # (the realtime secret) for cookie signing.
+      SESSION_SECRET: "${SESSION_SECRET:?missing - run scripts/gen-supabase-secrets.mjs}"
       # First admin login password. Set once, then remove from .env —
       # the bootstrap only works when no admin account exists yet.
       ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-}

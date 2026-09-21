@@ -151,7 +151,8 @@ export async function requestModeratorAccess(
 
   // Turnstile is off by default (offline LAN): only required/enforced when
   // TURNSTILE_ENABLED=true.
-  const { verifyTurnstileToken, turnstileEnabled } = await import("./turnstile");
+  const { verifyTurnstileToken } = await import("./turnstile");
+  const { turnstileEnabled } = await import("@/lib/turnstile");
   if (turnstileEnabled()) {
     if (!turnstileToken) {
       return { success: false, error: "Security check is required." };

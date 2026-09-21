@@ -8,7 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { resolveConfirmOutcome, assertMatchRingBinding, clampScore } from "./matches";
+import { resolveConfirmOutcome, assertMatchRingBinding, clampScore } from "@/lib/boutGuards";
 
 describe("resolveConfirmOutcome", () => {
   it("proceeds when the bout is not yet confirmed", () => {

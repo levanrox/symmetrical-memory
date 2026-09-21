@@ -1,18 +1,7 @@
 "use server";
 
 import { logger } from "@/lib/logger";
-
-/**
- * Whether Cloudflare Turnstile verification is enforced.
- *
- * The event server is designed to run on an offline LAN, where reaching
- * Cloudflare's siteverify endpoint is impossible. Verification therefore
- * defaults to OFF and must be explicitly enabled with
- * TURNSTILE_ENABLED=true (plus TURNSTILE_SECRET_KEY).
- */
-export function turnstileEnabled(): boolean {
-  return process.env.TURNSTILE_ENABLED === "true";
-}
+import { turnstileEnabled } from "@/lib/turnstile";
 
 export async function verifyTurnstileToken(token: string) {
   if (!turnstileEnabled()) {
