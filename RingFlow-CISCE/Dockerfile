@@ -20,9 +20,39 @@ COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
 
+# Public client config, baked into the browser bundle. Supplied with
+# --build-arg (see docker-compose.yml). NEXT_PUBLIC_REALTIME_URL may be left
+# empty: browsers then derive it from the page's own hostname (:4000).
+ARG NEXT_PUBLIC_REALTIME_URL=""
+ARG NEXT_PUBLIC_SUPABASE_ANON_KEY=""
+ARG NEXT_PUBLIC_SUPABASE_URL="http://localhost:3000"
+ENV NEXT_PUBLIC_REALTIME_URL=$NEXT_PUBLIC_REALTIME_URL
+ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=$NEXT_PUBLIC_SUPABASE_ANON_KEY
+ENV NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL
+# The production build prerenders pages, which queries the database
+# (pre-existing app behavior), so DATABASE_URL must be reachable at build time.
+# docker-compose.yml builds with host networking for exactly this reason.
+# NOTE: no default value here — baking default credentials into the image
+# layer history would leak them to anyone who pulls the image. Pass the build
+# arg explicitly (compose does).
+ARG DATABASE_URL
+ENV DATABASE_URL=$DATABASE_URL
+
 RUN npm run build
 
-# Stage 3: Production Runner
+# Stage 3: Migration runner (one-shot). Applies the drizzle journal
+# (supabase/migrations) then the idempotent realtime NOTIFY triggers.
+# Used by the compose `migrate` service; exits 0 when the DB is current.
+FROM node:22-alpine AS migrate
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+COPY drizzle.config.ts ./
+COPY supabase/migrations ./supabase/migrations
+COPY scripts/migrate-db.mjs ./scripts/migrate-db.mjs
+CMD ["node", "scripts/migrate-db.mjs"]
+
+# Stage 4: Production Runner
 FROM node:22-alpine AS runner
 WORKDIR /app
 

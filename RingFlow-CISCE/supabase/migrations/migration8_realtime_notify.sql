@@ -1,13 +1,14 @@
 -- =========================================================================
--- RingFlow Migration 8 — Live change feed (LISTEN/NOTIFY) for the SSE bridge
+-- RingFlow Migration 8 — Live change feed (LISTEN/NOTIFY) for the realtime bridge
 --
--- The app talks to a plain PostgREST proxy, which has no websocket service, so
--- Supabase Realtime channels are inert. Instead every row change on the tables
--- a live screen cares about raises a NOTIFY on a single channel, and the Node
--- server turns those into Server-Sent Events for the browsers.
+-- Every row change on the tables a live screen cares about raises a NOTIFY on
+-- a single channel; the app's realtime bridge republishes those as Supabase
+-- Realtime broadcast events for the browsers.
 --
--- The payload carries ids only: NOTIFY payloads are capped at 8000 bytes and
--- every subscriber re-reads what it needs through its existing queries.
+-- The payload is an allowlist of ids (plus a few cheap score fields): NOTIFY
+-- payloads are capped at 8000 bytes, every subscriber re-reads what it needs
+-- through its existing queries, and no secret column (e.g. session_token)
+-- may ever appear in a broadcast payload.
 --
 -- Safe to run more than once, and safe on both a local Postgres created from
 -- the Drizzle schema and a hosted Supabase project.
@@ -45,9 +46,11 @@ BEGIN
   IF row_data ? 'match_id' THEN
     payload := payload || jsonb_build_object('matchId', row_data->'match_id');
   END IF;
-  IF row_data ? 'session_token' THEN
-    payload := payload || jsonb_build_object('sessionToken', row_data->'session_token');
-  END IF;
+
+  -- NOTE: session_token is deliberately NEVER included. It is a live
+  -- credential; the strict client-side envelope rejects unknown keys, so
+  -- including it would both leak the token to every subscriber AND cause
+  -- the event to be dropped (live updates silently lost).
 
   -- A ring, a category and a match are their own scope, so a screen watching
   -- "this mat" or "this category" has to be able to match the row's own id.

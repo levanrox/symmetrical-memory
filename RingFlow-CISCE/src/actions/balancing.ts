@@ -9,6 +9,7 @@ import {
 import { eq, inArray, and } from "drizzle-orm";
 import { broadcastLiveEvent } from "@/lib/realtime/bus";
 import { ensureAdminOwnsTournament } from "./admin";
+import { logger } from "@/lib/logger";
 
 export type AssignmentInput = {
   category_id: string;
@@ -32,7 +33,7 @@ export async function saveAssignments(
     try {
       await ensureAdminOwnsTournament(tournamentId);
     } catch (authErr: any) {
-      console.warn("Unauthorized attempt to save assignments:", authErr?.message);
+      logger.warn({ err: authErr?.message }, "Unauthorized attempt to save assignments");
       return { success: false, error: "Unauthorized: Only administrators can assign categories to Tatamis." };
     }
 
@@ -171,7 +172,7 @@ export async function saveAssignments(
 
     return { success: true };
   } catch (err: any) {
-    console.error("Unexpected error in saveAssignments:", err);
+    logger.error({ err }, "Unexpected error in saveAssignments");
     return { success: false, error: err?.message || "Unexpected error while saving assignments" };
   }
 }
@@ -195,7 +196,7 @@ export async function getBalancingAssignments(ringIds: string[]) {
       stager_name: row.stagerName ?? null,
     }));
   } catch (err) {
-    console.error("Failed to fetch balancing assignments:", err);
+    logger.error({ err }, "Failed to fetch balancing assignments");
     return [];
   }
 }

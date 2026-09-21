@@ -79,7 +79,7 @@ export default async function PublicEventPage({ params }: { params: Promise<{ id
   return (
     <PublicEventClient 
       tournament={serializeTournament(tournament)} 
-      initialRings={ringRows.map(serializeRing)} 
+      initialRings={ringRows.map((r) => serializeRing(r))} 
       initialAssignments={assignments} 
       categories={catRows.map(serializeCategory)}
     />

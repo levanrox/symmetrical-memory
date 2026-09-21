@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
-import { updateCategoryStagerStatus } from "@/actions/stager";
+import { updateCategoryStagerStatus, clearStagerSession } from "@/actions/stager";
 import { getBalancingAssignments } from "@/actions/balancing";
 import StagerStatusIndicator from "@/components/ui/StagerStatusIndicator";
 import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
@@ -1187,7 +1187,9 @@ export default function StagerBalancingClient({
         onConfirm={async () => {
           setIsLoggingOut(true);
           try {
-            document.cookie = "stager_token=; path=/; max-age=0; SameSite=Lax";
+            // Server-side clear: the stager_token cookie is httpOnly, so page
+            // JavaScript cannot clear it directly.
+            await clearStagerSession();
             document.cookie = "stager_name=; path=/; max-age=0; SameSite=Lax";
             router.push("/login/stager");
           } catch (e) {

@@ -3,12 +3,14 @@
 import { createClient } from "@/utils/supabase/server";
 import { db } from "@/db";
 import { tournaments, stagerRequests, categoryAssignments, rings, admins } from "@/db/schema";
-import { eq, and, or, inArray, desc } from "drizzle-orm";
+import { eq, and, inArray, desc } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { ensureAdminOwnsTournament } from "./admin";
 import { normalizeAccessCode, generateUnambiguousCode, isValidUuid } from "@/lib/utils";
 import { serializeStagerRequest } from "@/lib/serializers";
+import { secureCookieFlag } from "@/lib/serverCookies";
+import { assertValidSession } from "@/lib/auth/sessionValidation";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -29,6 +31,14 @@ export async function requestStagerAccess(
   deviceInfo?: any,
   turnstileToken?: string
 ) {
+  // Brute-force guard: the stager code is guessable without throttling.
+  try {
+    const { checkIpRateLimit } = await import("@/lib/rateLimit");
+    await checkIpRateLimit("requestStagerAccess", 10, 60_000);
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Too many attempts. Please wait and try again." };
+  }
+
   if (!turnstileToken) {
     return { success: false, error: "Security check is required." };
   }
@@ -173,26 +183,36 @@ export async function checkStagerStatus(requestId: string) {
     const cookieStore = await cookies();
     cookieStore.set("stager_token", request.sessionToken, {
       path: "/",
+      httpOnly: true, // never expose the session token to page JavaScript
       maxAge: 604800, // 7 days
       sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
+      secure: await secureCookieFlag(),
     });
     if (request.stagerName) {
       cookieStore.set("stager_name", encodeURIComponent(request.stagerName), {
         path: "/",
         maxAge: 604800, // 7 days
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        secure: await secureCookieFlag(),
       });
     }
   }
 
+  // NOTE: sessionToken is deliberately NOT returned. The httpOnly cookie
+  // above is the only channel the token travels on.
   return {
     status: request.status,
-    sessionToken: request.sessionToken,
     tournamentId: request.tournamentId,
     stagerName: request.stagerName,
   };
+}
+
+/** Server-side logout for stagers (httpOnly cookie can't be cleared from JS). */
+export async function clearStagerSession() {
+  const cookieStore = await cookies();
+  cookieStore.delete("stager_token");
+  cookieStore.delete("stager_name");
+  return { success: true };
 }
 
 // ─── Admin: Approve / Reject / Revoke ─────────────────────────────────────
@@ -378,37 +398,40 @@ export async function ensureStagerHasAccessToTournament(tournamentId: string) {
       .leftJoin(tournaments, eq(stagerRequests.tournamentId, tournaments.id))
       .where(
         and(
-          or(
-            eq(stagerRequests.sessionToken, stagerToken),
-            eq(stagerRequests.id, stagerToken)
-          ),
+          // Token-only: the request id is not a credential, never accept it.
+          eq(stagerRequests.sessionToken, stagerToken),
           eq(stagerRequests.status, "approved"),
           eq(stagerRequests.tournamentId, tournamentId)
         )
       )
       .limit(1);
 
-    if (request && (!request.expiresAt || new Date(request.expiresAt).getTime() >= Date.now())) {
+    // Defense in depth: re-assert token-only match + expiry on the row.
+    const validRequest = assertValidSession(request, stagerToken);
+    if (validRequest) {
       const cookieName = cookieStore.get("stager_name")?.value;
-      const finalName = request.stagerName || (cookieName ? decodeURIComponent(cookieName) : "Stager");
+      const finalName = validRequest.stagerName || (cookieName ? decodeURIComponent(cookieName) : "Stager");
       return {
         role: "stager",
-        id: request.id,
+        id: validRequest.id,
         name: finalName,
-        tournamentId: request.tournamentId,
-        tournament: { id: request.tournamentId, name: request.tournamentName },
+        tournamentId: validRequest.tournamentId,
+        tournament: { id: validRequest.tournamentId, name: validRequest.tournamentName },
       };
     }
   }
 
-  // Fallback: Allow authenticated admin who owns the tournament
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (user) {
+  // Fallback: allow an authenticated admin who owns the tournament (local
+  // signed session cookie — no network). The old GoTrue
+  // `supabase.auth.getUser()` call is gone: there is no Auth server in the
+  // self-hosted stack, so it could never succeed offline.
+  try {
+    const { ensureAdmin } = await import("./admin");
+    const adminId = await ensureAdmin();
     const [admin] = await db
       .select({ id: admins.id, email: admins.email })
       .from(admins)
-      .where(eq(admins.id, user.id))
+      .where(eq(admins.id, adminId))
       .limit(1);
 
     if (admin) {
@@ -422,12 +445,12 @@ export async function ensureStagerHasAccessToTournament(tournamentId: string) {
         const cookieName = cookieStore.get("stager_name")?.value;
         const resolvedName = cookieName
           ? decodeURIComponent(cookieName)
-          : user.user_metadata?.full_name || user.user_metadata?.name || user.email?.split("@")[0] || "Admin";
+          : admin.email?.split("@")[0] || "Admin";
 
         return { role: "admin", id: admin.id, name: resolvedName, tournament: t };
       }
     }
-  }
+  } catch {}
 
   if (!stagerToken) {
     throw new Error("Not authenticated: Missing stager session");
@@ -452,10 +475,8 @@ export async function ensureStager() {
       .from(stagerRequests)
       .where(
         and(
-          or(
-            eq(stagerRequests.sessionToken, stagerToken),
-            eq(stagerRequests.id, stagerToken)
-          ),
+          // Token-only: the request id is not a credential, never accept it.
+          eq(stagerRequests.sessionToken, stagerToken),
           eq(stagerRequests.status, "approved")
         )
       )
@@ -471,23 +492,26 @@ export async function ensureStager() {
     }
   }
 
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (user) {
+  // Admin fallback via the local signed session cookie. The old GoTrue
+  // `supabase.auth.getUser()` call is gone: there is no Auth server in the
+  // self-hosted stack, so it could never succeed offline.
+  try {
+    const { ensureAdmin } = await import("./admin");
+    const adminId = await ensureAdmin();
     const [admin] = await db
-      .select({ id: admins.id })
+      .select({ id: admins.id, email: admins.email })
       .from(admins)
-      .where(eq(admins.id, user.id))
+      .where(eq(admins.id, adminId))
       .limit(1);
 
     if (admin) {
       const cookieName = cookieStore.get("stager_name")?.value;
       const adminName = cookieName
         ? decodeURIComponent(cookieName)
-        : user.user_metadata?.full_name || user.user_metadata?.name || "Administrator";
+        : admin.email?.split("@")[0] || "Administrator";
       return { id: admin.id, name: adminName, role: "admin" };
     }
-  }
+  } catch {}
 
   throw new Error("Not authenticated");
 }

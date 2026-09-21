@@ -377,15 +377,31 @@ export function BoutScoringPad({
 
     try {
       setConfirming(true);
-      await confirmBoutResult(match.id, winnerId, {
-        side: winnerSide,
-        akaPoints,
-        aoPoints,
-        akaPenalties,
-        aoPenalties,
-        senshu,
-        method,
-      });
+      // Idempotency key: one per (match, attempt). A double-click / retry with
+      // the same key returns the original outcome instead of re-running
+      // bracket advancement.
+      const idempotencyKey =
+        typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${match.id}-${Date.now()}`;
+      const res = await confirmBoutResult(
+        match.id,
+        winnerId,
+        {
+          side: winnerSide,
+          akaPoints,
+          aoPoints,
+          akaPenalties,
+          aoPenalties,
+          senshu,
+          method,
+        },
+        { ringId, idempotencyKey }
+      );
+      if (res && (res as { duplicate?: boolean }).duplicate) {
+        // The server already recorded this confirmation (retry / double
+        // submit). Treat as success — the UI state is already correct.
+      }
       setShowFinishModal(false);
       onBoutCompleted();
     } catch (err) {

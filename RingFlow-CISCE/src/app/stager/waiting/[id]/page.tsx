@@ -10,17 +10,10 @@ export default function StagerWaitingRoom() {
   const router = useRouter();
   const [status, setStatus] = useState("pending");
 
-  const handleApproved = (tournamentId: string, token?: string, stagerName?: string) => {
-    // Also ensure server-side cookie is set via Server Action
+  const handleApproved = (tournamentId: string) => {
+    // The server action sets the httpOnly stager_token cookie — page
+    // JavaScript never handles the session token itself.
     checkStagerStatus(id).catch(() => {});
-
-    const isHttps = typeof window !== "undefined" && window.location.protocol === "https:";
-    const secureFlag = isHttps ? "; Secure" : "";
-    const tokenValue = token || id;
-    document.cookie = `stager_token=${tokenValue}; path=/; max-age=604800; SameSite=Lax${secureFlag}`;
-    if (stagerName) {
-      document.cookie = `stager_name=${encodeURIComponent(stagerName)}; path=/; max-age=604800; SameSite=Lax${secureFlag}`;
-    }
 
     setStatus("approved");
     setTimeout(() => {
@@ -33,7 +26,7 @@ export default function StagerWaitingRoom() {
     void checkStagerStatus(id)
       .then((res) => {
         if (res.status === "approved" && res.tournamentId) {
-          handleApproved(res.tournamentId, res.sessionToken || undefined, res.stagerName || undefined);
+          handleApproved(res.tournamentId);
         } else if (res.status === "rejected") {
           setStatus("rejected");
         }
@@ -49,7 +42,7 @@ export default function StagerWaitingRoom() {
         const res = await checkStagerStatus(id);
         if (isCancelled) return;
         if (res.status === "approved" && res.tournamentId) {
-          handleApproved(res.tournamentId, res.sessionToken || undefined, res.stagerName || undefined);
+          handleApproved(res.tournamentId);
         } else if (res.status === "rejected") {
           setStatus("rejected");
         }

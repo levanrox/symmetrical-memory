@@ -15,7 +15,7 @@ RingFlow is a modern, real-time tournament operations and scoring platform purpo
 * ⚖️ **Dynamic Ring Balancing**: Visual drag-and-drop category load balancer allowing tournament directors to distribute divisions across rings and predict estimated completion times.
 * 📋 **Multi-Role Marshalling & Staging**: Dedicated stager interface for call-ups, on-deck athlete tracking, and category queue sequencing.
 * 📱 **Zero-Install Public Portal**: Spectators and athletes scan a QR code to view live ring progression, bracket status, and search for competitors by chest number or name with zero login required.
-* ⚡ **Real-Time Architecture**: Powered by Next.js Server-Sent Events (SSE) via `/api/live`, PostgreSQL `LISTEN/NOTIFY`, and an in-memory event bus—delivering instant screen updates with zero polling lag.
+* ⚡ **Real-Time Architecture**: Powered by self-hosted Supabase Realtime (WebSocket broadcast) fed by PostgreSQL `LISTEN/NOTIFY` triggers—delivering instant screen updates with zero polling lag, no internet required.
 * 📄 **Professional Reporting & Exports**: High-resolution printable draw sheet PDFs and tournament results export to Excel (XLSX).
 
 ---
@@ -33,7 +33,7 @@ RingFlow is a modern, real-time tournament operations and scoring platform purpo
 │                                   NEXT.JS APPLICATION SERVER                                     │
 │  - App Router & React 19 Server Components                                                       │
 │  - Type-safe Server Actions (admin, organiser, stager, moderator, matches, clock, draws)         │
-│  - Server-Sent Events (SSE) live endpoint (/api/live) with real-time scope filtering             │
+│  - Self-hosted Supabase Realtime (WebSocket broadcast) with real-time scope filtering             │
 │  - Standalone production output for minimal footprint                                            │
 └─────────────────────────────────┬───────────────────────────────┬────────────────────────────────┘
                                   │                               │
@@ -75,7 +75,7 @@ RingFlow is a modern, real-time tournament operations and scoring platform purpo
 * **Frontend Library**: [React](https://react.dev/) 19 & TypeScript
 * **Styling**: [Tailwind CSS](https://tailwindcss.com/) v4
 * **Database & ORM**: [PostgreSQL](https://www.postgresql.org/) (v16) with [Drizzle ORM](https://orm.drizzle.team/)
-* **Realtime Sync**: Server-Sent Events (SSE) via `/api/live` backed by Postgres `LISTEN/NOTIFY` and an in-memory event bus
+* **Realtime Sync**: Self-hosted Supabase Realtime (WebSocket broadcast) fed by Postgres `LISTEN/NOTIFY` triggers — see `docs/SELF_HOSTED_REALTIME.md`
 * **PDF & Document Engine**: `pdf-lib` for dynamic tournament bracket sheet generation and `xlsx` for official tournament result exports
 * **Security & Bot Protection**: Cloudflare Turnstile (with automated local development bypass)
 

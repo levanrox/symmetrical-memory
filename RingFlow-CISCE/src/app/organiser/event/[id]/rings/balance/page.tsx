@@ -83,7 +83,7 @@ export default async function OrganiserRingBalancingPage({ params }: { params: P
       tournamentId={tournamentId}
       tournamentName={tournament.name}
       initialCategories={catRows.map(serializeCategory)}
-      initialRings={ringRows.map(serializeRing)}
+      initialRings={ringRows.map((r) => serializeRing(r, { includeAccessCode: true }))}
       initialAssignments={assignments}
       completedTimes={completedTimes}
       readOnly={true}

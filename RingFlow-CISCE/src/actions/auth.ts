@@ -5,6 +5,8 @@ import { admins } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import { cookies } from "next/headers";
 import { verifyPassword, hashPassword } from "@/lib/auth/password";
+import { signCookieValue } from "@/lib/auth/sessionCookies";
+import { secureCookieFlag } from "@/lib/serverCookies";
 import { revalidatePath } from "next/cache";
 
 export async function signInWithAdminPassword(
@@ -41,18 +43,28 @@ export async function signInWithAdminPassword(
 
   const admin = existing[0];
 
-  // If admin has no passwordHash set yet (e.g. initial migration or seed default),
-  // allow 'admin123' as default password and automatically hash & persist it.
+  // First-login bootstrap: if the admin has no password yet, the operator must
+  // supply ADMIN_BOOTSTRAP_PASSWORD (env). The previous behaviour — a
+  // hardcoded "admin123" default — meant every fresh deployment had a publicly
+  // known admin password, so it was removed.
   if (!admin.passwordHash) {
-    if (password === "admin123") {
-      const newHash = await hashPassword("admin123");
-      await db
-        .update(admins)
-        .set({ passwordHash: newHash })
-        .where(eq(admins.id, admin.id));
-    } else {
+    const bootstrap = process.env.ADMIN_BOOTSTRAP_PASSWORD;
+    if (!bootstrap) {
+      return {
+        success: false,
+        error:
+          "No admin password is set yet. Ask the event operator to configure " +
+          "ADMIN_BOOTSTRAP_PASSWORD and restart the server.",
+      };
+    }
+    if (password !== bootstrap) {
       return { success: false, error: "Invalid email or password." };
     }
+    const newHash = await hashPassword(bootstrap);
+    await db
+      .update(admins)
+      .set({ passwordHash: newHash })
+      .where(eq(admins.id, admin.id));
   } else {
     const isValid = await verifyPassword(password, admin.passwordHash);
     if (!isValid) {
@@ -60,20 +72,16 @@ export async function signInWithAdminPassword(
     }
   }
 
-  // Set secure session cookie
+  // Set the signed session cookie. The old duplicate `admin_dev_id` set here
+  // is gone: session identity lives in exactly one signed cookie.
   try {
     const cookieStore = await cookies();
-    cookieStore.set("admin_session", admin.id, {
+    cookieStore.set("admin_session", signCookieValue(admin.id), {
       path: "/",
       maxAge: 86400 * 7, // 7 days
       httpOnly: true,
       sameSite: "lax",
-      secure: process.env.NODE_ENV === "production",
-    });
-    cookieStore.set("admin_dev_id", admin.id, {
-      path: "/",
-      maxAge: 86400 * 7,
-      sameSite: "lax",
+      secure: await secureCookieFlag(),
     });
   } catch {}
 

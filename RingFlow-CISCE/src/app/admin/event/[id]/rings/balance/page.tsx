@@ -82,7 +82,7 @@ export default async function RingBalancingPage({ params }: { params: Promise<{ 
       tournamentId={tournamentId}
       tournamentName={tournament.name}
       initialCategories={catRows.map(serializeCategory)}
-      initialRings={ringRows.map(serializeRing)}
+      initialRings={ringRows.map((r) => serializeRing(r, { includeAccessCode: true }))}
       initialAssignments={assignments}
       completedTimes={completedTimes}
     />

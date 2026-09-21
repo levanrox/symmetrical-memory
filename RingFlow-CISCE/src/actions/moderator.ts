@@ -8,7 +8,7 @@ import {
   moderatorRequests,
   categories,
 } from "@/db/schema";
-import { eq, and, desc, asc, inArray } from "drizzle-orm";
+import { eq, and, asc, inArray } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { ensureAdminOwnsTournament } from "./admin";
@@ -16,6 +16,7 @@ import { secureCookieFlag } from "@/lib/serverCookies";
 import { normalizeAccessCode, isValidUuid } from "@/lib/utils";
 import { broadcastLiveEvent } from "@/lib/realtime/bus";
 import { serializeCategoryAssignment } from "@/lib/serializers";
+import { assertValidSession } from "@/lib/auth/sessionValidation";
 
 export async function approveModeratorRequest(requestId: string, ringId: string, tournamentId: string) {
   await ensureAdminOwnsTournament(tournamentId);
@@ -50,7 +51,6 @@ export async function approveModeratorRequest(requestId: string, ringId: string,
     id: requestId,
     ringId,
     tournamentId,
-    sessionToken,
     status: "approved",
   });
 
@@ -137,18 +137,29 @@ export async function requestModeratorAccess(
   deviceInfo?: any,
   turnstileToken?: string
 ) {
+  // Brute-force guard: 6-char codes are guessable without throttling.
+  try {
+    const { checkIpRateLimit } = await import("@/lib/rateLimit");
+    await checkIpRateLimit("requestModeratorAccess", 10, 60_000);
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Too many attempts. Please wait and try again." };
+  }
+
   if (!moderatorName || !moderatorName.trim()) {
     return { success: false, error: "Please enter your name." };
   }
-  if (!turnstileToken) {
-    return { success: false, error: "Security check is required." };
-  }
 
-  const { verifyTurnstileToken } = await import("./turnstile");
-  const verification = await verifyTurnstileToken(turnstileToken);
-
-  if (!verification.success) {
-    return { success: false, error: verification.error || "Security check failed." };
+  // Turnstile is off by default (offline LAN): only required/enforced when
+  // TURNSTILE_ENABLED=true.
+  const { verifyTurnstileToken, turnstileEnabled } = await import("./turnstile");
+  if (turnstileEnabled()) {
+    if (!turnstileToken) {
+      return { success: false, error: "Security check is required." };
+    }
+    const verification = await verifyTurnstileToken(turnstileToken);
+    if (!verification.success) {
+      return { success: false, error: verification.error || "Security check failed." };
+    }
   }
 
   // Try to get IP
@@ -254,22 +265,37 @@ export async function checkModeratorStatus(requestId: string) {
     const cookieStore = await cookies();
     cookieStore.set("mod_token", request.sessionToken, {
       path: "/",
+      httpOnly: true, // never expose the session token to page JavaScript
       maxAge: 86400, // 24 hours
       sameSite: "lax",
       secure: await secureCookieFlag(),
     });
   }
 
+  // NOTE: sessionToken is deliberately NOT returned. The cookie above is the
+  // only channel the token travels on — returning it in the body would let
+  // any script or extension on the page exfiltrate it.
   return {
     status: request.status,
     ringId: request.ringId,
-    sessionToken: request.sessionToken,
   };
+}
+
+/** Server-side logout for moderators (httpOnly cookie can't be cleared from JS). */
+export async function clearModeratorSession() {
+  const cookieStore = await cookies();
+  cookieStore.delete("mod_token");
+  return { success: true };
 }
 
 export async function validateModeratorSession(ringId: string, token: string) {
   if (!ringId || !isValidUuid(ringId) || !token || !isValidUuid(token)) return false;
-  const [latestRequest] = await db
+  // Token-only authentication. The request id is broadcast over the realtime
+  // socket (any passive sniffer can see it), so it is NEVER accepted as a
+  // credential. Any non-expired approved request for this ring validates —
+  // this also lets a moderator reconnect from a second device without
+  // locking out the first device's session.
+  const [request] = await db
     .select({
       id: moderatorRequests.id,
       sessionToken: moderatorRequests.sessionToken,
@@ -281,22 +307,16 @@ export async function validateModeratorSession(ringId: string, token: string) {
     .where(
       and(
         eq(moderatorRequests.ringId, ringId),
-        eq(moderatorRequests.status, "approved")
+        eq(moderatorRequests.status, "approved"),
+        eq(moderatorRequests.sessionToken, token)
       )
     )
-    .orderBy(desc(moderatorRequests.createdAt))
     .limit(1);
 
-  if (!latestRequest) return false;
-
-  if (latestRequest.expiresAt && new Date(latestRequest.expiresAt).getTime() < Date.now()) {
-    return false;
-  }
-
-  if (latestRequest.sessionToken === token || latestRequest.id === token) {
-    return latestRequest;
-  }
-  return false;
+  // Defense in depth: re-assert the token-only contract on the returned row
+  // (the query already filters by sessionToken). The request id is public
+  // and must never validate as a credential.
+  return assertValidSession(request, token) ? request : false;
 }
 
 export async function startCategory(assignmentId: string, ringId: string) {

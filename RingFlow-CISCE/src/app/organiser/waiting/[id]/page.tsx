@@ -17,7 +17,7 @@ export default function OrganiserWaitingRoom() {
           localStorage.setItem("ringflow_organiser_name", res.organiserName);
         }
         if (res.status === "approved" && res.tournamentId) {
-          handleApproved(res.tournamentId, res.sessionToken || undefined);
+          handleApproved(res.tournamentId);
         } else if (res.status === "rejected") {
           setStatus("rejected");
         }
@@ -29,16 +29,10 @@ export default function OrganiserWaitingRoom() {
     void checkAndAdvance();
   });
 
-  const handleApproved = (tournamentId: string, token?: string) => {
+  const handleApproved = (tournamentId: string) => {
+    // The server action sets the httpOnly org_token cookie — page JavaScript
+    // never handles the session token itself.
     checkOrganiserStatus(id).catch(() => {});
-
-    const isHttps = typeof window !== "undefined" && window.location.protocol === "https:";
-    const secureFlag = isHttps ? "; Secure" : "";
-    if (token) {
-      document.cookie = `org_token=${token}; path=/; max-age=604800; SameSite=Lax${secureFlag}`;
-    } else {
-      document.cookie = `org_token=${id}; path=/; max-age=604800; SameSite=Lax${secureFlag}`;
-    }
 
     setStatus("approved");
     setTimeout(() => {
@@ -53,7 +47,7 @@ export default function OrganiserWaitingRoom() {
           localStorage.setItem("ringflow_organiser_name", res.organiserName);
         }
         if (res.status === "approved" && res.tournamentId) {
-          handleApproved(res.tournamentId, res.sessionToken || undefined);
+          handleApproved(res.tournamentId);
         } else if (res.status === "rejected") {
           setStatus("rejected");
         }

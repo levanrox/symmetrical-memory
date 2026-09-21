@@ -13,7 +13,10 @@ import {
   moderatorRequests,
 } from "@/db/schema";
 import { eq, and, inArray, desc, asc, sql } from "drizzle-orm";
-import { startRingTimer, pauseRingTimer, setAllRingTimers } from "./rings";
+import { startRingTimer, pauseRingTimer } from "./rings";
+import { signCookieValue, verifyCookieValue } from "@/lib/auth/sessionCookies";
+import { secureCookieFlag } from "@/lib/serverCookies";
+import { logger } from "@/lib/logger";
 import {
   serializeRing,
   serializeCategory,
@@ -26,14 +29,20 @@ import {
  * Ensures the currently authenticated user exists in the public.admins table.
  * Throws if not authenticated or not a registered admin.
  * Returns the admin's UUID.
+ *
+ * Session cookies are HMAC-signed (see src/lib/auth/sessionCookies.ts): a raw
+ * cookie value is never trusted. The legacy `admin_dev_id` cookie is only
+ * honoured outside production — and even then only when signed.
  */
 export async function ensureAdmin() {
-  let sessionAdminId: string | undefined;
+  let sessionAdminId: string | null = null;
   try {
     const cookieStore = await cookies();
     sessionAdminId =
-      cookieStore.get("admin_session")?.value ||
-      cookieStore.get("admin_dev_id")?.value;
+      verifyCookieValue(cookieStore.get("admin_session")?.value) ??
+      (process.env.NODE_ENV !== "production"
+        ? verifyCookieValue(cookieStore.get("admin_dev_id")?.value)
+        : null);
   } catch {}
 
   if (sessionAdminId) {
@@ -60,7 +69,14 @@ export async function ensureAdmin() {
   throw new Error("Not authenticated");
 }
 
+/**
+ * Development-only admin login. REFUSES to run in production: there must be
+ * no password-less admin path on the event server.
+ */
 export async function loginAsDevAdmin(adminId?: string) {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("loginAsDevAdmin is disabled in production");
+  }
   let targetId: string = adminId || "";
   if (!targetId) {
     const [firstAdmin] = await db
@@ -72,8 +88,10 @@ export async function loginAsDevAdmin(adminId?: string) {
   }
 
   const cookieStore = await cookies();
-  cookieStore.set("admin_dev_id", targetId, {
+  cookieStore.set("admin_dev_id", signCookieValue(targetId), {
     path: "/",
+    httpOnly: true,
+    secure: await secureCookieFlag(),
     maxAge: 86400 * 7,
     sameSite: "lax",
   });
@@ -193,8 +211,18 @@ export async function adminSetAllRingsStatus(tournamentId: string, isPaused: boo
 /**
  * High-performance, direct Drizzle query for live dashboard reconciliation.
  * Replaces client-side PostgREST queries with single fast server query.
+ *
+ * NOTE: this action is also called by the PUBLIC scoreboard client to keep
+ * floor data fresh. Ring moderator access codes are credentials, so they are
+ * only included when the caller has an admin session — everyone else gets
+ * the same shape with the codes stripped.
  */
 export async function getAdminDashboardData(tournamentId: string) {
+  let admin = false;
+  try {
+    await ensureAdmin();
+    admin = true;
+  } catch {}
   const [ringRows, logRows] = await Promise.all([
     db
       .select()
@@ -235,13 +263,14 @@ export async function getAdminDashboardData(tournamentId: string) {
   }
 
   return {
-    rings: ringRows.map(serializeRing),
+    rings: ringRows.map((r) => serializeRing(r, { includeAccessCode: admin })),
     assignments,
     logs: logRows.map(serializeEventLog),
   };
 }
 
 export async function getLiveLogs(tournamentId: string) {
+  await ensureAdmin();
   const logRows = await db
     .select()
     .from(eventLog)
@@ -252,6 +281,10 @@ export async function getLiveLogs(tournamentId: string) {
 }
 
 export async function getPendingModeratorRequests(tournamentId: string) {
+  // Admin-only: the returned rows describe live access grants. (The
+  // serializer additionally never includes sessionToken — belt and braces.)
+  await ensureAdmin();
+
   const ringRows = await db
     .select({ id: rings.id, name: rings.name })
     .from(rings)
@@ -273,6 +306,14 @@ export async function getPendingModeratorRequests(tournamentId: string) {
 }
 
 export async function getTournamentSearchMeta(tournamentId: string) {
+  // Ring access codes are credentials: only admins receive them; role pages
+  // (organiser/stager search headers) get the same shape with codes stripped.
+  let admin = false;
+  try {
+    await ensureAdmin();
+    admin = true;
+  } catch {}
+
   const [cats, ringList] = await Promise.all([
     db.select().from(categories).where(eq(categories.tournamentId, tournamentId)),
     db.select().from(rings).where(eq(rings.tournamentId, tournamentId)),
@@ -294,7 +335,7 @@ export async function getTournamentSearchMeta(tournamentId: string) {
 
   return {
     categories: cats.map(serializeCategory),
-    rings: ringList.map(serializeRing),
+    rings: ringList.map((r) => serializeRing(r, { includeAccessCode: admin })),
     assignments: assigns.map((a) => ({
       category_id: a.categoryId,
       ring_id: a.ringId,
@@ -306,6 +347,19 @@ export async function getTournamentSearchMeta(tournamentId: string) {
 
 export async function getSidebarTournamentCounts(tournamentId: string) {
   if (!tournamentId) return null;
+
+  // Sidebar counts are shown in admin and organiser layouts; require one of
+  // the two roles. (Dynamic import: organiser.ts imports this module.)
+  try {
+    await ensureAdmin();
+  } catch {
+    try {
+      const { ensureOrganiser } = await import("./organiser");
+      await ensureOrganiser();
+    } catch {
+      throw new Error("Not authenticated");
+    }
+  }
 
   try {
     const [t] = await db
@@ -338,7 +392,7 @@ export async function getSidebarTournamentCounts(tournamentId: string) {
       athletesCount: athRes?.count ?? 0,
     };
   } catch (err) {
-    console.error("Failed to load sidebar tournament counts:", err);
+    logger.error({ err }, "Failed to load sidebar tournament counts");
     return null;
   }
 }

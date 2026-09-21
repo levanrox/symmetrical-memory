@@ -3,6 +3,7 @@ import { db } from "@/db";
 import { categories, draws } from "@/db/schema";
 import { eq } from "drizzle-orm";
 import type { CategoryDrawState } from "@/lib/pdf/drawStatePdfGenerator";
+import { logger } from "@/lib/logger";
 
 /**
  * Every category that has a draw, with its current state — bouts, points and
@@ -32,7 +33,7 @@ export async function buildTournamentDrawStates(tournamentId: string): Promise<C
       });
     } catch (err) {
       // One unreadable bracket must not sink the whole document.
-      console.error(`[results] could not read the draw for ${category.name}:`, err);
+      logger.error({ err, category: category.name }, "Could not read the draw for category");
     }
   }
 

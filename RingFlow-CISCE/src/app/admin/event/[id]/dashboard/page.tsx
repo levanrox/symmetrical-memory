@@ -112,7 +112,7 @@ export default async function AdminDashboard({ params }: { params: Promise<{ id:
     <AdminDashboardClient 
       tournament={serializeTournament(tournamentRow)}
       categoryCount={categoryCount}
-      initialRings={ringRows.map(serializeRing)}
+      initialRings={ringRows.map((r) => serializeRing(r, { includeAccessCode: true }))}
       initialAssignments={assignments}
       initialModRequests={modRequests}
       initialLogs={logRows.map(serializeEventLog)}

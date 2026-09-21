@@ -114,13 +114,31 @@ export function normalizeAccessCode(code?: string | null): string {
 }
 
 /**
- * Generates an unambiguous 6-character alphanumeric code avoiding visually confusing characters (0, O, 1, I, L)
+ * Generates an unambiguous 6-character alphanumeric code avoiding visually confusing characters (0, O, 1, I, L).
+ * Uses a CSPRNG (never Math.random): these codes gate moderator/organiser/
+ * stager access, so they must not be predictable.
  */
 export function generateUnambiguousCode(length = 6): string {
   const chars = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+  const rand = (bound: number): number => {
+    // Node server actions: crypto.randomInt (CSPRNG, unbiased).
+    const nodeCrypto: any =
+      typeof crypto !== "undefined" ? (crypto as any) : undefined;
+    if (nodeCrypto && typeof nodeCrypto.randomInt === "function") {
+      return nodeCrypto.randomInt(bound);
+    }
+    // Browser / edge fallback: getRandomValues with rejection sampling to
+    // avoid modulo bias.
+    const limit = Math.floor(256 / bound) * bound;
+    const buf = new Uint8Array(1);
+    for (;;) {
+      globalThis.crypto.getRandomValues(buf);
+      if (buf[0] < limit) return buf[0] % bound;
+    }
+  };
   let result = "";
   for (let i = 0; i < length; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
+    result += chars.charAt(rand(chars.length));
   }
   return result;
 }

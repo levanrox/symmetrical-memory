@@ -10,19 +10,11 @@ export default function WaitingRoom() {
   const router = useRouter();
   const [status, setStatus] = useState("pending");
 
-  const handleApproved = (ringId: string, token?: string) => {
-    // Also ensure server-side cookie is set via Server Action
+  const handleApproved = (ringId: string) => {
+    // The server action sets the httpOnly mod_token cookie — page JavaScript
+    // never handles the session token itself.
     checkModeratorStatus(id).catch(() => {});
 
-    // Save token in cookie or local storage so middleware/layout can read it
-    const isHttps = typeof window !== 'undefined' && window.location.protocol === 'https:';
-    const secureFlag = isHttps ? '; Secure' : '';
-    if (token) {
-      document.cookie = `mod_token=${token}; path=/; max-age=86400; SameSite=Lax${secureFlag}`;
-    } else {
-      document.cookie = `mod_token=${id}; path=/; max-age=86400; SameSite=Lax${secureFlag}`;
-    }
-    
     // Animate a bit then redirect
     setStatus("approved");
     setTimeout(() => {
@@ -35,7 +27,7 @@ export default function WaitingRoom() {
     void checkModeratorStatus(id)
       .then((res) => {
         if (res.status === "approved" && res.ringId) {
-          handleApproved(res.ringId, res.sessionToken || undefined);
+          handleApproved(res.ringId);
         } else if (res.status === "rejected") {
           setStatus("rejected");
         }
@@ -51,7 +43,7 @@ export default function WaitingRoom() {
         const res = await checkModeratorStatus(id);
         if (isCancelled) return;
         if (res.status === "approved" && res.ringId) {
-          handleApproved(res.ringId, res.sessionToken || undefined);
+          handleApproved(res.ringId);
         } else if (res.status === "rejected") {
           setStatus("rejected");
         }

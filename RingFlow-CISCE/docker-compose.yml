@@ -1,24 +1,219 @@
 # RingFlow local services.
-# Runs PostgreSQL directly on port 5432 for sub-millisecond local queries via Drizzle ORM.
+#
+# - db:       PostgreSQL 16 — the source of truth. Drizzle ORM talks to this
+#             directly; nothing else in the stack stores application data.
+# - pooler:   PgBouncer in transaction mode (port 6432, compose network only).
+#             Multiplexes app connections so ~25+ LAN clients don't exhaust
+#             Postgres. The realtime LISTEN bridge bypasses it via
+#             DATABASE_DIRECT_URL (LISTEN/NOTIFY doesn't work through
+#             transaction-mode pooling).
+# - migrate:  one-shot job (Dockerfile `migrate` stage). Applies the drizzle
+#             journal + the idempotent realtime NOTIFY triggers, then exits 0.
+#             The `app` service waits for it (service_completed_successfully).
+# - realtime: self-hosted Supabase Realtime. Broadcasts database change events
+#             to browsers over WebSockets. Works fully offline on the LAN.
+# - app:      the Next.js production server (optional — run `npm start` on the
+#             host instead if you prefer).
+#
+# Secrets and keys live in `.env` (see `.env.example`). Generate them with:
+#   node scripts/gen-supabase-secrets.mjs
+#
+# Typical event deployment (one command):
+#   ./scripts/start-event.sh
+#
+# Manual equivalent:
+#   docker compose up -d db pooler        # start the data layer
+#   docker compose up migrate             # apply migrations (one-shot, exits 0)
+#   docker compose up -d realtime app     # start realtime + app
+#
+# Resource limits below assume a small event VM (2 vCPU / 8 GB RAM).
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
 
 services:
   db:
     image: postgres:16-alpine
     container_name: ringflow-db
     restart: unless-stopped
+    init: true
+    mem_limit: 2g
+    cpus: 1.5
+    logging: *default-logging
     environment:
-      POSTGRES_USER: event_suite
-      POSTGRES_PASSWORD: event_suite
-      POSTGRES_DB: ringflow
+      POSTGRES_USER: ${POSTGRES_USER:-event_suite}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-event_suite}
+      POSTGRES_DB: ${POSTGRES_DB:-ringflow}
     ports:
-      - "5432:5432"
+      # Bound to loopback only: LAN clients never need direct DB access.
+      # The host still reaches it for scripts/backups via 127.0.0.1:5432.
+      - "127.0.0.1:5432:5432"
     volumes:
       - ringflow-pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U event_suite -d ringflow"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-event_suite} -d $${POSTGRES_DB:-ringflow}"]
       interval: 3s
       timeout: 3s
       retries: 5
 
+  pooler:
+    # Pinned: verify the tag on https://hub.docker.com/r/pgbouncer/pgbouncer/tags
+    image: pgbouncer/pgbouncer:1.24.0
+    container_name: ringflow-pooler
+    restart: unless-stopped
+    init: true
+    mem_limit: 256m
+    cpus: 0.5
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+    # No published ports: only the app reaches the pooler, inside the compose
+    # network. The image defaults to auth_type=any, which is acceptable on this
+    # private network; set PGBOUNCER_AUTH_TYPE + an auth file if you ever
+    # publish 6432. No healthcheck: this minimal Alpine image has no pg_isready
+    # or bash /dev/tcp — the app's /api/health check covers end-to-end
+    # connectivity through the pooler instead.
+    environment:
+      DATABASES_HOST: db
+      DATABASES_PORT: 5432
+      DATABASES_USER: ${POSTGRES_USER:-event_suite}
+      DATABASES_PASSWORD: ${POSTGRES_PASSWORD:-event_suite}
+      DATABASES_DBNAME: ${POSTGRES_DB:-ringflow}
+      PGBOUNCER_LISTEN_PORT: 6432
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_MAX_CLIENT_CONN: 200
+      PGBOUNCER_DEFAULT_POOL_SIZE: 20
+      QUIET: 1
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    image: ringflow-migrate
+    container_name: ringflow-migrate
+    restart: "no"
+    init: true
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      # Migrations bypass the pooler: DDL is safer on a direct connection.
+      DATABASE_URL: postgres://${POSTGRES_USER:-event_suite}:${POSTGRES_PASSWORD:-event_suite}@db:5432/${POSTGRES_DB:-ringflow}
+
+  realtime:
+    # Pinned: verify the tag on https://hub.docker.com/r/supabase/realtime/tags
+    image: supabase/realtime:v2.137.3
+    container_name: ringflow-realtime
+    restart: unless-stopped
+    init: true
+    mem_limit: 512m
+    cpus: 1.0
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # Browsers on the LAN open their WebSocket directly against this port.
+      - "4000:4000"
+    environment:
+      PORT: 4000
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-event_suite}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-event_suite}
+      DB_NAME: ${POSTGRES_DB:-ringflow}
+      DB_AFTER_CONNECT_QUERY: "SET search_path TO _realtime"
+      DB_ENC_KEY: ${DB_ENC_KEY:-supabaserealtime}
+      API_JWT_SECRET: "${SUPABASE_JWT_SECRET:?missing - run scripts/gen-supabase-secrets.mjs}"
+      SECRET_KEY_BASE: "${SECRET_KEY_BASE:?missing - run scripts/gen-supabase-secrets.mjs}"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      ENABLE_TAILSCALE: "false"
+    # Create the realtime schema, seed the self-hosted tenant (JWT secret), start.
+    command: >
+      sh -c "/app/bin/migrate && /app/bin/realtime eval 'Realtime.Release.seeds(Realtime.Repo)' && /app/bin/server"
+    # NOTE: no healthcheck here. The image's /bin/sh is dash, which lacks the
+    # /dev/tcp bash-ism, and the image ships no curl/wget — a shell TCP probe
+    # cannot work. The app tolerates realtime starting late (the LISTEN bridge
+    # and browsers both reconnect with backoff), and migration ordering is
+    # enforced by the `migrate` service. The app's /api/health still reports
+    # realtime reachability (TCP probe) for operators and start-event.sh.
+
+  app:
+    build:
+      context: .
+      # The Next.js build prerenders pages, which queries the database
+      # (pre-existing app behavior). Host networking lets the build reach the
+      # already-running compose `db` service on 127.0.0.1:5432.
+      # First-time workflow: `docker compose up -d db` (+ db:push/seed from the
+      # host), then `docker compose build app`.
+      network: host
+      args:
+        DATABASE_URL: postgres://${POSTGRES_USER:-event_suite}:${POSTGRES_PASSWORD:-event_suite}@127.0.0.1:5432/${POSTGRES_DB:-ringflow}
+        NEXT_PUBLIC_REALTIME_URL: ${NEXT_PUBLIC_REALTIME_URL:-}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: "${NEXT_PUBLIC_SUPABASE_ANON_KEY:?missing - run scripts/gen-supabase-secrets.mjs}"
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-http://localhost:3000}
+    image: ringflow-app
+    container_name: ringflow-app
+    restart: unless-stopped
+    init: true
+    mem_limit: 1g
+    cpus: 1.0
+    logging: *default-logging
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      pooler:
+        condition: service_started
+      realtime:
+        # service_started (not service_healthy): the realtime image has no
+        # working shell healthcheck (dash, no /dev/tcp). The app tolerates it
+        # starting late — the bridge and browsers reconnect with backoff.
+        condition: service_started
+    ports:
+      - "3000:3000"
+    environment:
+      # Pooled connections for request handling (via PgBouncer, 6432)...
+      DATABASE_URL: postgres://${POSTGRES_USER:-event_suite}:${POSTGRES_PASSWORD:-event_suite}@pooler:6432/${POSTGRES_DB:-ringflow}
+      # ...but the realtime LISTEN bridge needs a direct connection:
+      # LISTEN/NOTIFY does not work through transaction-mode pooling.
+      DATABASE_DIRECT_URL: postgres://${POSTGRES_USER:-event_suite}:${POSTGRES_PASSWORD:-event_suite}@db:5432/${POSTGRES_DB:-ringflow}
+      REALTIME_URL: http://realtime:4000
+      SUPABASE_SERVICE_ROLE_KEY: "${SUPABASE_SERVICE_ROLE_KEY:?missing - run scripts/gen-supabase-secrets.mjs}"
+      NEXT_PUBLIC_SUPABASE_ANON_KEY: "${NEXT_PUBLIC_SUPABASE_ANON_KEY:?missing - run scripts/gen-supabase-secrets.mjs}"
+      # Signs admin/mod session cookies. Generated into .env by
+      # gen-supabase-secrets.mjs; when unset the app falls back to
+      # SECRET_KEY_BASE (already required above for realtime).
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      # First admin login password. Set once, then remove from .env —
+      # the bootstrap only works when no admin account exists yet.
+      ADMIN_BOOTSTRAP_PASSWORD: ${ADMIN_BOOTSTRAP_PASSWORD:-}
+      # Bot protection for public forms; keep off on the offline LAN.
+      TURNSTILE_ENABLED: ${TURNSTILE_ENABLED:-false}
+      FILE_STORAGE_BACKEND: ${FILE_STORAGE_BACKEND:-local}
+      FILE_STORAGE_DIR: /app/data/uploads
+      ALLOWED_DEV_ORIGINS: ${ALLOWED_DEV_ORIGINS:-}
+    volumes:
+      # Uploaded PDFs (category docs) survive container recreates.
+      - ringflow-uploads:/app/data/uploads
+    healthcheck:
+      # node:22-alpine ships no wget/curl; Node 22 has a global fetch().
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 45s
+
 volumes:
   ringflow-pgdata:
+  ringflow-uploads:

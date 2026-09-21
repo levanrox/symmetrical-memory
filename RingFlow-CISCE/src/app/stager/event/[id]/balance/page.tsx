@@ -91,7 +91,7 @@ export default async function StagerBalancePage({
       tournamentName={tournament.name}
       stagerName={stagerInfo.name || "Stager"}
       initialCategories={catRows.map(serializeCategory)}
-      initialRings={ringRows.map(serializeRing)}
+      initialRings={ringRows.map((r) => serializeRing(r))}
       initialAssignments={assignments}
       completedTimes={completedTimes}
     />

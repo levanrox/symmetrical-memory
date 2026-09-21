@@ -62,9 +62,11 @@ export default function OrganiserSidebar({ initialCounts }: { initialCounts?: Si
     router.replace("/");
   }, [router]);
 
-  const checkSession = React.useCallback(async (token: string) => {
+  const checkSession = React.useCallback(async () => {
     try {
-      const res = await validateOrganiserSessionAction(token);
+      // No token argument: the action reads the httpOnly org_token cookie
+      // server-side. Page JavaScript never sees the session token.
+      const res = await validateOrganiserSessionAction();
       if (!res.valid) {
         if (res.reason === "revoked" || res.reason === "expired" || res.reason === "not_found") {
           handleRevoked();
@@ -84,12 +86,8 @@ export default function OrganiserSidebar({ initialCounts }: { initialCounts?: Si
   useLiveEvents(
     { tournamentId: id },
     React.useCallback(() => {
-      const match =
-        typeof document !== "undefined"
-          ? document.cookie.match(/(?:^|; )org_token=([^;]*)/)
-          : null;
-      const token = match ? decodeURIComponent(match[1]) : null;
-      if (token) checkSession(token);
+      // checkSession reads the httpOnly cookie server-side; no token here.
+      void checkSession();
     }, [checkSession])
   );
 
@@ -97,23 +95,15 @@ export default function OrganiserSidebar({ initialCounts }: { initialCounts?: Si
   useEffect(() => {
     let isCleanedUp = false;
 
-    const match =
-      typeof document !== "undefined"
-        ? document.cookie.match(/(?:^|; )org_token=([^;]*)/)
-        : null;
-    const token = match ? decodeURIComponent(match[1]) : null;
+    void checkSession();
+    const interval = setInterval(() => {
+      if (!isCleanedUp) void checkSession();
+    }, 15000);
 
-    if (token) {
-      checkSession(token);
-      const interval = setInterval(() => {
-        if (!isCleanedUp) checkSession(token);
-      }, 15000);
-
-      return () => {
-        isCleanedUp = true;
-        clearInterval(interval);
-      };
-    }
+    return () => {
+      isCleanedUp = true;
+      clearInterval(interval);
+    };
   }, [checkSession]);
 
   // Fetch tournament counts

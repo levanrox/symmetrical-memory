@@ -16,9 +16,119 @@ import {
 import { resolveDraw } from "@/engine/draw-engine";
 import type { DrawGraph } from "@/engine/draw-engine/types";
 import { normalizeClock } from "@/lib/matchClock";
+import { logger } from "@/lib/logger";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { broadcastLiveEvent } from "@/lib/realtime/bus";
+import { cookies } from "next/headers";
+import { ensureAdmin } from "./admin";
+import { ensureOrganiser } from "./organiser";
+import { validateModeratorSession } from "./moderator";
+
+/**
+ * Authorize a bout write for a ring. Accepts, in order:
+ *  1. a valid moderator session for this ring (mod_token cookie),
+ *  2. a signed admin session,
+ *  3. a signed organiser session.
+ * Throws otherwise. Every score mutation goes through this — there is no
+ * unauthenticated path to rewrite live scores.
+ */
+async function authorizeBoutWrite(ringId: string): Promise<void> {
+  try {
+    const cookieStore = await cookies();
+    const token = cookieStore.get("mod_token")?.value;
+    if (token) {
+      const session = await validateModeratorSession(ringId, token);
+      if (session) return;
+    }
+  } catch {}
+  try {
+    await ensureAdmin();
+    return;
+  } catch {}
+  try {
+    await ensureOrganiser();
+    return;
+  } catch {}
+  throw new Error("Not authorized to update this bout");
+}
+
+/**
+ * Pure idempotency/conflict decision for bout confirmation, extracted so it
+ * can be unit-tested without a database.
+ */
+export function resolveConfirmOutcome(
+  currentStatus: string | null | undefined,
+  currentWinnerId: string | null | undefined,
+  newWinnerId: string
+): "proceed" | "duplicate" | "conflict" {
+  if (currentStatus !== "CONFIRMED") return "proceed";
+  // A confirmed bout with no recorded winner has nothing to conflict with —
+  // allow (re)setting it (admin repair path for legacy/incomplete rows).
+  if (currentWinnerId == null) return "proceed";
+  return currentWinnerId === newWinnerId ? "duplicate" : "conflict";
+}
+
+/** Resolve the ring currently running a match's category (if any). */
+async function ringIdForMatch(matchId: string): Promise<string | null> {
+  const [m] = await db
+    .select({ categoryId: matches.categoryId })
+    .from(matches)
+    .where(eq(matches.id, matchId))
+    .limit(1);
+  if (!m) return null;
+  const [a] = await db
+    .select({ ringId: categoryAssignments.ringId })
+    .from(categoryAssignments)
+    .where(
+      and(
+        eq(categoryAssignments.categoryId, m.categoryId),
+        eq(categoryAssignments.status, "running")
+      )
+    )
+    .limit(1);
+  return a?.ringId ?? null;
+}
+
+/**
+ * Server-side score range validation. Scores arrive from moderator devices;
+ * never trust them blindly — a malformed or malicious client must not be
+ * able to persist NaN, negative, or absurd values. Karate bout scores are
+ * small non-negative integers; 0–99 is a generous bound.
+ */
+export function clampScore(value: number | null | undefined, field: string): number {
+  const n = value ?? 0;
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0 || n > 99) {
+    throw new Error(`Invalid ${field}: must be an integer 0–99`);
+  }
+  return n;
+}
+
+/**
+ * Pure ring-binding check for bout writes (unit-testable).
+ *
+ * A moderator token authorizes writes for ONE ring. `authorizeBoutWrite`
+ * validates the token against the caller-supplied `ringId`, but without this
+ * check a ring-A moderator could pass ring A's id while rewriting a ring-B
+ * match. The match's true ring (resolved from its category assignment) must
+ * equal the ring the caller claimed.
+ *
+ * Throws on mismatch. When the caller made no ring claim (`suppliedRingId`
+ * nullish) there is nothing to bind — the caller authorized another way
+ * (admin/organiser).
+ */
+export function assertMatchRingBinding(
+  resolvedRingId: string | null,
+  suppliedRingId: string | null | undefined
+): void {
+  if (!suppliedRingId) return;
+  if (!resolvedRingId) {
+    throw new Error("Match is not currently assigned to a ring");
+  }
+  if (resolvedRingId !== suppliedRingId) {
+    throw new Error("Match does not belong to this ring");
+  }
+}
 
 function assembleRingActiveBout({
   ring,
@@ -254,6 +364,31 @@ export async function getRingActiveBout(ringId: string, matchId?: string) {
 }
 
 export async function setActiveBout(ringId: string, matchId: string) {
+  await authorizeBoutWrite(ringId);
+
+  // Ring binding: the bout must belong to a category assigned to THIS ring.
+  // Otherwise a moderator for ring A could hijack ring B's scoreboard by
+  // pointing ring A's active-bout pointer at ring B's matches.
+  const [target] = await db
+    .select({ id: matches.id, categoryId: matches.categoryId, status: matches.status })
+    .from(matches)
+    .where(eq(matches.id, matchId))
+    .limit(1);
+  if (!target) throw new Error("Match not found");
+  const [binding] = await db
+    .select({ ringId: categoryAssignments.ringId })
+    .from(categoryAssignments)
+    .where(
+      and(
+        eq(categoryAssignments.categoryId, target.categoryId),
+        eq(categoryAssignments.ringId, ringId)
+      )
+    )
+    .limit(1);
+  if (!binding) {
+    throw new Error("Match does not belong to this ring");
+  }
+
   // Update ring's active match pointer
   await db
     .update(rings)
@@ -261,12 +396,7 @@ export async function setActiveBout(ringId: string, matchId: string) {
     .where(eq(rings.id, ringId));
 
   // Set match to LIVE if it's not already confirmed
-  const [match] = await db
-    .select()
-    .from(matches)
-    .where(eq(matches.id, matchId));
-
-  if (match && match.status !== "CONFIRMED" && match.status !== "BYE") {
+  if (target.status !== "CONFIRMED" && target.status !== "BYE") {
     await db
       .update(matches)
       .set({ status: "LIVE" })
@@ -302,17 +432,37 @@ export async function updateLiveMatchState(
     senshu?: "AKA" | "AO" | null;
   }
 ) {
-  await db
-    .update(matches)
-    .set({
-      akaScore: state.akaScore ?? 0,
-      aoScore: state.aoScore ?? 0,
-      akaPenalties: state.akaPenalties ?? 0,
-      aoPenalties: state.aoPenalties ?? 0,
+  await authorizeBoutWrite(ringId);
+
+  // Ring binding: a moderator token is valid for its own ring only. Without
+  // this, a ring-A moderator could rewrite ring-B scores by passing ring A
+  // while naming a ring-B match.
+  assertMatchRingBinding(await ringIdForMatch(matchId), ringId);
+
+  // Serialize concurrent writers on the match row: SELECT ... FOR UPDATE inside
+  // a transaction, so two moderators' adjustments can't interleave into a
+  // lost update. A CONFIRMED bout is final — live state may not overwrite it.
+  const persisted = await db.transaction(async (tx) => {
+    const locked = await tx.execute(
+      sql`select id, status from matches where id = ${matchId} for update`
+    );
+    const current = (locked as unknown as { id: string; status: string }[])[0];
+    if (!current) throw new Error("Match not found");
+    if (current.status === "CONFIRMED") {
+      throw new Error("Match is already confirmed; live scores can no longer be changed");
+    }
+
+    const next = {
+      akaScore: clampScore(state.akaScore, "akaScore"),
+      aoScore: clampScore(state.aoScore, "aoScore"),
+      akaPenalties: clampScore(state.akaPenalties, "akaPenalties"),
+      aoPenalties: clampScore(state.aoPenalties, "aoPenalties"),
       senshu: state.senshu ?? null,
-      status: "LIVE",
-    })
-    .where(eq(matches.id, matchId));
+      status: "LIVE" as const,
+    };
+    await tx.update(matches).set(next).where(eq(matches.id, matchId));
+    return next;
+  });
 
   try {
     revalidatePath(`/scoreboard/${ringId}`);
@@ -325,15 +475,15 @@ export async function updateLiveMatchState(
     id: matchId,
     matchId,
     ringId,
-    akaScore: state.akaScore ?? 0,
-    aoScore: state.aoScore ?? 0,
-    akaPenalties: state.akaPenalties ?? 0,
-    aoPenalties: state.aoPenalties ?? 0,
-    senshu: state.senshu ?? null,
+    akaScore: persisted.akaScore,
+    aoScore: persisted.aoScore,
+    akaPenalties: persisted.akaPenalties,
+    aoPenalties: persisted.aoPenalties,
+    senshu: persisted.senshu,
     status: "LIVE",
   });
 
-  return { success: true };
+  return { success: true, state: persisted };
 }
 
 export async function confirmBoutResult(
@@ -347,8 +497,41 @@ export async function confirmBoutResult(
     aoPenalties?: number;
     senshu?: "AKA" | "AO" | null;
     method?: string;
+  },
+  opts?: {
+    /** Ring the bout is being confirmed from (moderator context). */
+    ringId?: string;
+    /**
+     * Client-generated idempotency key (uuid, one per confirm attempt —
+     * see BoutScoringPad). Contract:
+     * - First call with a key: runs the confirmation, stores the key on the
+     *   match event's `commandId` column.
+     * - Retry/double-click with the SAME key: the pre-check finds the stored
+     *   event and returns `{ duplicate: true }` without re-running bracket
+     *   advancement or inserting a second event.
+     * - A key is only ever valid for its match (scoped by matchId).
+     */
+    idempotencyKey?: string;
   }
 ) {
+  // Authorize: prefer the caller's ring context, else resolve the ring running
+  // this category; without any ring context only admin/organiser may confirm.
+  const ringId = opts?.ringId ?? (await ringIdForMatch(matchId));
+  if (opts?.ringId) {
+    // Ring binding: a moderator token is valid for its own ring only — the
+    // claimed ring must be the ring actually running this match.
+    assertMatchRingBinding(await ringIdForMatch(matchId), opts.ringId);
+  }
+  if (ringId) {
+    await authorizeBoutWrite(ringId);
+  } else {
+    try {
+      await ensureAdmin();
+    } catch {
+      await ensureOrganiser();
+    }
+  }
+
   // 1. Fetch match
   const [match] = await db
     .select()
@@ -394,8 +577,48 @@ export async function confirmBoutResult(
     winningSide = "AO";
   }
 
-  // 3. Commit match confirmation in transaction
-  await db.transaction(async (tx) => {
+  // 3. Commit match confirmation in transaction. The match row is locked
+  // first so two concurrent confirmations can't both advance the bracket.
+  // Idempotency: a retry with the same winner returns { duplicate: true }
+  // instead of re-running; a *different* winner on an already-confirmed bout
+  // is a conflict and is refused.
+  const outcome = await db.transaction(async (tx) => {
+    const locked = await tx.execute(
+      sql`select id, status, "winner_id" as "winnerId" from matches where id = ${matchId} for update`
+    );
+    const current = (
+      locked as unknown as { id: string; status: string; winnerId: string | null }[]
+    )[0];
+    if (!current) throw new Error("Match not found");
+
+    const decision = resolveConfirmOutcome(current.status, current.winnerId, winnerId);
+    if (decision === "duplicate") {
+      return { duplicate: true as const };
+    }
+    if (decision === "conflict") {
+      throw new Error(
+        "This bout was already confirmed with a different winner. Refresh and try again."
+      );
+    }
+
+    // Optional client idempotency key: if an event with this key already
+    // exists for the match, this is a replay of a completed confirmation.
+    if (opts?.idempotencyKey) {
+      const prior = await tx
+        .select({ id: matchEvents.id })
+        .from(matchEvents)
+        .where(
+          and(
+            eq(matchEvents.matchId, matchId),
+            eq(matchEvents.commandId, opts.idempotencyKey)
+          )
+        )
+        .limit(1);
+      if (prior.length > 0) {
+        return { duplicate: true as const };
+      }
+    }
+
     // Update match status, winner, points and penalties
     await tx
       .update(matches)
@@ -412,11 +635,12 @@ export async function confirmBoutResult(
       })
       .where(eq(matches.id, matchId));
 
-    // Record match event
+    // Record match event (carries the idempotency key when the client sent one)
     await tx.insert(matchEvents).values({
       matchId,
       seq: 1,
       type: "RESULT_CONFIRMED",
+      commandId: opts?.idempotencyKey ?? null,
       payload: {
         winnerId,
         side: winningSide,
@@ -539,7 +763,15 @@ export async function confirmBoutResult(
         categoryId,
       });
     }
+
+    return { duplicate: false as const };
   });
+
+  if (outcome.duplicate) {
+    // Idempotent replay: the bout was already confirmed (same winner or same
+    // idempotency key). Report success without re-running bracket advancement.
+    return { success: true, duplicate: true };
+  }
 
   return { success: true };
 }

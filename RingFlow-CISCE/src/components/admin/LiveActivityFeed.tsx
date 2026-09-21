@@ -40,7 +40,7 @@ export default function LiveActivityFeed({
 
   useLiveEvents({ tournamentId }, (event) => {
     if (event?.table === "event_log" && event?.op === "INSERT" && event.data) {
-      setLogs((current) => [event.data as LogEvent, ...current]);
+      setLogs((current) => [event.data as unknown as LogEvent, ...current]);
       setIsExpanded(true);
     } else {
       refreshLogs();

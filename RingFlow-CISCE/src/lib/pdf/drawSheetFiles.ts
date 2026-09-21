@@ -4,6 +4,7 @@ import { getCategoryDraw } from "@/actions/draws";
 import { generateCategoryDrawPdfBytes } from "@/lib/pdf/drawPdfGenerator";
 import { eq } from "drizzle-orm";
 import JSZip from "jszip";
+import { logger } from "@/lib/logger";
 
 /**
  * The database work behind the draw-sheet downloads, with no request context:
@@ -82,7 +83,7 @@ export async function buildAllCategoryDrawPdfs(tournamentId: string) {
       zip.file(`${cat.name.replace(/[^a-zA-Z0-9_\-]/g, "_")}_Draw.pdf`, pdfBytes);
       includedCount++;
     } catch (err) {
-      console.error(`Error generating PDF for category ${cat.name}:`, err);
+      logger.error({ err, category: cat.name }, "Error generating draw PDF for category");
     }
   }
 

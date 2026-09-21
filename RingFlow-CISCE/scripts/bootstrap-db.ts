@@ -17,9 +17,22 @@ if (fs.existsSync(envPath)) {
 }
 
 const connectionString =
-  process.env.DATABASE_URL || "postgres://event_suite:event_suite@172.24.3.24:5432/ringflow";
+  process.env.DATABASE_URL || "postgres://event_suite:event_suite@127.0.0.1:5432/ringflow";
 
-console.log("Connecting to PostgreSQL at:", connectionString);
+/** Never log credentials: show host/user/db only, mask the password. */
+function redactConnectionString(conn: string): string {
+  try {
+    const u = new URL(conn);
+    const user = u.username ? decodeURIComponent(u.username) : "";
+    const host = u.port ? `${u.hostname}:${u.port}` : u.hostname;
+    const db = u.pathname.replace(/^\//, "");
+    return `${u.protocol}//${user ? `${user}@` : ""}${host}/${db} (password hidden)`;
+  } catch {
+    return "<unparseable connection string — password hidden>";
+  }
+}
+
+console.log("Connecting to PostgreSQL at:", redactConnectionString(connectionString));
 
 const sql = postgres(connectionString, { max: 1 });
 

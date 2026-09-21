@@ -26,15 +26,20 @@ export function serializeTournament(t: any) {
   };
 }
 
-export function serializeRing(r: any) {
+export function serializeRing(r: any, opts?: { includeAccessCode?: boolean }) {
   if (!r) return null;
+  // The ring moderator access code is a credential: it is only included when
+  // the caller explicitly opts in (admin contexts). Public/role pages must
+  // never receive it — anyone with the code can request moderator access.
+  const includeAccessCode = opts?.includeAccessCode === true;
+  const { accessCode: _droppedCode, ...rest } = r;
   return {
-    ...r,
+    ...rest,
     id: r.id,
     tournament_id: r.tournamentId,
     name: r.name,
     ring_order: r.ringOrder,
-    access_code: r.accessCode,
+    ...(includeAccessCode ? { access_code: r.accessCode } : {}),
     timer_status: r.timerStatus || 'idle',
     timer_started_at: r.timerStartedAt ? new Date(r.timerStartedAt).toISOString() : null,
     timer_paused_at: r.timerPausedAt ? new Date(r.timerPausedAt).toISOString() : null,
@@ -90,16 +95,19 @@ export function serializeCategoryAssignment(a: any, category?: any) {
 
 export function serializeModRequest(mr: any, ring?: any) {
   if (!mr) return null;
+  // Explicit field selection — never spread the row: the sessionToken column
+  // is a live credential and must never leave the server in a response body.
   return {
-    ...mr,
     id: mr.id,
     ring_id: mr.ringId,
     tournament_id: mr.tournamentId,
     status: mr.status,
+    access_code_used: mr.accessCodeUsed ?? null,
     device_info: mr.deviceInfo,
     moderator_name: mr.moderatorName,
     created_at: mr.createdAt ? new Date(mr.createdAt).toISOString() : null,
     updated_at: mr.updatedAt ? new Date(mr.updatedAt).toISOString() : null,
+    expires_at: mr.expiresAt ? new Date(mr.expiresAt).toISOString() : null,
     rings: ring ? { name: ring.name } : mr.ring ? { name: mr.ring.name } : undefined,
   };
 }
@@ -142,13 +150,13 @@ export function serializeAthlete(a: any, categoryName?: string | null) {
 
 export function serializeOrganiserRequest(or: any) {
   if (!or) return null;
+  // No spread: the session_token column is a live credential and is never
+  // included in serialized output.
   return {
-    ...or,
     id: or.id,
     tournament_id: or.tournamentId || or.tournament_id,
     access_code_used: or.accessCodeUsed || or.access_code_used,
     status: or.status,
-    session_token: or.sessionToken || or.session_token,
     device_info: or.deviceInfo || or.device_info,
     organiser_name: or.organiserName || or.organiser_name,
     expires_at: or.expiresAt ? new Date(or.expiresAt).toISOString() : (or.expires_at || null),
@@ -159,14 +167,14 @@ export function serializeOrganiserRequest(or: any) {
 
 export function serializeStagerRequest(sr: any) {
   if (!sr) return null;
+  // No spread: the session_token column is a live credential and is never
+  // included in serialized output.
   return {
-    ...sr,
     id: sr.id,
     tournament_id: sr.tournamentId || sr.tournament_id,
     access_code_used: sr.accessCodeUsed || sr.access_code_used,
     stager_name: sr.stagerName || sr.stager_name,
     status: sr.status,
-    session_token: sr.sessionToken || sr.session_token,
     device_info: sr.deviceInfo || sr.device_info,
     expires_at: sr.expiresAt ? new Date(sr.expiresAt).toISOString() : (sr.expires_at || null),
     created_at: sr.createdAt ? new Date(sr.createdAt).toISOString() : (sr.created_at || null),

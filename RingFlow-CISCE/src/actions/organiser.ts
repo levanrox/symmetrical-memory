@@ -1,24 +1,34 @@
 "use server";
 
-import { createClient } from "@/utils/supabase/server";
 import { db } from "@/db";
 import { organiserRequests, tournaments } from "@/db/schema";
-import { and, eq, isNotNull, ne, or, sql, desc } from "drizzle-orm";
+import { and, eq, isNotNull, ne, sql, desc } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { cookies, headers } from "next/headers";
 import { ensureAdminOwnsTournament } from "./admin";
 import { normalizeAccessCode, generateUnambiguousCode, isValidUuid } from "@/lib/utils";
+import { logger } from "@/lib/logger";
 import { secureCookieFlag } from "@/lib/serverCookies";
 import { serializeOrganiserRequest } from "@/lib/serializers";
+import { assertValidSession } from "@/lib/auth/sessionValidation";
 
 async function setOrganiserCookie(token: string) {
   const cookieStore = await cookies();
   cookieStore.set("org_token", token, {
     path: "/",
+    httpOnly: true, // never expose the session token to page JavaScript
     maxAge: 604800,
     sameSite: "lax",
     secure: await secureCookieFlag(),
   });
+}
+
+/** Server-side logout for organisers (httpOnly cookie can't be cleared from JS). */
+export async function clearOrganiserSession() {
+  const cookieStore = await cookies();
+  cookieStore.delete("org_token");
+  cookieStore.delete("org_name");
+  return { success: true };
 }
 
 /**
@@ -30,6 +40,14 @@ export async function requestOrganiserAccess(
   deviceInfo?: any,
   turnstileToken?: string
 ) {
+  // Brute-force guard: the organiser code is guessable without throttling.
+  try {
+    const { checkIpRateLimit } = await import("@/lib/rateLimit");
+    await checkIpRateLimit("requestOrganiserAccess", 10, 60_000);
+  } catch (err: any) {
+    return { success: false, error: err?.message || "Too many attempts. Please wait and try again." };
+  }
+
   if (!turnstileToken) {
     return { success: false, error: "Security check is required." };
   }
@@ -113,8 +131,9 @@ export async function requestOrganiserAccess(
       .from(tournaments)
       .where(and(isNotNull(tournaments.organiserCode), ne(tournaments.organiserCode, "")));
 
-    console.warn(
-      `[organiser] Access code rejected. ${count} tournament(s) currently have an organiser code configured.`
+    logger.warn(
+      { tournamentsWithCode: count },
+      "Organiser access code rejected"
     );
 
     return {
@@ -151,7 +170,7 @@ export async function requestOrganiserAccess(
       tournamentName: matchedTournament.name,
     };
   } catch (err: any) {
-    console.error("[organiser] Failed to create access request:", err);
+    logger.error({ err }, "Failed to create organiser access request");
     return {
       success: false,
       error: `Could not create the access request (${err?.message ?? "database error"}). Contact the administrator.`,
@@ -180,13 +199,14 @@ export async function checkOrganiserStatus(requestId: string) {
     return { status: "expired" };
   }
 
-  if (request.status === "approved") {
-    await setOrganiserCookie(request.sessionToken || requestId);
+  if (request.status === "approved" && request.sessionToken) {
+    await setOrganiserCookie(request.sessionToken);
   }
 
+  // NOTE: sessionToken is deliberately NOT returned. The httpOnly cookie
+  // above is the only channel the token travels on.
   return {
     status: request.status,
-    sessionToken: request.sessionToken,
     tournamentId: request.tournamentId,
     organiserName: request.organiserName,
   };
@@ -278,7 +298,7 @@ export async function regenerateOrganiserCode(tournamentId: string) {
       .set({ organiserCode: newCode })
       .where(eq(tournaments.id, tournamentId));
   } catch (err: any) {
-    console.error("[organiser] Could not save the organiser code:", err);
+    logger.error({ err }, "Could not save the organiser code");
     return {
       success: false,
       error: `Could not save the organiser code: ${err?.message ?? "database error"}`,
@@ -300,15 +320,13 @@ async function findApprovedOrganiserRequest(token: string) {
       expiresAt: organiserRequests.expiresAt,
     })
     .from(organiserRequests)
-    .where(
-      or(
-        eq(organiserRequests.sessionToken, token),
-        eq(organiserRequests.id, token)
-      )
-    );
+    // Token-only: the request id is not a credential (it can appear in
+    // broadcast payloads), so it is never accepted as one.
+    .where(eq(organiserRequests.sessionToken, token));
 
   if (!request || request.status !== "approved") return null;
-  return request;
+  // Defense in depth: re-assert token-only match + expiry on the row.
+  return assertValidSession(request, token);
 }
 
 /**
@@ -318,30 +336,21 @@ async function findApprovedOrganiserRequest(token: string) {
  * 2) An Organiser with an approved session_token in their org_token cookie.
  */
 export async function ensureOrganiserHasAccessToTournament(tournamentId: string) {
-  const supabase = await createClient();
-
-  // 1. Check if authenticated admin
-  const { data: { user } } = await supabase.auth.getUser();
-  if (user) {
-    const { data: admin } = await supabase
-      .from("admins")
-      .select("id")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    if (admin) {
-      const { data: tournament } = await supabase
-        .from("tournaments")
-        .select("id, name")
-        .eq("id", tournamentId)
-        .eq("admin_id", admin.id)
-        .maybeSingle();
-
-      if (tournament) {
-        return { role: "admin", id: admin.id, tournament };
-      }
+  // 1. Check if authenticated admin (local signed session cookie — no network).
+  //    The old GoTrue `supabase.auth.getUser()` call is gone: there is no Auth
+  //    server in the self-hosted stack, so it could never succeed offline.
+  try {
+    const { ensureAdmin } = await import("./admin");
+    const adminId = await ensureAdmin();
+    const [tournament] = await db
+      .select({ id: tournaments.id, name: tournaments.name })
+      .from(tournaments)
+      .where(and(eq(tournaments.id, tournamentId), eq(tournaments.adminId, adminId)))
+      .limit(1);
+    if (tournament) {
+      return { role: "admin", id: adminId, tournament };
     }
-  }
+  } catch {}
 
   // 2. Check org_token cookie
   const cookieStore = await cookies();
@@ -398,21 +407,14 @@ export async function ensureOrganiserHasAccessToTournament(tournamentId: string)
  * Ensures the caller has general organiser access.
  */
 export async function ensureOrganiser() {
-  const supabase = await createClient();
-
-  // Check admin
-  const { data: { user } } = await supabase.auth.getUser();
-  if (user) {
-    const { data: admin } = await supabase
-      .from("admins")
-      .select("id")
-      .eq("id", user.id)
-      .maybeSingle();
-
-    if (admin) {
-      return { id: admin.id, name: "Administrator", role: "admin" };
-    }
-  }
+  // Check admin via the local signed session cookie. The old GoTrue
+  // `supabase.auth.getUser()` call is gone: there is no Auth server in the
+  // self-hosted stack, so it could never succeed offline.
+  try {
+    const { ensureAdmin } = await import("./admin");
+    const adminId = await ensureAdmin();
+    return { id: adminId, name: "Administrator", role: "admin" };
+  } catch {}
 
   // Check org_token
   const cookieStore = await cookies();
@@ -472,12 +474,8 @@ export async function validateOrganiserSessionAction(token?: string) {
         expiresAt: organiserRequests.expiresAt,
       })
       .from(organiserRequests)
-      .where(
-        or(
-          eq(organiserRequests.sessionToken, orgToken),
-          eq(organiserRequests.id, orgToken)
-        )
-      );
+      // Token-only: the request id is not a credential, never accept it as one.
+      .where(eq(organiserRequests.sessionToken, orgToken));
     request = row;
   } catch (error: any) {
     // Network or temporary DB error: do NOT revoke session
