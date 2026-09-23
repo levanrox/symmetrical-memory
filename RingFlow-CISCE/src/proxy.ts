@@ -1,28 +1,55 @@
 import { NextResponse, type NextRequest } from 'next/server'
 import { updateSession } from '@/utils/supabase/middleware'
-import { getClientIp, isPrivateIp, isRestrictedPath } from '@/lib/judgeAccess'
+import { getPeerIp, isPrivateIp, isRestrictedPath, isTunnelRequest } from '@/lib/judgeAccess'
+
+// One-time warning when the gate has no peer IP to work with (see below).
+let warnedMissingPeerHeader = false
 
 export async function proxy(request: NextRequest) {
-  // ─── LAN-only gate for staff areas (PHASE P7a) ─────────────────────────────
+  // ─── LAN-only gate for staff areas (PHASE P7a, hardened in P9) ─────────────
   // Judges on their own phones (own 4G, or venue WiFi) may only reach /j/*
   // and public endpoints. /admin, /moderator, /organiser and /stager return
-  // 404 for any client whose IP is not a private/LAN address, so they stay
-  // unreachable through a public tunnel (cloudflared) while remaining fully
-  // usable on the venue LAN. Localhost is private, so `next dev` keeps
-  // working untouched.
+  // 404 unless the request BOTH:
+  //   1. arrived over a direct connection from a private/LAN peer IP, AND
+  //   2. did NOT come through the public cloudflared tunnel.
   //
-  // SECURITY NOTE (defense-in-depth, not a sole control): the client IP is
-  // read from `x-forwarded-for` / `x-real-ip`, which are trustworthy when
-  // RingFlow is reached directly (venue LAN) or via cloudflared (it sets
-  // them honestly for the real client). If some other proxy were ever put
-  // in front of the app those headers could be spoofed — the staff areas
-  // are still protected by the app's own session auth behind this gate.
+  // The peer IP comes ONLY from the `x-rf-peer` header, which server.mjs
+  // stamps from the TCP socket's remoteAddress on every request (overwriting
+  // any client-sent value, so it cannot be spoofed). `X-Forwarded-For` /
+  // `X-Real-IP` are IGNORED entirely — they are client-controlled, so trusting
+  // them let any public client bypass this gate with
+  // `X-Forwarded-For: 10.0.0.1` (P9 M-1/L-5), and NextRequest.ip does not
+  // exist in Next 16, so the socket-stamped header is the only peer-IP
+  // source available to middleware.
+  //
+  // The tunnel check matters because cloudflared terminates at localhost:3000
+  // (scripts/start-judge-tunnel.sh): tunnel traffic has a *private* peer IP
+  // (127.0.0.1) and would otherwise sail through check (1). cloudflared
+  // always adds CF-Ray / CF-Connecting-IP, which clients cannot suppress on
+  // the tunnel path. (A direct client CAN forge those headers, but that only
+  // fails closed — denies staff — never bypasses.)
+  //
+  // FAIL-CLOSED (P9 H-1): when `x-rf-peer` is absent (the app was started
+  // without server.mjs, e.g. plain `next start`), the peer IP is not
+  // verifiable and staff pages 404. The server logs its gate mode at startup;
+  // a missing header also logs a one-time warning here. This gate is
+  // defense-in-depth behind the app's own session auth, not a sole control.
   //
   // Kept FAST by design: pure string/prefix checks, no DB, no network.
   const pathname = request.nextUrl.pathname
   if (isRestrictedPath(pathname)) {
-    const clientIp = getClientIp(request.headers)
-    if (!isPrivateIp(clientIp)) {
+    const peerIp = getPeerIp(request.headers)
+    if (!peerIp) {
+      if (!warnedMissingPeerHeader) {
+        warnedMissingPeerHeader = true
+        console.warn(
+          '[ringflow] lan-gate: no x-rf-peer header — not running under server.mjs? ' +
+            'Peer IP is not verifiable; staff pages fail closed (404).'
+        )
+      }
+      return new NextResponse(null, { status: 404 })
+    }
+    if (!isPrivateIp(peerIp) || isTunnelRequest(request.headers)) {
       return new NextResponse(null, { status: 404 })
     }
   }

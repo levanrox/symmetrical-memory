@@ -9,7 +9,10 @@ const extraDevOrigins = (process.env.ALLOWED_DEV_ORIGINS || "")
   .filter(Boolean);
 
 const nextConfig: NextConfig = {
-  output: "standalone",
+  // NOTE: no `output: "standalone"` — the app runs behind the custom
+  // server.mjs (which needs the full Next install to stamp the trusted
+  // `x-rf-peer` header for the LAN gate / rate limiter, P9 H-1). The Docker
+  // runner installs full prod dependencies and runs `node server.mjs`.
   // In development Next blocks requests to /_next/* that carry an Origin from a
   // host it does not recognise. Opening the app on a LAN or Tailscale address
   // then fails to load its dev assets, so the page never hydrates and buttons

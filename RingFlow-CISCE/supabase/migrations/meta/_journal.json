@@ -29,6 +29,13 @@
       "when": 1790178970048,
       "tag": "0003_kata_p3_judge_backend",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1790180427468,
+      "tag": "0004_kata_p9_seat_unique",
+      "breakpoints": true
     }
   ]
 }

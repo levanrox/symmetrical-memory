@@ -1,5 +1,5 @@
 # =========================================================================
-# RingFlow Production Dockerfile (Next.js Standalone + Node 22 Alpine)
+# RingFlow Production Dockerfile (Next.js + Node 22 Alpine, custom server)
 # =========================================================================
 
 # Stage 1: Dependencies
@@ -53,6 +53,10 @@ COPY scripts/migrate-db.mjs ./scripts/migrate-db.mjs
 CMD ["node", "scripts/migrate-db.mjs"]
 
 # Stage 4: Production Runner
+# Runs the custom server (server.mjs), NOT the standalone output: the server
+# stamps every request with the trusted `x-rf-peer` header (socket peer IP)
+# that the LAN gate (src/proxy.ts) and rate limiter (src/lib/rateLimit.ts)
+# rely on. Full prod node_modules are installed for this (P9 H-1).
 FROM node:22-alpine AS runner
 WORKDIR /app
 
@@ -65,13 +69,16 @@ ENV HOSTNAME="0.0.0.0"
 RUN addgroup --system --gid 1001 nodejs && \
     adduser --system --uid 1001 nextjs
 
-# Copy static assets and standalone build
-COPY --from=builder /app/public ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
+# Copy the built app, static assets and the custom server.
+COPY --from=builder --chown=nextjs:nodejs /app/.next ./.next
+COPY --from=builder --chown=nextjs:nodejs /app/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/server.mjs ./server.mjs
 
 USER nextjs
 
 EXPOSE 3000
 
-CMD ["node", "server.js"]
+CMD ["node", "server.mjs"]

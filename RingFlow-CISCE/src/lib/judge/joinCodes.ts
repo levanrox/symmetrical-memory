@@ -25,17 +25,36 @@ function defaultRandomBytes(n: number): Uint8Array {
 /**
  * Generate one join-code value.
  *
- * 32 symbols, one byte per char: 32 divides 256 evenly so `byte % 32` is
- * bias-free. 6 chars x 5 bits = 30 bits of CSPRNG entropy; uniqueness is
+ * 31 symbols (see JOIN_CODE_ALPHABET), drawn with REJECTION SAMPLING for
+ * exact uniformity: 31 does not divide 256, so plain `byte % 31` would favour
+ * the first 8 symbols (256 = 8·31 + 8). Bytes ≥ 248 (the largest multiple of
+ * 31 below 256) are discarded and re-drawn; each accepted byte is then exactly
+ * uniform mod 31. Acceptance is 248/256 ≈ 96.9% per byte, so extra draws are
+ * cheap. 6 chars × log2(31) ≈ 29.7 bits of CSPRNG entropy; uniqueness is
  * enforced by the DB unique constraint with a retry loop on collision.
+ *
+ * The loop is bounded: a degenerate entropy source fails loudly instead of
+ * hanging (against a working CSPRNG, 100 rounds is ~10⁻³⁰⁰⁰ unlikely to
+ * exhaust).
  */
 export function generateJoinCodeValue(rand: RandomBytes = defaultRandomBytes): string {
-  const bytes = rand(JOIN_CODE_LENGTH);
+  const base = JOIN_CODE_ALPHABET.length; // 31
+  const acceptBelow = 256 - (256 % base); // 248: largest multiple of 31 < 256
   let code = "";
-  for (let i = 0; i < JOIN_CODE_LENGTH; i += 1) {
-    const b = bytes[i];
-    if (b === undefined) throw new Error("Random source returned too few bytes");
-    code += JOIN_CODE_ALPHABET[b % JOIN_CODE_ALPHABET.length];
+  for (let round = 0; round < 100 && code.length < JOIN_CODE_LENGTH; round += 1) {
+    const need = JOIN_CODE_LENGTH - code.length;
+    const bytes = rand(need * 2);
+    if (bytes.length < need * 2) {
+      throw new Error("Random source returned too few bytes");
+    }
+    for (let i = 0; i < bytes.length && code.length < JOIN_CODE_LENGTH; i += 1) {
+      const b = bytes[i];
+      if (b === undefined) throw new Error("Random source returned too few bytes");
+      if (b < acceptBelow) code += JOIN_CODE_ALPHABET[b % base];
+    }
+  }
+  if (code.length < JOIN_CODE_LENGTH) {
+    throw new Error("Random source exhausted: could not generate an unbiased code");
   }
   return code;
 }

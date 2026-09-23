@@ -2,13 +2,15 @@
  * GET /api/judge/code-info?code= — public join-code lookup (P4).
  *
  * The judge join page needs the tatami name BEFORE the judge joins, so a
- * mis-scanned QR code is obvious at a glance. This endpoint is PUBLIC but
- * reveals nothing sensitive: either `{ valid: true, ringName,
- * tournamentName }` for an active, unexpired, unrevoked code, or the same
- * generic `{ valid: false }` for unknown/revoked/expired codes — no hint
- * about which failure occurred, so it can't be used to enumerate codes.
- *
- * Rate-limited per IP (6-char codes are guessable without throttling).
+ * mis-scanned QR code is obvious at a glance. This endpoint is PUBLIC and —
+ * to be honest about it — IS a validity oracle: `{ valid: true, ringName,
+ * tournamentName }` versus `{ valid: false }` tells an attacker whether a
+ * guessed code is live (P9 L-1). The blast radius is deliberately small: a
+ * valid code only lets someone file a *pending* join request, which goes
+ * nowhere without moderator approval, and the endpoint is rate-limited per
+ * IP (6-char codes are guessable without throttling). Unknown / revoked /
+ * expired codes all return the same generic `{ valid: false }` so at least
+ * the failure reason is not leaked.
  */
 
 import { and, eq, isNull } from "drizzle-orm";

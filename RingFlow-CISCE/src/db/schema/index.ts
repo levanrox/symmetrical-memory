@@ -11,6 +11,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 
@@ -523,7 +524,16 @@ export const judgeRequests = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (table) => [index('judge_requests_ring_status_idx').on(table.ringId, table.status)]
+  (table) => [
+    index('judge_requests_ring_status_idx').on(table.ringId, table.status),
+    // P9 M-2: one occupant per seat. Partial so pending/rejected/revoked rows
+    // (seatNumber null or stale) never conflict — only approved seats collide.
+    // Two concurrent approvals racing for the same seat hit 23505 here instead
+    // of silently double-assigning the seat (an extra vote).
+    uniqueIndex('judge_requests_ring_seat_approved_uniq')
+      .on(table.ringId, table.seatNumber)
+      .where(sql`${table.status} = 'approved'`),
+  ]
 );
 
 export const kataScores = pgTable(

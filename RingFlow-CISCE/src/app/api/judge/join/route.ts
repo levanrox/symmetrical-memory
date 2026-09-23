@@ -14,6 +14,7 @@ import { db } from "@/db";
 import { judgeJoinCodes, judgeRequests } from "@/db/schema";
 import { checkIpRateLimit } from "@/lib/rateLimit";
 import { broadcastLiveEvent } from "@/lib/realtime/bus";
+import { judgeRequestInsertedEvent } from "@/lib/judge/judgeEvents";
 import {
   isJoinCodeExpired,
   normalizeJoinCodeInput,
@@ -90,13 +91,10 @@ export async function POST(req: Request) {
   }
 
   // Wake the moderator desk so the pending request appears live.
-  broadcastLiveEvent({
-    table: "judge_requests",
-    op: "INSERT",
-    id: request.id,
-    ringId: joinCode.ringId,
-    data: { judgeName: name },
-  });
+  // P9 H-2: the event carries NO request id — anyone on venue WiFi could
+  // otherwise harvest it from the anonymous realtime channel and steal the
+  // judge's session via /api/judge/status after approval.
+  broadcastLiveEvent(judgeRequestInsertedEvent(joinCode.ringId, name));
 
   // NOTE: only the request id. The session is issued on approval and
   // travels exclusively in the httpOnly cookie set by /api/judge/status.

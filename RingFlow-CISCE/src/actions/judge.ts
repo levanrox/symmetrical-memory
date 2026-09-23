@@ -34,6 +34,8 @@ import { ensureAdmin } from "./admin";
 import { ensureOrganiser } from "./organiser";
 import { validateModeratorSession } from "./moderator";
 import { buildJudgeJoinUrl, getJudgeBaseUrl } from "@/lib/judgeAccess";
+import { judgeRequestStatusEvent } from "@/lib/judge/judgeEvents";
+import { withSeatConflictRetry } from "@/lib/judge/seatConflicts";
 import { broadcastLiveEvent } from "@/lib/realtime/bus";
 import { isKataCategory } from "@/lib/draws/generateDraws";
 import { advanceBracketAfterConfirm } from "@/lib/draws/bracketAdvance";
@@ -370,11 +372,9 @@ export async function getRingJudgeState(ringId: string) {
   };
 }
 
-/** Approve a pending judge: assigns the lowest free seat, issues the session. */
-export async function approveJudgeRequest(requestId: string, ringId: string) {
-  await authorizeJudgeRing(ringId);
-
-  const result = await db.transaction(async (tx) => {
+/** One approval attempt: SELECT-then-UPDATE inside a transaction. */
+async function attemptApproveJudgeRequest(requestId: string, ringId: string) {
+  return db.transaction(async (tx) => {
     const [req] = await tx
       .select({
         id: judgeRequests.id,
@@ -409,6 +409,11 @@ export async function approveJudgeRequest(requestId: string, ringId: string) {
     if (seat == null) throw new Error("No free judge seats on this ring");
 
     const sessionToken = crypto.randomUUID();
+    // P9 M-2: the partial unique index
+    // judge_requests_ring_seat_approved_uniq makes a concurrent approval that
+    // picked the same seat fail here with 23505 instead of silently
+    // double-assigning it. withSeatConflictRetry then retries once on the
+    // next free seat.
     await tx
       .update(judgeRequests)
       .set({
@@ -421,14 +426,19 @@ export async function approveJudgeRequest(requestId: string, ringId: string) {
 
     return { seatNumber: seat, judgeName: req.judgeName };
   });
+}
 
-  broadcastLiveEvent({
-    table: "judge_requests",
-    op: "UPDATE",
-    id: requestId,
-    ringId,
-    status: "approved",
-  });
+/** Approve a pending judge: assigns the lowest free seat, issues the session. */
+export async function approveJudgeRequest(requestId: string, ringId: string) {
+  await authorizeJudgeRing(ringId);
+
+  const result = await withSeatConflictRetry(() =>
+    attemptApproveJudgeRequest(requestId, ringId),
+  );
+
+  // P9 H-2: no request id in the broadcast — it would let anyone on venue
+  // WiFi harvest the id and steal the judge session via /api/judge/status.
+  broadcastLiveEvent(judgeRequestStatusEvent(ringId, "approved"));
 
   try {
     revalidatePath(`/moderator/ring/${ringId}`);
@@ -454,13 +464,7 @@ export async function rejectJudgeRequest(requestId: string, ringId: string) {
     .set({ status: "rejected" })
     .where(eq(judgeRequests.id, requestId));
 
-  broadcastLiveEvent({
-    table: "judge_requests",
-    op: "UPDATE",
-    id: requestId,
-    ringId,
-    status: "rejected",
-  });
+  broadcastLiveEvent(judgeRequestStatusEvent(ringId, "rejected"));
 
   return { success: true };
 }
@@ -486,13 +490,7 @@ export async function revokeJudgeSeat(requestId: string, ringId: string) {
     .set({ status: "revoked", sessionToken: null, seatNumber: null })
     .where(eq(judgeRequests.id, requestId));
 
-  broadcastLiveEvent({
-    table: "judge_requests",
-    op: "UPDATE",
-    id: requestId,
-    ringId,
-    status: "revoked",
-  });
+  broadcastLiveEvent(judgeRequestStatusEvent(ringId, "revoked"));
 
   return { success: true };
 }
@@ -545,6 +543,10 @@ export async function submitManualScore(
     )
     .limit(1);
   if (!seatReq) {
+    // P9 M-2: the partial unique index on (ring_id, seat_number) for approved
+    // rows turns a concurrent manual entry for the same empty seat into a
+    // no-op here instead of a silent duplicate seat (a second 23505-free
+    // read then picks up the winner's row).
     const [created] = await db
       .insert(judgeRequests)
       .values({
@@ -554,9 +556,25 @@ export async function submitManualScore(
         seatNumber,
         status: "approved",
       })
+      .onConflictDoNothing()
       .returning({ id: judgeRequests.id });
-    if (!created) throw new Error("Could not create the manual seat");
-    seatReq = created;
+    if (created) {
+      seatReq = created;
+    } else {
+      const [winner] = await db
+        .select({ id: judgeRequests.id })
+        .from(judgeRequests)
+        .where(
+          and(
+            eq(judgeRequests.ringId, ringId),
+            eq(judgeRequests.seatNumber, seatNumber),
+            eq(judgeRequests.status, "approved")
+          )
+        )
+        .limit(1);
+      if (!winner) throw new Error("Could not create the manual seat");
+      seatReq = winner;
+    }
   }
 
   const [prev] = await db
@@ -752,8 +770,12 @@ export async function confirmKataResult(
   await authorizeJudgeRing(ringId);
 
   const bout = await assertKataMatch(matchId);
-  if (bout.status === "CONFIRMED") throw new Error("Bout is already confirmed");
-  if (bout.status === "BYE") throw new Error("Cannot confirm a bye");
+  // P9 L-3: mirror submitManualScore — only LIVE or COMPLETED bouts can be
+  // confirmed. (SCHEDULED/READY have no scores yet; CONFIRMED and BYE are
+  // final states, so they are rejected by the same check.)
+  if (bout.status !== "LIVE" && bout.status !== "COMPLETED") {
+    throw new Error("Only a live or completed bout can be confirmed");
+  }
 
   const scoreRows = await db
     .select({

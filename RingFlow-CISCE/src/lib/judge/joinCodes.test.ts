@@ -54,6 +54,35 @@ describe("generateJoinCodeValue", () => {
   it("throws when the random source is short", () => {
     expect(() => generateJoinCodeValue(() => new Uint8Array(2))).toThrow();
   });
+
+  it("rejects bytes >= 248 (rejection sampling, P9 L-2)", () => {
+    // 247 is accepted (247 % 31 = 30 -> last alphabet char); 248+ are not.
+    const code = generateJoinCodeValue(() => new Uint8Array(12).fill(247));
+    expect(code).toBe(JOIN_CODE_ALPHABET[30]!.repeat(JOIN_CODE_LENGTH));
+  });
+
+  it("fails loudly instead of hanging on a degenerate source", () => {
+    expect(() => generateJoinCodeValue(() => new Uint8Array(12).fill(255))).toThrow(
+      /exhausted/
+    );
+  });
+
+  it("is approximately uniform across symbols (P9 L-2)", () => {
+    const counts = new Map<string, number>();
+    const N = 6000;
+    for (let i = 0; i < N; i += 1) {
+      for (const ch of generateJoinCodeValue()) {
+        counts.set(ch, (counts.get(ch) ?? 0) + 1);
+      }
+    }
+    const expected = (N * JOIN_CODE_LENGTH) / JOIN_CODE_ALPHABET.length;
+    for (const ch of JOIN_CODE_ALPHABET) {
+      const c = counts.get(ch) ?? 0;
+      // +/-25% of expected is ~8 sigma at these counts: a failure means real
+      // bias (plain `byte % 31` would skew the first 8 symbols by +3.2%).
+      expect(Math.abs(c - expected) / expected).toBeLessThan(0.25);
+    }
+  });
 });
 
 describe("defaultJoinCodeExpiry / isJoinCodeExpired", () => {

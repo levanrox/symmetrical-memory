@@ -9,11 +9,17 @@
 
 import { describe, expect, it, afterEach, vi } from "vitest";
 import {
-  getClientIp,
+  PEER_IP_HEADER,
+  getPeerIp,
+  isLoopbackIp,
   isPrivateIp,
+  isProbeTargetBlocked,
   isRestrictedPath,
+  isTunnelRequest,
+  isValidIpLiteral,
   normaliseBaseUrl,
   resolveEnvBaseUrl,
+  resolveRateLimitIdentity,
   buildJudgeJoinUrl,
   probeJudgeHealth,
   evaluateJudgeUrlTest,
@@ -65,21 +71,177 @@ describe("isPrivateIp", () => {
   });
 });
 
-describe("getClientIp", () => {
+describe("getPeerIp (P9 H-1)", () => {
   const headersOf = (init: Record<string, string>) => new Headers(init);
 
-  it("takes the first x-forwarded-for entry", () => {
+  it("reads ONLY the server-stamped peer header", () => {
+    expect(getPeerIp(headersOf({ [PEER_IP_HEADER]: "192.168.1.50" }))).toBe(
+      "192.168.1.50"
+    );
+  });
+
+  it("ignores x-forwarded-for and x-real-ip entirely (P9 M-1/L-5)", () => {
+    // Even a spoofed private XFF must not become the peer IP.
     expect(
-      getClientIp(headersOf({ "x-forwarded-for": "203.0.113.9, 70.41.3.18, 150.172.238.4" })),
-    ).toBe("203.0.113.9");
+      getPeerIp(
+        headersOf({
+          "x-forwarded-for": "10.0.0.1, 203.0.113.9",
+          "x-real-ip": "10.0.0.2",
+        })
+      )
+    ).toBe("");
+    // And a stamped peer header wins over (ignores) XFF.
+    expect(
+      getPeerIp(
+        headersOf({
+          [PEER_IP_HEADER]: "192.168.1.50",
+          "x-forwarded-for": "10.0.0.1",
+        })
+      )
+    ).toBe("192.168.1.50");
   });
 
-  it("falls back to x-real-ip", () => {
-    expect(getClientIp(headersOf({ "x-real-ip": "203.0.113.7" }))).toBe("203.0.113.7");
+  it("returns empty string when the header is absent (fail-closed signal)", () => {
+    expect(getPeerIp(headersOf({}))).toBe("");
   });
 
-  it("returns empty string when no IP headers are present", () => {
-    expect(getClientIp(headersOf({}))).toBe("");
+  it("trims whitespace", () => {
+    expect(getPeerIp(headersOf({ [PEER_IP_HEADER]: "  10.1.2.3  " }))).toBe(
+      "10.1.2.3"
+    );
+  });
+});
+
+describe("isTunnelRequest", () => {
+  const headersOf = (init: Record<string, string>) => new Headers(init);
+
+  it("detects cloudflared markers", () => {
+    expect(isTunnelRequest(headersOf({ "cf-ray": "abc123-DEL" }))).toBe(true);
+    expect(
+      isTunnelRequest(headersOf({ "cf-connecting-ip": "203.0.113.9" }))
+    ).toBe(true);
+  });
+
+  it("is false for direct requests", () => {
+    expect(
+      isTunnelRequest(headersOf({ [PEER_IP_HEADER]: "192.168.1.50" }))
+    ).toBe(false);
+    expect(isTunnelRequest(headersOf({}))).toBe(false);
+  });
+});
+
+describe("isLoopbackIp", () => {
+  it("recognises loopback forms", () => {
+    for (const ip of ["127.0.0.1", "127.1.2.3", "::1", "::ffff:127.0.0.1"]) {
+      expect(isLoopbackIp(ip)).toBe(true);
+    }
+  });
+
+  it("rejects non-loopback addresses", () => {
+    for (const ip of ["192.168.1.1", "10.0.0.1", "8.8.8.8", "", "not-an-ip"]) {
+      expect(isLoopbackIp(ip)).toBe(false);
+    }
+  });
+});
+
+describe("isValidIpLiteral", () => {
+  it("accepts v4 and v6 literals of any range", () => {
+    for (const ip of [
+      "192.168.1.1",
+      "8.8.8.8",
+      "203.0.113.9",
+      "::1",
+      "2001:db8::1",
+      "::ffff:203.0.113.9",
+    ]) {
+      expect(isValidIpLiteral(ip)).toBe(true);
+    }
+  });
+
+  it("rejects garbage", () => {
+    for (const s of ["", "not-an-ip", "999.1.1.1", "1.2.3", "1.2.3.4.5", "evil.com"]) {
+      expect(isValidIpLiteral(s)).toBe(false);
+    }
+  });
+});
+
+describe("resolveRateLimitIdentity (P9 H-3)", () => {
+  const headersOf = (init: Record<string, string>) => new Headers(init);
+
+  it("keys direct requests on the trusted peer IP", () => {
+    expect(
+      resolveRateLimitIdentity(headersOf({ [PEER_IP_HEADER]: "192.168.1.50" }))
+    ).toEqual({ ip: "192.168.1.50", via: "direct-peer" });
+  });
+
+  it("keys tunnel requests on CF-Connecting-IP when the peer is loopback", () => {
+    expect(
+      resolveRateLimitIdentity(
+        headersOf({
+          [PEER_IP_HEADER]: "127.0.0.1",
+          "cf-ray": "abc-DEL",
+          "cf-connecting-ip": "203.0.113.9",
+        })
+      )
+    ).toEqual({ ip: "203.0.113.9", via: "tunnel-client" });
+  });
+
+  it("ignores a forged cf-connecting-ip from a non-loopback peer (P9 M-1)", () => {
+    // A venue-LAN client forging CF-Ray cannot mint fresh buckets.
+    expect(
+      resolveRateLimitIdentity(
+        headersOf({
+          [PEER_IP_HEADER]: "192.168.1.50",
+          "cf-ray": "forged",
+          "cf-connecting-ip": "203.0.113.99",
+        })
+      )
+    ).toEqual({ ip: "192.168.1.50", via: "direct-peer" });
+  });
+
+  it("falls back to the loopback peer when tunnel markers lack a usable IP", () => {
+    expect(
+      resolveRateLimitIdentity(
+        headersOf({ [PEER_IP_HEADER]: "127.0.0.1", "cf-ray": "abc-DEL" })
+      )
+    ).toEqual({ ip: "127.0.0.1", via: "direct-peer" });
+  });
+
+  it("returns unknown when no peer IP is verifiable (fail-open signal)", () => {
+    expect(resolveRateLimitIdentity(headersOf({}))).toEqual({
+      ip: null,
+      via: "unknown",
+    });
+  });
+});
+
+describe("isProbeTargetBlocked (P9 L-4)", () => {
+  it("blocks link-local and metadata targets", () => {
+    for (const url of [
+      "http://169.254.169.254/latest/meta-data/",
+      "http://169.254.169.254:80/api/health",
+      "http://169.254.10.20/api/health",
+      "http://[::ffff:169.254.169.254]/api/health",
+      "http://metadata.google.internal/computeMetadata/v1/",
+      "http://foo.metadata.google.internal/",
+    ]) {
+      expect(isProbeTargetBlocked(url)).not.toBeNull();
+    }
+  });
+
+  it("allows ordinary tunnel / LAN URLs", () => {
+    for (const url of [
+      "https://abc123.trycloudflare.com",
+      "http://192.168.1.9:3000",
+      "http://localhost:3000/",
+    ]) {
+      expect(isProbeTargetBlocked(url)).toBeNull();
+    }
+  });
+
+  it("refuses non-http(s) and unparseable URLs", () => {
+    expect(isProbeTargetBlocked("ftp://example.com/x")).not.toBeNull();
+    expect(isProbeTargetBlocked("not a url")).not.toBeNull();
   });
 });
 
@@ -226,6 +388,17 @@ describe("probeJudgeHealth (P7b, mocked fetch)", () => {
     expect(probe.reachable).toBe(false);
     expect(probe.remoteInstanceId).toBeNull();
     expect(probe.error).toBe("fetch failed");
+  });
+
+  it("refuses link-local / metadata targets WITHOUT fetching (P9 L-4)", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ instanceId: "x" }));
+    const probe = await probeJudgeHealth(
+      "http://169.254.169.254/latest/meta-data/",
+      fetchImpl as typeof fetch
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(probe.reachable).toBe(false);
+    expect(probe.error).toMatch(/link-local/);
   });
 });
 

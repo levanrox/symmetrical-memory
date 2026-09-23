@@ -24,8 +24,10 @@ import {
   drawVersions,
   importBatches,
   importBatchItems,
+  matches,
+  matchSlots,
 } from "@/db/schema";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import {
   athleteCategoryWarnings,
   checkAthleteFields,
@@ -965,6 +967,17 @@ const ENTITY_TABLE = {
  * Roll back one import batch: delete rows it created (entries first, then
  * athletes, then categories, so FKs stay happy) and restore the before-image
  * of rows it updated. The batch itself is kept and stamped rolledBackAt.
+ *
+ * P9 M-3 safety:
+ * (a) Before deleting anything, created athletes/categories are checked for
+ *     references in matchSlots / matches / draws (and for category entries
+ *     NOT created by this batch). If any exist, the rollback is REFUSED with
+ *     an error listing the blockers — deleting would otherwise corrupt draws
+ *     (phantom byes via `set null`, or cascade-deleted matches/draws).
+ * (b) The whole rollback runs inside a single DB transaction: either every
+ *     delete/restore/refresh lands, or none does.
+ * (c) `categories.athletesCount` is refreshed for every category that lost
+ *     entries, so the cached counts never go stale after a rollback.
  */
 export async function rollbackImportBatch(
   tournamentId: string,
@@ -983,35 +996,186 @@ export async function rollbackImportBatch(
     .from(importBatchItems)
     .where(eq(importBatchItems.batchId, batchId));
 
-  let deleted = 0;
-  let restored = 0;
+  const createdAthleteIds = items
+    .filter((i) => i.entity === "athlete" && i.before === null)
+    .map((i) => i.entityId);
+  const createdCategoryIds = items
+    .filter((i) => i.entity === "category" && i.before === null)
+    .map((i) => i.entityId);
+  const createdEntryIds = items
+    .filter((i) => i.entity === "category_entry" && i.before === null)
+    .map((i) => i.entityId);
 
-  // 1. Delete created rows, children before parents.
-  for (const entity of ["category_entry", "athlete", "category"] as const) {
-    const created = items.filter((i) => i.entity === entity && i.before === null);
-    if (created.length === 0) continue;
-    const table = ENTITY_TABLE[entity];
-    await db.delete(table).where(
-      inArray(table.id, created.map((i) => i.entityId))
-    );
-    deleted += created.length;
-  }
+  return db.transaction(async (tx) => {
+    // ---- (a) Reference check: refuse when created rows are in use ---------
+    const blockers: string[] = [];
+    if (createdAthleteIds.length > 0) {
+      const nameRows = await tx
+        .select({ id: athletes.id, name: athletes.name })
+        .from(athletes)
+        .where(inArray(athletes.id, createdAthleteIds));
+      const names = new Map(nameRows.map((r) => [r.id, r.name]));
 
-  // 2. Restore updated rows to their before-image.
-  for (const item of items.filter((i) => i.before !== null)) {
-    const table = ENTITY_TABLE[item.entity as keyof typeof ENTITY_TABLE];
-    if (!table) continue;
-    const before = { ...(item.before as Record<string, unknown>) };
-    delete before.id;
-    delete before.createdAt;
-    await db.update(table).set(before).where(eq(table.id, item.entityId));
-    restored++;
-  }
+      // matchSlots.athleteId is ON DELETE SET NULL: deleting would leave
+      // phantom byes in someone's draw.
+      const slotted = await tx
+        .select({ matchId: matchSlots.matchId, athleteId: matchSlots.athleteId })
+        .from(matchSlots)
+        .where(inArray(matchSlots.athleteId, createdAthleteIds));
+      const slottedByAthlete = new Map<string, string[]>();
+      for (const s of slotted) {
+        if (!s.athleteId) continue;
+        const list = slottedByAthlete.get(s.athleteId) ?? [];
+        list.push(s.matchId);
+        slottedByAthlete.set(s.athleteId, list);
+      }
+      for (const [athleteId, matchIds] of slottedByAthlete) {
+        blockers.push(
+          `athlete "${names.get(athleteId) ?? athleteId}" is slotted in match(es): ${matchIds.join(", ")}`
+        );
+      }
 
-  await db
-    .update(importBatches)
-    .set({ rolledBackAt: new Date() })
-    .where(eq(importBatches.id, batchId));
+      // matches.winnerId is ON DELETE SET NULL: deleting would erase winners.
+      const won = await tx
+        .select({ id: matches.id, winnerId: matches.winnerId })
+        .from(matches)
+        .where(inArray(matches.winnerId, createdAthleteIds));
+      const wonByAthlete = new Map<string, string[]>();
+      for (const m of won) {
+        if (!m.winnerId) continue;
+        const list = wonByAthlete.get(m.winnerId) ?? [];
+        list.push(m.id);
+        wonByAthlete.set(m.winnerId, list);
+      }
+      for (const [athleteId, matchIds] of wonByAthlete) {
+        blockers.push(
+          `athlete "${names.get(athleteId) ?? athleteId}" is recorded as winner of match(es): ${matchIds.join(", ")}`
+        );
+      }
 
-  return { batchId, deleted, restored };
+      // Entries NOT created by this batch would be cascade-deleted with the
+      // athlete (categoryEntries.athleteId is ON DELETE CASCADE).
+      const strayEntries =
+        createdEntryIds.length > 0
+          ? await tx
+              .select({ athleteId: categoryEntries.athleteId })
+              .from(categoryEntries)
+              .where(
+                and(
+                  inArray(categoryEntries.athleteId, createdAthleteIds),
+                  not(inArray(categoryEntries.id, createdEntryIds))
+                )
+              )
+          : await tx
+              .select({ athleteId: categoryEntries.athleteId })
+              .from(categoryEntries)
+              .where(inArray(categoryEntries.athleteId, createdAthleteIds));
+      const strayByAthlete = new Map<string, number>();
+      for (const e of strayEntries) {
+        strayByAthlete.set(e.athleteId, (strayByAthlete.get(e.athleteId) ?? 0) + 1);
+      }
+      for (const [athleteId, count] of strayByAthlete) {
+        blockers.push(
+          `athlete "${names.get(athleteId) ?? athleteId}" has ${count} categor(ies) entry(ies) not created by this import`
+        );
+      }
+    }
+
+    if (createdCategoryIds.length > 0) {
+      const catRows = await tx
+        .select({ id: categories.id, name: categories.name })
+        .from(categories)
+        .where(inArray(categories.id, createdCategoryIds));
+      const catNames = new Map(catRows.map((r) => [r.id, r.name]));
+
+      // draws.categoryId and matches.categoryId are ON DELETE CASCADE:
+      // deleting the category would silently nuke the draw and its matches.
+      const drawn = await tx
+        .select({ categoryId: draws.categoryId })
+        .from(draws)
+        .where(inArray(draws.categoryId, createdCategoryIds));
+      for (const d of new Set(drawn.map((r) => r.categoryId))) {
+        blockers.push(
+          `category "${catNames.get(d) ?? d}" has a draw (it would be cascade-deleted)`
+        );
+      }
+      const matched = await tx
+        .select({ categoryId: matches.categoryId })
+        .from(matches)
+        .where(inArray(matches.categoryId, createdCategoryIds));
+      const matchCountByCat = new Map<string, number>();
+      for (const m of matched) {
+        matchCountByCat.set(m.categoryId, (matchCountByCat.get(m.categoryId) ?? 0) + 1);
+      }
+      for (const [catId, count] of matchCountByCat) {
+        blockers.push(
+          `category "${catNames.get(catId) ?? catId}" has ${count} match(es) (they would be cascade-deleted)`
+        );
+      }
+    }
+
+    if (blockers.length > 0) {
+      throw new Error(
+        `Cannot roll back this import: created rows are referenced elsewhere, ` +
+          `and deleting them would corrupt draws or results:\n- ${blockers.join("\n- ")}\n` +
+          `Detach or delete those references first, then roll back again.`
+      );
+    }
+
+    // Categories whose entries are about to be deleted (captured before the
+    // delete so athletesCount can be refreshed afterwards).
+    let touchedCategoryIds: string[] = [];
+    if (createdEntryIds.length > 0) {
+      const rows = await tx
+        .select({ categoryId: categoryEntries.categoryId })
+        .from(categoryEntries)
+        .where(inArray(categoryEntries.id, createdEntryIds));
+      touchedCategoryIds = [...new Set(rows.map((r) => r.categoryId))];
+    }
+
+    // ---- (b) Deletes + restores + stamp, atomically ------------------------
+    let deleted = 0;
+    let restored = 0;
+
+    // 1. Delete created rows, children before parents.
+    for (const entity of ["category_entry", "athlete", "category"] as const) {
+      const created = items.filter((i) => i.entity === entity && i.before === null);
+      if (created.length === 0) continue;
+      const table = ENTITY_TABLE[entity];
+      await tx.delete(table).where(
+        inArray(table.id, created.map((i) => i.entityId))
+      );
+      deleted += created.length;
+    }
+
+    // 2. Restore updated rows to their before-image.
+    for (const item of items.filter((i) => i.before !== null)) {
+      const table = ENTITY_TABLE[item.entity as keyof typeof ENTITY_TABLE];
+      if (!table) continue;
+      const before = { ...(item.before as Record<string, unknown>) };
+      delete before.id;
+      delete before.createdAt;
+      await tx.update(table).set(before).where(eq(table.id, item.entityId));
+      restored++;
+    }
+
+    await tx
+      .update(importBatches)
+      .set({ rolledBackAt: new Date() })
+      .where(eq(importBatches.id, batchId));
+
+    // ---- (c) Refresh cached entrant counts ---------------------------------
+    for (const catId of touchedCategoryIds) {
+      const [{ count }] = await tx
+        .select({ count: sql<number>`count(*)::int` })
+        .from(categoryEntries)
+        .where(eq(categoryEntries.categoryId, catId));
+      await tx
+        .update(categories)
+        .set({ athletesCount: count ?? 0 })
+        .where(eq(categories.id, catId));
+    }
+
+    return { batchId, deleted, restored };
+  });
 }

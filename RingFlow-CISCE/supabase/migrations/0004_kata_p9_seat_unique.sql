@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "judge_requests_ring_seat_approved_uniq" ON "judge_requests" USING btree ("ring_id","seat_number") WHERE "judge_requests"."status" = 'approved';
