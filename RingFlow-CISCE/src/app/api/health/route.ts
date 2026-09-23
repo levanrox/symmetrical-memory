@@ -1,6 +1,7 @@
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { connect } from "node:net";
+import { randomUUID } from "node:crypto";
 import { logger } from "@/lib/logger";
 
 /**
@@ -8,6 +9,17 @@ import { logger } from "@/lib/logger";
  * Used as the Docker HEALTHCHECK. Fails (503) when the DB pool or the
  * Realtime socket is unreachable.
  */
+
+/**
+ * Per-boot instance identifier (PHASE P7a).
+ *
+ * Generated once at module load, so it is stable for the whole process
+ * lifetime but different on every restart. The admin "Test" button fetches
+ * `<public-tunnel-url>/api/health` and compares this value with the one the
+ * local server reports, proving the pasted URL reaches THIS server and not
+ * a stale/typo'd one.
+ */
+const INSTANCE_ID = randomUUID();
 
 /** TCP connect probe — the realtime server has no unauthenticated HTTP
  * health endpoint, so a socket connect is the honest reachability signal. */
@@ -56,7 +68,12 @@ export async function GET() {
   }
 
   return Response.json(
-    { status: ok ? "ok" : "degraded", checks, time: new Date().toISOString() },
+    {
+      status: ok ? "ok" : "degraded",
+      instanceId: INSTANCE_ID,
+      checks,
+      time: new Date().toISOString(),
+    },
     { status: ok ? 200 : 503 }
   );
 }

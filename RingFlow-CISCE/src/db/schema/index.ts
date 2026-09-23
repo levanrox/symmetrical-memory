@@ -80,6 +80,51 @@ export const rings = pgTable(
   (table) => [unique().on(table.tournamentId, table.name)]
 );
 
+// =========================================================================
+// 1b. CSV/Excel Import Batches (P6 imports: categories + athletes)
+// =========================================================================
+// Every committed import writes one import_batches row. Each row it created
+// or updated gets an import_batch_items record carrying a before-image
+// (null for created rows) and an after-image, so a whole batch can be
+// rolled back with one click.
+
+export const importBatches = pgTable('import_batches', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  tournamentId: uuid('tournament_id')
+    .notNull()
+    .references(() => tournaments.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(), // 'categories' | 'athletes'
+  filename: text('filename'),
+  rowCounts: jsonb('row_counts')
+    .notNull()
+    .default({ created: 0, updated: 0, skipped: 0, errors: 0 }),
+  createdBy: text('created_by'),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+    .notNull()
+    .defaultNow(),
+  rolledBackAt: timestamp('rolled_back_at', { withTimezone: true, mode: 'date' }),
+});
+
+export const importBatchItems = pgTable(
+  'import_batch_items',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    batchId: uuid('batch_id')
+      .notNull()
+      .references(() => importBatches.id, { onDelete: 'cascade' }),
+    entity: text('entity').notNull(), // 'category' | 'athlete' | 'category_entry'
+    entityId: uuid('entity_id').notNull(),
+    // Full row JSON before the import touched it (null when the row was created).
+    before: jsonb('before'),
+    // Full row JSON after the import wrote it.
+    after: jsonb('after'),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [unique().on(table.batchId, table.entity, table.entityId)]
+);
+
 export const categories = pgTable('categories', {
   id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
   tournamentId: uuid('tournament_id')
@@ -97,8 +142,23 @@ export const categories = pgTable('categories', {
   sex: text('sex'),
   day: text('day'),
   docUrl: text('doc_url'),
+  // Short organiser-facing alias used by CSV imports to match athlete rows
+  // to this category (e.g. "KU12M"). Optional, unique per tournament.
+  code: text('code'),
   // Null means "inherit the tournament's default".
   bronzeMedals: integer('bronze_medals'),
+  // Kata draw configuration (P2). Nulls mean "use the WKF default":
+  // kata_format null -> 'SINGLE_ELIM_REPECHAGE',
+  // kata_advance_per_group null -> 2, kata_ranking_method null -> 'WKF_VICTORY_POINTS'.
+  // kata_group_size is an explicit override: target athletes per group, which
+  // replaces the WKF 3.7.9 group-count table (groupCount = ceil(n / kata_group_size)).
+  kataFormat: text('kata_format'),
+  kataGroupSize: integer('kata_group_size'),
+  kataAdvancePerGroup: integer('kata_advance_per_group'),
+  kataRankingMethod: text('kata_ranking_method'),
+  importBatchId: uuid('import_batch_id').references(() => importBatches.id, {
+    onDelete: 'set null',
+  }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
     .notNull()
     .defaultNow(),
@@ -123,6 +183,9 @@ export const athletes = pgTable('athletes', {
   schoolCode: text('school_code'),
   sportsId: text('sports_id'),
   weight: numeric('weight', { precision: 5, scale: 2 }),
+  importBatchId: uuid('import_batch_id').references(() => importBatches.id, {
+    onDelete: 'set null',
+  }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
     .notNull()
     .defaultNow(),
@@ -284,6 +347,9 @@ export const categoryEntries = pgTable(
       .notNull()
       .references(() => athletes.id, { onDelete: 'cascade' }),
     seed: integer('seed'),
+    importBatchId: uuid('import_batch_id').references(() => importBatches.id, {
+      onDelete: 'set null',
+    }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
       .notNull()
       .defaultNow(),
@@ -310,6 +376,13 @@ export const draws = pgTable('draws', {
   state: text('state').notNull().default('DRAFT'), // 'DRAFT' | 'LOCKED'
   // What this draw was actually generated with, so it can be re-read honestly.
   bronzeMedals: integer('bronze_medals').notNull().default(2),
+  // Kata group-stage snapshot (P2): group membership plus the format config the
+  // draw was generated with, so the "fill elimination bracket from group
+  // results" phase can rebuild advancers without re-deriving anything.
+  // Shape: { format, rankingMethod, advancePerGroup, randomSeed,
+  //          groups: [{ id, name, memberIds: string[] }] }. Null for non-kata
+  // or single-elimination draws.
+  kataGroups: jsonb('kata_groups'),
   lockedAt: timestamp('locked_at', { withTimezone: true, mode: 'date' }),
   createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
     .notNull()
@@ -344,7 +417,10 @@ export const matches = pgTable(
     matchNo: integer('match_no').notNull(),
     roundNo: integer('round_no').notNull(),
     roundName: text('round_name').notNull(),
-    bracketType: text('bracket_type').notNull().default('MAIN'), // 'MAIN' | 'REPECHAGE_A' | 'REPECHAGE_B' | 'BRONZE'
+    bracketType: text('bracket_type').notNull().default('MAIN'), // 'MAIN' | 'REPECHAGE' | 'BRONZE' | 'POOL'
+    // Kata group-stage bouts carry the group they belong to (e.g. the pool id
+    // from the draw graph); null for ordinary bracket bouts.
+    groupId: text('group_id'),
     status: text('status').notNull().default('SCHEDULED'), // 'SCHEDULED' | 'READY' | 'LIVE' | 'COMPLETED' | 'CONFIRMED' | 'BYE'
     winnerId: uuid('winner_id').references(() => athletes.id, { onDelete: 'set null' }),
     akaScore: integer('aka_score').notNull().default(0),
@@ -408,6 +484,15 @@ export const tournamentsRelations = relations(tournaments, ({ one, many }) => ({
   registrations: many(tournamentRegistrations),
 }));
 
+export const importBatchesRelations = relations(importBatches, ({ one, many }) => ({
+  tournament: one(tournaments, { fields: [importBatches.tournamentId], references: [tournaments.id] }),
+  items: many(importBatchItems),
+}));
+
+export const importBatchItemsRelations = relations(importBatchItems, ({ one }) => ({
+  batch: one(importBatches, { fields: [importBatchItems.batchId], references: [importBatches.id] }),
+}));
+
 export const categoriesRelations = relations(categories, ({ one, many }) => ({
   tournament: one(tournaments, { fields: [categories.tournamentId], references: [tournaments.id] }),
   entries: many(categoryEntries),
@@ -461,3 +546,24 @@ export const eventLogRelations = relations(eventLog, ({ one }) => ({
   category: one(categories, { fields: [eventLog.categoryId], references: [categories.id] }),
 }));
 
+
+// =========================================================================
+// 5. App Settings (PHASE P7a)
+// =========================================================================
+
+/**
+ * Generic key/value store for operator-configurable app settings (e.g.
+ * `judge_base_url`, the public tunnel URL the admin pastes into Settings).
+ * Written via src/lib/judgeAccess.ts get/set helpers; JUDGE_BASE_URL env
+ * var still wins over the DB value so ops can override without the UI.
+ *
+ * NOTE: table added without `drizzle-kit generate` (P7a scope) — run
+ * `npm run db:push` (or the project's migrate job) to materialise it.
+ */
+export const appSettings = pgTable('app_settings', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+    .notNull()
+    .defaultNow(),
+});
