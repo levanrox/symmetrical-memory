@@ -21,6 +21,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   computeKataBoutDecision,
   confirmKataResult,
+  disqualifyKataSide,
   getKataBoutTally,
   setBoutKata,
   submitManualScore,
@@ -44,6 +45,8 @@ export interface KataConsoleMatch {
   akaKataNumber: number | null;
   aoKataNumber: number | null;
   winnerSide: string | null;
+  /** M4: side disqualified by the moderator ('AKA' | 'AO'), or null. */
+  disqualifiedSide: string | null;
   aka: { id: string | null; name: string };
   ao: { id: string | null; name: string };
 }
@@ -121,6 +124,41 @@ export default function KataBoutConsole({
     method: string;
   } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+
+  // Disqualify (M4) — two-step: first tap arms, second tap executes.
+  // The disqualified side's marks become 0.0 and the opponent wins by
+  // disqualification; this is the only legal path to a 0.0.
+  const [dqSide, setDqSide] = useState<"AKA" | "AO" | null>(
+    match.disqualifiedSide === "AKA" || match.disqualifiedSide === "AO"
+      ? match.disqualifiedSide
+      : null
+  );
+  const [dqPending, setDqPending] = useState<"AKA" | "AO" | null>(null);
+  const [dqBusy, setDqBusy] = useState(false);
+  const [dqError, setDqError] = useState<string | null>(null);
+
+  const handleDisqualify = async (side: "AKA" | "AO") => {
+    setDqError(null);
+    if (dqPending !== side) {
+      // Arm: require an explicit second tap before writing anything.
+      setDqPending(side);
+      return;
+    }
+    setDqBusy(true);
+    try {
+      await disqualifyKataSide(match.id, side);
+      setDqSide(side);
+      setDqPending(null);
+      showToast(`${side === "AKA" ? match.aka.name : match.ao.name} disqualified.`);
+      // The decision now resolves to the opponent by disqualification —
+      // refresh the decision + tally so the moderator sees it immediately.
+      await refreshTally();
+    } catch (e) {
+      setDqError(e instanceof Error ? e.message : "Could not disqualify.");
+    } finally {
+      setDqBusy(false);
+    }
+  };
 
   const showToast = (message: string) => {
     setToast(message);
@@ -650,6 +688,71 @@ export default function KataBoutConsole({
           </p>
         )}
       </div>
+
+      {/* Disqualify (M4) — moderator-only, LIVE bouts only. Two taps to
+          execute; the decision then resolves to the opponent by
+          disqualification (KATA_DISQUALIFICATION). */}
+      {!isConfirmed && dqSide == null && (
+        <div className="rounded-2xl border border-outline-variant bg-surface-container-lowest p-3 shadow-sm">
+          {dqError && (
+            <p className="mb-2 rounded-xl border border-error/30 bg-error/5 px-3 py-2 text-sm font-semibold text-error">
+              {dqError}
+            </p>
+          )}
+          {dqPending == null ? (
+            <div className="grid grid-cols-2 gap-2">
+              {(["AKA", "AO"] as const).map((side) => (
+                <button
+                  key={side}
+                  type="button"
+                  onClick={() => handleDisqualify(side)}
+                  className="flex min-h-[52px] items-center justify-center gap-2 rounded-xl border-2 border-error/40 bg-white px-3 text-sm font-black uppercase tracking-wide text-error transition-all hover:border-error cursor-pointer active:scale-[0.98]"
+                >
+                  <span className="material-symbols-outlined text-[20px]">do_not_disturb_on</span>
+                  Disqualify {side}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              <p className="rounded-xl border border-error/40 bg-error/5 px-3 py-2.5 text-sm font-bold text-error">
+                Disqualify {dqPending === "AKA" ? match.aka.name : match.ao.name} ({dqPending})?
+                Their marks become 0.0 and the opponent wins — tap again to confirm.
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setDqPending(null)}
+                  disabled={dqBusy}
+                  className="flex min-h-[52px] items-center justify-center rounded-xl border-2 border-outline-variant bg-white px-3 text-sm font-black uppercase tracking-wide text-on-surface cursor-pointer active:scale-[0.98] disabled:opacity-40"
+                >
+                  Keep
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDisqualify(dqPending)}
+                  disabled={dqBusy}
+                  className="flex min-h-[52px] items-center justify-center gap-2 rounded-xl bg-error px-3 text-sm font-black uppercase tracking-wide text-white shadow-md cursor-pointer active:scale-[0.98] disabled:opacity-40"
+                >
+                  {dqBusy ? (
+                    <span className="h-5 w-5 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  ) : (
+                    <span className="material-symbols-outlined text-[20px]">gavel</span>
+                  )}
+                  Disqualify
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {dqSide != null && !isConfirmed && (
+        <p className="flex items-center gap-2 rounded-2xl border border-error/40 bg-error/5 px-4 py-3 text-sm font-bold text-error">
+          <span className="material-symbols-outlined text-[20px]">do_not_disturb_on</span>
+          {dqSide === "AKA" ? match.aka.name : match.ao.name} ({dqSide}) disqualified —
+          {dqSide === "AKA" ? match.ao.name : match.aka.name} wins by disqualification.
+        </p>
+      )}
 
       {/* Confirm — sticky above the phone bottom nav, static on desktop */}
       <div className="sticky bottom-28 z-20 lg:static lg:z-auto">

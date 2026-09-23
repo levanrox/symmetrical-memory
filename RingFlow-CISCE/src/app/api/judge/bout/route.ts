@@ -28,15 +28,13 @@ import {
   athletes,
   categories,
   categoryAssignments,
+  judgeRequests,
   kataScores,
   matches,
   matchSlots,
   rings,
 } from "@/db/schema";
-import {
-  decideKataBout,
-  KataDecisionError,
-} from "@/engine/rules-engine/rulesets/kata-decision";
+import { KataDecisionError } from "@/engine/rules-engine/rulesets/kata-decision";
 import { getKataName } from "@/engine/rules-engine/rulesets/kata-list";
 import { checkIpRateLimit } from "@/lib/rateLimit";
 import { isKataCategory } from "@/lib/draws/generateDraws";
@@ -44,10 +42,8 @@ import {
   JUDGE_SESSION_COOKIE,
   validateJudgeSession,
 } from "@/lib/judge/session";
-import {
-  assertJudgeScoreScope,
-  kataScoresToJudgeInputs,
-} from "@/lib/judge/scores";
+import { assertJudgeScoreScope } from "@/lib/judge/scores";
+import { computeBoutDecisionFromRows } from "@/lib/judge/decision";
 
 const NO_BOUT = { noLiveBout: true } as const;
 
@@ -91,6 +87,7 @@ export async function GET() {
       categoryId: matches.categoryId,
       status: matches.status,
       winnerSide: matches.winnerSide,
+      disqualifiedSide: matches.disqualifiedSide,
       akaKataNumber: matches.akaKataNumber,
       aoKataNumber: matches.aoKataNumber,
     })
@@ -180,13 +177,24 @@ export async function GET() {
       aka: side(akaSlot, match.akaKataNumber),
       ao: side(aoSlot, match.aoKataNumber),
       myScores,
+      // M4: a disqualified side's marks are all treated as 0.0 by the
+      // decision engine — the judge UI shows a banner, not editable boxes.
+      disqualifiedSide:
+        match.disqualifiedSide === "AKA" || match.disqualifiedSide === "AO"
+          ? match.disqualifiedSide
+          : null,
     });
   }
 
   if (match.status === "COMPLETED" || match.status === "CONFIRMED") {
     // Result flash for the just-decided bout. Tally from all submitted
     // marks with the P1 decision engine (read-only); fall back to the
-    // stored winnerSide when there are no countable votes.
+    // stored winnerSide when there are no countable votes. DQ-aware: a
+    // disqualified side's marks are 0.0 and the opponent wins.
+    const disqualifiedSide =
+      match.disqualifiedSide === "AKA" || match.disqualifiedSide === "AO"
+        ? match.disqualifiedSide
+        : null;
     let akaVotes: number | null = null;
     let aoVotes: number | null = null;
     try {
@@ -199,7 +207,25 @@ export async function GET() {
         })
         .from(kataScores)
         .where(eq(kataScores.matchId, match.id));
-      const decision = decideKataBout(kataScoresToJudgeInputs(rows));
+      // M2: the flash tallies through the same lens as the decision — only
+      // the seats' current occupants' marks count.
+      const approved = await db
+        .select({ id: judgeRequests.id, seatNumber: judgeRequests.seatNumber })
+        .from(judgeRequests)
+        .where(
+          and(
+            eq(judgeRequests.ringId, session.ringId),
+            eq(judgeRequests.status, "approved")
+          )
+        );
+      const currentBySeat = new Map<number, string>();
+      for (const r of approved) {
+        if (r.seatNumber != null) currentBySeat.set(r.seatNumber, r.id);
+      }
+      const decision = computeBoutDecisionFromRows(rows, {}, {
+        currentBySeat,
+        disqualifiedSide,
+      });
       akaVotes = decision.akaVotes;
       aoVotes = decision.aoVotes;
     } catch (err) {
@@ -222,6 +248,7 @@ export async function GET() {
       winnerSide,
       akaVotes,
       aoVotes,
+      disqualifiedSide,
     });
   }
 

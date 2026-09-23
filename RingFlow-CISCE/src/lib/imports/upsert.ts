@@ -26,6 +26,7 @@ import {
   importBatchItems,
   matches,
   matchSlots,
+  tournamentCategoryDefinitions,
 } from "@/db/schema";
 import { and, desc, eq, inArray, not, sql } from "drizzle-orm";
 import {
@@ -668,6 +669,63 @@ export type CommitInput = {
   resolutions?: ImportResolutions;
 };
 
+/**
+ * M6: persist the import's resolved event type into
+ * `tournament_category_definitions` — the table `isKataCategory` prefers
+ * over the name fallback. Without this, a category imported as
+ * event_type=kata but named e.g. "Forms U12" silently behaves as kumite.
+ *
+ * - No definition row for (tournament, name) yet: insert one with the
+ *   resolved event type (inferred or explicit — it records what the draw
+ *   engine would use anyway).
+ * - A definition row exists: update its event_type only when the import
+ *   EXPLICITLY chose one (preview override dropdown or event_type column).
+ *   An inferred type must never clobber an organiser-curated definition.
+ * Name matching is case-insensitive, mirroring `isKataCategory`.
+ */
+async function syncCategoryDefinition(
+  tournamentId: string,
+  category: {
+    name: string;
+    sex: string | null;
+    ageMin: number | null;
+    ageMax: number | null;
+  },
+  eventType: EventType,
+  explicitEventType: boolean
+): Promise<void> {
+  const rows = await db
+    .select({
+      id: tournamentCategoryDefinitions.id,
+      categoryName: tournamentCategoryDefinitions.categoryName,
+      eventType: tournamentCategoryDefinitions.eventType,
+    })
+    .from(tournamentCategoryDefinitions)
+    .where(eq(tournamentCategoryDefinitions.tournamentId, tournamentId));
+  const norm = category.name.toLowerCase().trim();
+  const existing = rows.find(
+    (r) => r.categoryName.toLowerCase().trim() === norm
+  );
+  if (existing) {
+    if (explicitEventType && existing.eventType !== eventType) {
+      await db
+        .update(tournamentCategoryDefinitions)
+        .set({ eventType })
+        .where(eq(tournamentCategoryDefinitions.id, existing.id));
+    }
+    return;
+  }
+  const sex = (category.sex ?? "").toUpperCase();
+  await db.insert(tournamentCategoryDefinitions).values({
+    tournamentId,
+    categoryName: category.name,
+    eventType,
+    gender: sex === "M" ? "M" : sex === "F" ? "F" : "any",
+    minAge: category.ageMin,
+    maxAge: category.ageMax,
+  });
+}
+
 export async function commitCategoryImport(input: CommitInput): Promise<ImportSummary> {
   const { tournamentId, filename, createdBy, fieldRows, resolutions } = input;
   const present = new Set(input.presentColumns);
@@ -707,6 +765,14 @@ export async function commitCategoryImport(input: CommitInput): Promise<ImportSu
           voided.add(plan.matchedCategoryId);
           voidedDraws.push(plan.matchedCategoryId);
           lockedIds.delete(plan.matchedCategoryId);
+          // M1: the first plan pass already recorded this row's code in
+          // planInput.seenCodes. Forget it before re-planning, or the
+          // in-file duplicate-code guard trips on the row itself and the
+          // row is spuriously skipped.
+          const recheck = checkCategoryFields(rawFields);
+          if (recheck.fields.code) {
+            planInput.seenCodes.delete(normalizeName(recheck.fields.code));
+          }
           plan = planCategoryRow(rowNumber, rawFields, present, planInput);
         }
       }
@@ -724,8 +790,26 @@ export async function commitCategoryImport(input: CommitInput): Promise<ImportSu
     }
     if (plan.action === "skip") {
       skipped++;
+      // M6: a row skipped for "no changes" may still carry an explicit
+      // event_type choice from the preview — persist it so the definition
+      // table (which drives isKataCategory) doesn't silently disagree.
+      const existingRow = planInput.existing.find((c) => c.id === plan.matchedCategoryId);
+      if (existingRow) {
+        const override = resolutions?.eventTypeOverrides?.[rowNumber];
+        const explicitCol = ((plan.fields.event_type as string) ?? "").trim() !== "";
+        if (override != null || explicitCol) {
+          await syncCategoryDefinition(tournamentId, existingRow, plan.eventType, true);
+        }
+      }
       continue;
     }
+
+    // M6: the resolved event type (override > explicit column > inference)
+    // is persisted per imported category; it is explicit when the organiser
+    // chose it in the preview or the file had an event_type column.
+    const rowOverride = resolutions?.eventTypeOverrides?.[rowNumber];
+    const rowExplicitCol = ((plan.fields.event_type as string) ?? "").trim() !== "";
+    const rowExplicit = rowOverride != null || rowExplicitCol;
 
     if (plan.action === "create") {
       const values = buildInsertValues(plan.fields, mapCategoryField);
@@ -741,6 +825,7 @@ export async function commitCategoryImport(input: CommitInput): Promise<ImportSu
       await recordItem(batch.id, "category", inserted.id, null, toJson(inserted as unknown as Record<string, unknown>));
       planInput.existing.push(inserted);
       created++;
+      await syncCategoryDefinition(tournamentId, inserted, plan.eventType, rowExplicit);
     } else {
       // update
       const matched = planInput.existing.find((c) => c.id === plan.matchedCategoryId)!;
@@ -765,6 +850,7 @@ export async function commitCategoryImport(input: CommitInput): Promise<ImportSu
       );
       Object.assign(matched, updatedRow);
       updated++;
+      await syncCategoryDefinition(tournamentId, matched, plan.eventType, rowExplicit);
     }
   }
 
@@ -1110,6 +1196,35 @@ export async function rollbackImportBatch(
       for (const [catId, count] of matchCountByCat) {
         blockers.push(
           `category "${catNames.get(catId) ?? catId}" has ${count} match(es) (they would be cascade-deleted)`
+        );
+      }
+
+      // M5: categoryEntries.categoryId is ON DELETE CASCADE — deleting a
+      // created category would silently wipe entries OTHER batches created
+      // (e.g. an athlete import that entered athletes into this category
+      // afterwards). Mirror the athlete branch's stray-entries check.
+      const strayCatEntries =
+        createdEntryIds.length > 0
+          ? await tx
+              .select({ categoryId: categoryEntries.categoryId })
+              .from(categoryEntries)
+              .where(
+                and(
+                  inArray(categoryEntries.categoryId, createdCategoryIds),
+                  not(inArray(categoryEntries.id, createdEntryIds))
+                )
+              )
+          : await tx
+              .select({ categoryId: categoryEntries.categoryId })
+              .from(categoryEntries)
+              .where(inArray(categoryEntries.categoryId, createdCategoryIds));
+      const strayByCat = new Map<string, number>();
+      for (const e of strayCatEntries) {
+        strayByCat.set(e.categoryId, (strayByCat.get(e.categoryId) ?? 0) + 1);
+      }
+      for (const [catId, count] of strayByCat) {
+        blockers.push(
+          `category "${catNames.get(catId) ?? catId}" has ${count} categor(ies) entry(ies) not created by this import`
         );
       }
     }

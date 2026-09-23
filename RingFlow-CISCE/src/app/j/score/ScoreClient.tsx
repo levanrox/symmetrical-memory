@@ -28,6 +28,7 @@ import {
   QUICK_SET_TENTHS,
   formatTenths,
   generateIdempotencyKey,
+  keyForSubmit,
   stepTenths,
   tenthsToPoints,
 } from "@/lib/judge/scoreEntry";
@@ -49,6 +50,8 @@ interface LiveBout {
   aka: SideInfo;
   ao: SideInfo;
   myScores: { aka: number | null; ao: number | null };
+  /** M4: side disqualified by the moderator — marks for it count as 0.0. */
+  disqualifiedSide: "AKA" | "AO" | null;
 }
 
 interface ConfirmedBout {
@@ -60,6 +63,7 @@ interface ConfirmedBout {
   winnerSide: "AKA" | "AO" | null;
   akaVotes: number | null;
   aoVotes: number | null;
+  disqualifiedSide: "AKA" | "AO" | null;
 }
 
 type Screen =
@@ -74,6 +78,10 @@ type SubmitPhase = "idle" | "sending" | "saved" | "error";
 interface SideEntry {
   draft: number | null; // integer tenths
   idempotencyKey: string;
+  /** Draft value the server last acknowledged (null = nothing saved yet). */
+  savedTenths: number | null;
+  /** True when the server answered { duplicate: true } for the last submit. */
+  duplicate: boolean;
   phase: SubmitPhase;
   error: string | null;
 }
@@ -87,6 +95,8 @@ function freshEntry(): SideEntry {
   return {
     draft: null,
     idempotencyKey: generateIdempotencyKey(),
+    savedTenths: null,
+    duplicate: false,
     phase: "idle",
     error: null,
   };
@@ -221,7 +231,9 @@ function ScoreCard({
         <div aria-live="polite" className="mt-2 min-h-6 text-center">
           {entry.phase === "saved" && (
             <p className="text-emerald-700 font-bold">
-              Saved ✓ — you can still change it until the bout is confirmed.
+              {entry.duplicate
+                ? "Already recorded — no change was made."
+                : "Saved ✓ — you can still change it until the bout is confirmed."}
             </p>
           )}
           {entry.phase === "error" && (
@@ -381,8 +393,24 @@ export function ScoreClient() {
       const entry = side === "AKA" ? aka : ao;
       if (entry.draft == null || entry.phase === "sending") return;
       const draft = entry.draft;
-      const idempotencyKey = entry.idempotencyKey;
-      setEntry({ ...entry, phase: "sending", error: null });
+      // Idempotency contract with POST /api/judge/scores: a repeated key is
+      // answered { duplicate: true } WITHOUT touching the stored mark. So
+      // the key is rotated whenever the draft changed since the last save
+      // (a correction must upsert), and kept stable across retries of the
+      // same value (that's what the key is for). See keyForSubmit.
+      const { key: idempotencyKey, rotated } = keyForSubmit(
+        { key: entry.idempotencyKey, savedTenths: entry.savedTenths },
+        draft
+      );
+      setEntry({
+        ...entry,
+        phase: "sending",
+        error: null,
+        duplicate: false,
+        // A rotated key becomes the entry's key so a retry of THIS submit
+        // reuses it instead of minting yet another one.
+        idempotencyKey: rotated ? idempotencyKey : entry.idempotencyKey,
+      });
       (async () => {
         try {
           const res = await fetch("/api/judge/scores", {
@@ -397,6 +425,7 @@ export function ScoreClient() {
           });
           const body = (await res.json().catch(() => ({}))) as {
             error?: string;
+            duplicate?: boolean;
           };
           if (res.status === 401) {
             setScreen({ kind: "unauthorized" });
@@ -405,8 +434,18 @@ export function ScoreClient() {
           if (!res.ok) {
             throw new Error(body.error ?? "Could not save. Check your connection.");
           }
-          // Same idempotency key stays: a later correction upserts the row.
-          setEntry((e) => ({ ...e, phase: "saved", error: null }));
+          // duplicate:true means the server saw this key before and changed
+          // nothing — surface it honestly instead of claiming a fresh save.
+          const wasDuplicate = body.duplicate === true;
+          setEntry((e) => ({
+            ...e,
+            phase: "saved",
+            error: null,
+            duplicate: wasDuplicate,
+            // Only a real write moves the saved watermark; a duplicate
+            // answer leaves it where it was.
+            savedTenths: wasDuplicate ? e.savedTenths : draft,
+          }));
           const timer = setTimeout(() => {
             setEntry((e) =>
               e.phase === "saved" ? { ...e, phase: "idle" } : e
@@ -523,6 +562,11 @@ export function ScoreClient() {
             {scoreLine}
           </p>
         )}
+        {r.disqualifiedSide != null && (
+          <p className="mt-2 text-sm font-black uppercase tracking-wide text-red-600">
+            Win by disqualification
+          </p>
+        )}
         <p className="mt-4 text-neutral-500 font-medium">
           Next bout appears automatically…
         </p>
@@ -540,6 +584,18 @@ export function ScoreClient() {
         </p>
       </header>
       <div className="flex-1 w-full max-w-md mx-auto px-4 py-4 flex flex-col gap-5">
+        {/* M4: a disqualified side's marks count as 0.0 and the opponent
+            wins — make it unmissable for the judges. */}
+        {bout.disqualifiedSide != null && (
+          <div role="alert" className="rounded-2xl border-2 border-red-500 bg-red-600/15 px-4 py-3 text-center">
+            <p className="text-base font-black uppercase tracking-wide text-red-400">
+              {bout.disqualifiedSide === "AKA" ? bout.aka.name : bout.ao.name} disqualified
+            </p>
+            <p className="mt-1 text-sm font-semibold text-red-200">
+              {bout.disqualifiedSide === "AKA" ? bout.ao.name : bout.aka.name} wins by disqualification.
+            </p>
+          </div>
+        )}
         <ScoreCard
           side="AKA"
           accent={{ band: "bg-red-600", ring: "ring-red-600" }}

@@ -48,6 +48,7 @@ function unanimousBout(
     aoId,
     winnerId: winnerSide === "AKA" ? akaId : aoId,
     scores,
+    disqualifiedSide: null,
   };
 }
 
@@ -97,6 +98,7 @@ describe("toGroupBoutResults", () => {
         aoId: "b",
         winnerId: "a",
         scores: [], // confirmed without countable votes (defensive path)
+        disqualifiedSide: null,
       },
     ]);
     expect(results).toHaveLength(1);
@@ -105,7 +107,7 @@ describe("toGroupBoutResults", () => {
 });
 
 describe("group stage -> elimination fill-in (pure chain)", () => {
-  it("ranks round-robin groups and fills TBD elimination slots in bracket order", () => {
+  it("ranks round-robin groups and seeds the elimination bracket (winners vs opposite runners-up)", () => {
     // Two groups of three. In each: a beats b, b beats c, a beats c.
     const bouts = [
       unanimousBout("m1", "g1", "a1", "b1", "AKA"),
@@ -143,11 +145,13 @@ describe("group stage -> elimination fill-in (pure chain)", () => {
       ],
       advancers
     );
+    // M3: seedPositions(4) = [1,4,2,3] — winners meet the OTHER group's
+    // runners-up: QF1 = a1(W1) vs b2(R2), QF2 = a2(W2) vs b1(R1).
     expect(plan).toEqual([
       { matchId: "q1", position: 1, athleteId: "a1" },
-      { matchId: "q1", position: 2, athleteId: "a2" },
-      { matchId: "q2", position: 1, athleteId: "b1" },
-      { matchId: "q2", position: 2, athleteId: "b2" },
+      { matchId: "q1", position: 2, athleteId: "b2" },
+      { matchId: "q2", position: 1, athleteId: "a2" },
+      { matchId: "q2", position: 2, athleteId: "b1" },
     ]);
   });
 });

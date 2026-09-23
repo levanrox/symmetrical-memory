@@ -65,3 +65,37 @@ export function generateIdempotencyKey(): string {
   // unique enough per (bout, side) thanks to time + Math.random.
   return `key-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
 }
+
+/**
+ * State the client keeps per (bout, side) to decide the idempotency key for
+ * the next submit.
+ */
+export interface SubmitKeyState {
+  /** Key sent with the in-flight / last submit. */
+  key: string;
+  /** Draft value (tenths) the server last acknowledged, if any. */
+  savedTenths: number | null;
+}
+
+/**
+ * Idempotency-key rotation policy for score submits.
+ *
+ * Contract with POST /api/judge/scores: the server treats a repeated key as
+ * "the same submit" and answers `{ duplicate: true }` WITHOUT touching the
+ * stored mark. So a key may be reused ONLY for retries of the identical
+ * value — the moment the judge changes the mark after a save, the client
+ * must mint a fresh key, or the correction is silently dropped while the UI
+ * claims "SAVED ✓".
+ *
+ * - nothing saved yet, or retrying the same value -> keep the key (stable);
+ * - value differs from the last-saved value -> fresh key (correction).
+ */
+export function keyForSubmit(
+  state: SubmitKeyState,
+  draftTenths: number
+): { key: string; rotated: boolean } {
+  if (state.savedTenths == null || state.savedTenths === draftTenths) {
+    return { key: state.key, rotated: false };
+  }
+  return { key: generateIdempotencyKey(), rotated: true };
+}

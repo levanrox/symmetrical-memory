@@ -141,13 +141,14 @@ async function panelSizeForRing(ringId: string): Promise<number> {
 
 async function assertKataMatch(
   matchId: string
-): Promise<{ id: string; categoryId: string; status: string; groupId: string | null; tournamentId: string; categoryName: string }> {
+): Promise<{ id: string; categoryId: string; status: string; groupId: string | null; tournamentId: string; categoryName: string; disqualifiedSide: string | null }> {
   const [match] = await db
     .select({
       id: matches.id,
       categoryId: matches.categoryId,
       status: matches.status,
       groupId: matches.groupId,
+      disqualifiedSide: matches.disqualifiedSide,
     })
     .from(matches)
     .where(eq(matches.id, matchId))
@@ -172,7 +173,30 @@ async function assertKataMatch(
     groupId: match.groupId,
     tournamentId: cat.tournamentId,
     categoryName: cat.name,
+    disqualifiedSide: match.disqualifiedSide,
   };
+}
+
+/**
+ * M2: seat number -> judge_request id of the seat's currently-approved
+ * occupant on a ring. The decision and the tally both filter stored marks
+ * through this map, so a revoked judge's stale marks are never counted
+ * against their replacement's.
+ */
+async function currentSeatOccupants(
+  ringId: string
+): Promise<Map<number, string>> {
+  const rows = await db
+    .select({ id: judgeRequests.id, seatNumber: judgeRequests.seatNumber })
+    .from(judgeRequests)
+    .where(
+      and(eq(judgeRequests.ringId, ringId), eq(judgeRequests.status, "approved"))
+    );
+  const map = new Map<number, string>();
+  for (const r of rows) {
+    if (r.seatNumber != null) map.set(r.seatNumber, r.id);
+  }
+  return map;
 }
 
 // ---------------------------------------------------------------------------
@@ -714,7 +738,7 @@ export async function computeKataBoutDecision(matchId: string) {
   const ringId = await ringIdForMatchLocal(matchId);
   if (!ringId) throw new Error("Match is not currently assigned to a ring");
   await authorizeJudgeRing(ringId);
-  await assertKataMatch(matchId);
+  const bout = await assertKataMatch(matchId);
 
   const rows = await db
     .select({
@@ -727,7 +751,16 @@ export async function computeKataBoutDecision(matchId: string) {
     .where(eq(kataScores.matchId, matchId));
 
   try {
-    const decision = computeBoutDecisionFromRows(rows);
+    // M2: only the seats' current occupants count — stale marks from a
+    // revoked judge are ignored. M4: a disqualified side's marks become 0.0
+    // and the opponent wins, via the engine's DQ branch.
+    const decision = computeBoutDecisionFromRows(rows, {}, {
+      currentBySeat: await currentSeatOccupants(ringId),
+      disqualifiedSide:
+        bout.disqualifiedSide === "AKA" || bout.disqualifiedSide === "AO"
+          ? bout.disqualifiedSide
+          : null,
+    });
     return {
       success: true,
       decision: {
@@ -791,7 +824,17 @@ export async function confirmKataResult(
   try {
     decision = computeBoutDecisionFromRows(
       scoreRows,
-      moderatorDecision ? { moderatorDecision } : {}
+      moderatorDecision ? { moderatorDecision } : {},
+      {
+        // M2: only the seats' current occupants count. M4: a DQ overrides
+        // the votes — the disqualified side's marks become 0.0 and the
+        // opponent wins (KATA_DISQUALIFICATION).
+        currentBySeat: await currentSeatOccupants(ringId),
+        disqualifiedSide:
+          bout.disqualifiedSide === "AKA" || bout.disqualifiedSide === "AO"
+            ? bout.disqualifiedSide
+            : null,
+      }
     );
   } catch (err) {
     if (err instanceof KataDecisionError) throw new Error(err.message);
@@ -844,6 +887,7 @@ export async function confirmKataResult(
         akaTotal: decision.akaTotal,
         aoTotal: decision.aoTotal,
         judgesCounted: decision.judgesCounted,
+        disqualifiedSide: bout.disqualifiedSide,
       },
     });
 
@@ -921,6 +965,75 @@ export async function retryEliminationFill(categoryId: string) {
   return { success: true, filled };
 }
 
+/**
+ * M4: disqualify a side of a kata bout (moderator, ring-bound, kata LIVE
+ * bouts only). This is the ONLY legal path to a 0.0 in the decision: the
+ * decision engine zeroes the disqualified side's marks and awards the bout
+ * to the opponent with method KATA_DISQUALIFICATION. Idempotent per side;
+ * calling it again for the other side swaps the flag (both sides can never
+ * be disqualified at once — a bout with neither flag is the default).
+ *
+ * Throws when the bout is already CONFIRMED (a confirmed result is final;
+ * the moderator must ask the organiser for a re-open path instead).
+ */
+export async function disqualifyKataSide(matchId: string, side: "AKA" | "AO") {
+  const ringId = await ringIdForMatchLocal(matchId);
+  if (!ringId) throw new Error("Match is not currently assigned to a ring");
+  await authorizeJudgeRing(ringId);
+  const bout = await assertKataMatch(matchId);
+  if (bout.status === "CONFIRMED") {
+    throw new Error("Bout is already confirmed — the result cannot be disqualified now");
+  }
+
+  const [current] = await db
+    .select({ disqualifiedSide: matches.disqualifiedSide })
+    .from(matches)
+    .where(eq(matches.id, matchId))
+    .limit(1);
+
+  await db.transaction(async (tx) => {
+    await tx
+      .update(matches)
+      .set({ disqualifiedSide: side })
+      .where(eq(matches.id, matchId));
+
+    const [maxSeq] = await tx
+      .select({ maxSeq: sql<number | null>`max(${matchEvents.seq})` })
+      .from(matchEvents)
+      .where(eq(matchEvents.matchId, matchId));
+    await tx.insert(matchEvents).values({
+      matchId,
+      seq: (maxSeq?.maxSeq ?? 0) + 1,
+      type: "KATA_DISQUALIFIED",
+      payload: {
+        side,
+        previous: current?.disqualifiedSide ?? null,
+        recordedBy: "moderator",
+      },
+    });
+
+    await tx.insert(eventLog).values({
+      tournamentId: bout.tournamentId,
+      ringId,
+      categoryId: bout.categoryId,
+      action: "KATA_DISQUALIFIED",
+      metadata: { matchId, side, previous: current?.disqualifiedSide ?? null },
+    });
+  });
+
+  broadcastLiveEvent({
+    table: "matches",
+    op: "UPDATE",
+    categoryId: bout.categoryId,
+    ringId,
+    tournamentId: bout.tournamentId,
+    status: "disqualified",
+    data: { matchId, disqualifiedSide: side },
+  });
+  revalidatePath(`/ring/${ringId}`);
+  return { success: true, disqualifiedSide: side };
+}
+
 /** Read persisted group standings for a category (moderator tally UI). */
 export async function getKataGroupStandings(categoryId: string) {
   const [assignment] = await db
@@ -986,6 +1099,7 @@ export async function getKataBoutTally(matchId: string): Promise<{
   status: string;
   panelSize: number;
   seats: KataBoutSeatTally[];
+  disqualifiedSide: string | null;
 }> {
   const ringId = await ringIdForMatchLocal(matchId);
   if (!ringId) throw new Error("Match is not currently assigned to a ring");
@@ -995,6 +1109,7 @@ export async function getKataBoutTally(matchId: string): Promise<{
 
   const approved = await db
     .select({
+      id: judgeRequests.id,
       judgeName: judgeRequests.judgeName,
       seatNumber: judgeRequests.seatNumber,
     })
@@ -1006,6 +1121,7 @@ export async function getKataBoutTally(matchId: string): Promise<{
 
   const scoreRows = await db
     .select({
+      judgeRequestId: kataScores.judgeRequestId,
       seatNumber: kataScores.seatNumber,
       side: kataScores.side,
       scoreTenths: kataScores.scoreTenths,
@@ -1019,11 +1135,20 @@ export async function getKataBoutTally(matchId: string): Promise<{
     (_, i) => {
       const seatNumber = i + 1;
       const occupant = approved.find((a) => a.seatNumber === seatNumber);
+      // M2: a seat's tally shows only its CURRENT occupant's marks — marks
+      // from a revoked predecessor's session are excluded (they aren't
+      // counted in the decision either).
       const akaRow = scoreRows.find(
-        (r) => r.seatNumber === seatNumber && r.side === "AKA"
+        (r) =>
+          r.seatNumber === seatNumber &&
+          r.side === "AKA" &&
+          r.judgeRequestId === occupant?.id
       );
       const aoRow = scoreRows.find(
-        (r) => r.seatNumber === seatNumber && r.side === "AO"
+        (r) =>
+          r.seatNumber === seatNumber &&
+          r.side === "AO" &&
+          r.judgeRequestId === occupant?.id
       );
       return {
         seatNumber,
@@ -1038,7 +1163,13 @@ export async function getKataBoutTally(matchId: string): Promise<{
     }
   );
 
-  return { matchId, status: bout.status, panelSize, seats };
+  return {
+    matchId,
+    status: bout.status,
+    panelSize,
+    seats,
+    disqualifiedSide: bout.disqualifiedSide,
+  };
 }
 
 /**

@@ -36,6 +36,13 @@
       "when": 1790180427468,
       "tag": "0004_kata_p9_seat_unique",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1790181635373,
+      "tag": "0005_add-disqualified-side",
+      "breakpoints": true
     }
   ]
 }

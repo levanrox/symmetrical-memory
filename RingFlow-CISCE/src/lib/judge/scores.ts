@@ -44,14 +44,31 @@ export interface KataScoreRow {
 
 /**
  * Group raw `kata_scores` rows into P1 `KataJudgeScore` input: one entry per
- * distinct judgeRequestId, with `aka`/`ao` null until that side is submitted.
- * P1's `decideKataBout` excludes half-votes (only one side submitted) from
- * the vote count — this mapping preserves that by keeping the missing side
+ * distinct judge, with `aka`/`ao` null until that side is submitted. P1's
+ * `decideKataBout` excludes half-votes (only one side submitted) from the
+ * vote count — this mapping preserves that by keeping the missing side
  * null rather than defaulting it.
+ *
+ * Seats are re-occupiable mid-event (revoke -> re-approve): when
+ * `currentBySeat` (seatNumber -> judge_request id of the seat's
+ * currently-approved occupant) is given, marks from superseded requestIds
+ * are IGNORED, so a revoked judge's stale marks can never split the vote
+ * against their replacement's. The moderator tally applies the same rule —
+ * both sides of the screen must agree on whose marks are in. Without the
+ * map the legacy judgeRequestId grouping is used (pure unit tests).
  */
-export function kataScoresToJudgeInputs(rows: readonly KataScoreRow[]): KataJudgeScore[] {
+export function kataScoresToJudgeInputs(
+  rows: readonly KataScoreRow[],
+  currentBySeat?: ReadonlyMap<number, string> | null
+): KataJudgeScore[] {
   const byJudge = new Map<string, KataJudgeScore>();
   for (const r of rows) {
+    if (currentBySeat) {
+      // Only the seat's current occupant counts. Seats with no approved
+      // occupant have no legitimate marks — moderator manual entry creates
+      // an approved placeholder row, so it matches too.
+      if (currentBySeat.get(r.seatNumber) !== r.judgeRequestId) continue;
+    }
     let entry = byJudge.get(r.judgeRequestId);
     if (!entry) {
       entry = { judgeId: r.judgeRequestId, aka: null, ao: null };

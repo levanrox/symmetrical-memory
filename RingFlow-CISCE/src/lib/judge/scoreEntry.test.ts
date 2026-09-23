@@ -3,6 +3,7 @@ import {
   clampTenths,
   formatTenths,
   generateIdempotencyKey,
+  keyForSubmit,
   QUICK_SET_TENTHS,
   SCORE_MAX_TENTHS,
   SCORE_MIN_TENTHS,
@@ -97,5 +98,44 @@ describe("generateIdempotencyKey", () => {
     expect(k).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
     );
+  });
+});
+
+describe("keyForSubmit (B3)", () => {
+  const state = (key: string, savedTenths: number | null) => ({ key, savedTenths });
+
+  it("keeps the key for the first submit (nothing saved yet)", () => {
+    const { key, rotated } = keyForSubmit(state("k1", null), 80);
+    expect(key).toBe("k1");
+    expect(rotated).toBe(false);
+  });
+
+  it("keeps the key when retrying the same value after a save (idempotent retry)", () => {
+    const { key, rotated } = keyForSubmit(state("k1", 80), 80);
+    expect(key).toBe("k1");
+    expect(rotated).toBe(false);
+  });
+
+  it("rotates the key when the draft changed since the last save (correction)", () => {
+    const { key, rotated } = keyForSubmit(state("k1", 80), 85);
+    expect(rotated).toBe(true);
+    expect(key).not.toBe("k1");
+    expect(key.length).toBeGreaterThan(0);
+  });
+
+  it("rotated keys are unique per correction", () => {
+    const a = keyForSubmit(state("k1", 80), 85).key;
+    const b = keyForSubmit(state(a, 85), 90).key;
+    expect(new Set([a, b, "k1"]).size).toBe(3);
+  });
+
+  it("a correction followed by an unchanged retry keeps the rotated key stable", () => {
+    const first = keyForSubmit(state("k1", 80), 85);
+    expect(first.rotated).toBe(true);
+    // The client adopts the rotated key as the entry's key; the saved
+    // watermark moves to the new value only on a real (non-duplicate) save.
+    const retry = keyForSubmit({ key: first.key, savedTenths: 85 }, 85);
+    expect(retry.key).toBe(first.key);
+    expect(retry.rotated).toBe(false);
   });
 });

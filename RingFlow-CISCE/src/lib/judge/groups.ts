@@ -14,12 +14,14 @@
  * touched, so a second trigger (or a race between two confirms) is a no-op.
  */
 
-import { and, eq, inArray, isNotNull, isNull, notInArray } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, isNull, notInArray, sql } from "drizzle-orm";
 import { db } from "@/db";
 import {
   categories,
   categoryAssignments,
   draws,
+  drawVersions,
+  judgeRequests,
   kataGroupStandings,
   kataScores,
   matches,
@@ -36,7 +38,10 @@ import {
 } from "@/lib/draws/kataDraws";
 import { broadcastLiveEvent } from "@/lib/realtime/bus";
 import { logger } from "@/lib/logger";
+import type { DrawGraph } from "@/engine/draw-engine/types";
+import { checksumOf } from "@/engine/draw-engine/canonical";
 import { computeBoutDecisionFromRows, planEliminationFillIn } from "./decision";
+import type { BoutDecisionExtras } from "./decision";
 import type { KataScoreRow } from "./scores";
 
 /** The ring currently running a category (if any). */
@@ -86,6 +91,7 @@ export interface ConfirmedGroupBout {
   aoId: string | null;
   winnerId: string | null;
   scores: KataScoreRow[];
+  disqualifiedSide: "AKA" | "AO" | null;
 }
 
 /**
@@ -95,7 +101,10 @@ export interface ConfirmedGroupBout {
  * Votes/totals are recomputed from the stored scores; when they cannot be
  * computed the win still counts with zero votes.
  */
-export function toGroupBoutResults(bouts: readonly ConfirmedGroupBout[]): KataGroupBoutResult[] {
+export function toGroupBoutResults(
+  bouts: readonly ConfirmedGroupBout[],
+  extrasByMatch?: ReadonlyMap<string, BoutDecisionExtras>
+): KataGroupBoutResult[] {
   const results: KataGroupBoutResult[] = [];
   for (const b of bouts) {
     if (!b.akaId || !b.aoId || !b.winnerId) continue;
@@ -104,7 +113,13 @@ export function toGroupBoutResults(bouts: readonly ConfirmedGroupBout[]): KataGr
     let akaScore = 0;
     let aoScore = 0;
     try {
-      const d = computeBoutDecisionFromRows(b.scores);
+      const d = computeBoutDecisionFromRows(
+        b.scores,
+        {},
+        extrasByMatch?.get(b.matchId) ?? {
+          disqualifiedSide: b.disqualifiedSide,
+        }
+      );
       akaVotes = d.akaVotes;
       aoVotes = d.aoVotes;
       akaScore = d.akaTotal;
@@ -146,6 +161,7 @@ export async function recomputeGroupStandings(
       id: matches.id,
       groupId: matches.groupId,
       winnerId: matches.winnerId,
+      disqualifiedSide: matches.disqualifiedSide,
     })
     .from(matches)
     .where(
@@ -195,13 +211,43 @@ export async function recomputeGroupStandings(
             side: s.side,
             scoreTenths: s.scoreTenths,
           })),
+        disqualifiedSide:
+          b.disqualifiedSide === "AKA" || b.disqualifiedSide === "AO"
+            ? b.disqualifiedSide
+            : null,
       });
     }
   }
 
+  // M2/M4: recompute votes/totals through the same lens as the decision —
+  // only the seats' CURRENT occupants' marks count, and a disqualified
+  // side's marks become 0.0 with the opponent awarded the win.
+  const extrasByMatch = new Map<string, BoutDecisionExtras>();
+  const ringId = await ringIdForCategory(categoryId);
+  let currentBySeat: Map<number, string> | undefined;
+  if (ringId) {
+    const approved = await db
+      .select({ id: judgeRequests.id, seatNumber: judgeRequests.seatNumber })
+      .from(judgeRequests)
+      .where(
+        and(eq(judgeRequests.ringId, ringId), eq(judgeRequests.status, "approved"))
+      );
+    currentBySeat = new Map(
+      approved
+        .filter((r) => r.seatNumber != null)
+        .map((r) => [r.seatNumber as number, r.id])
+    );
+  }
+  for (const b of boutInputs) {
+    extrasByMatch.set(b.matchId, {
+      currentBySeat,
+      disqualifiedSide: b.disqualifiedSide,
+    });
+  }
+
   const ranked = rankGroupAthletes(
     group,
-    toGroupBoutResults(boutInputs),
+    toGroupBoutResults(boutInputs, extrasByMatch),
     parseKataRankingMethod(snapshot.rankingMethod)
   );
 
@@ -236,7 +282,10 @@ export async function areAllGroupBoutsConfirmed(categoryId: string): Promise<boo
  * Fill the TBD first-round elimination slots from the final group standings.
  * Only meaningful for GROUPS_THEN_ELIMINATION (ROUND_ROBIN has no
  * elimination stage; single elimination has no groups). Filled bouts flip to
- * READY so the ring queue picks them up.
+ * READY so the ring queue picks them up; (ATHLETE, BYE) matches are marked
+ * BYE walkovers with the athlete advanced. The filled athletes are also
+ * written back into the draw graph as a NEW draw version, so `resolveDraw`
+ * sees them.
  */
 export async function fillEliminationBracket(
   categoryId: string
@@ -274,15 +323,17 @@ export async function fillEliminationBracket(
     .from(matchSlots)
     .where(inArray(matchSlots.matchId, matchIds));
 
-  // First round = matches whose slots are all ATHLETE (later rounds are
-  // WINNER_OF-wired). Placeholders carry athleteId null.
+  // First round = matches with no wired slots (later rounds are
+  // WINNER_OF-wired). Structural BYE slots count as first round too —
+  // (ATHLETE, BYE) matches are walkovers, not later-round bouts.
+  // Placeholders carry athleteId null.
   const matchNoById = new Map(elimMatches.map((m) => [m.id, m.matchNo]));
   const firstRoundIds = new Set(
     elimMatches
       .filter((m) =>
         slots
           .filter((s) => s.matchId === m.id)
-          .every((s) => s.slotType === "ATHLETE")
+          .every((s) => s.slotType === "ATHLETE" || s.slotType === "BYE")
       )
       .map((m) => m.id)
   );
@@ -325,7 +376,90 @@ export async function fillEliminationBracket(
     }
   }
 
-  if (plan.length > 0) {
+  // B2: (ATHLETE, BYE) first-round matches are walkovers — the lone athlete
+  // advances without a contest. Mark them BYE (a final status, so the ring
+  // queue and progress bars skip them) with the winner recorded, and feed
+  // the athlete into the next round's WINNER_OF slot immediately — the same
+  // athlete the draw-engine graph walk would propagate on the next confirm
+  // (idempotent: later resolutions write the same value).
+  const filledBySlot = new Map(
+    plan.map((p) => [`${p.matchId}:${p.position}`, p.athleteId])
+  );
+  const athleteInSlot = (matchId: string, position: number): string | null =>
+    filledBySlot.get(`${matchId}:${position}`) ??
+    slots.find((s) => s.matchId === matchId && s.position === position)?.athleteId ??
+    null;
+  let walkovers = 0;
+  for (const m of elimMatches) {
+    if (!firstRoundIds.has(m.id)) continue;
+    if (m.status === "CONFIRMED" || m.status === "BYE" || m.status === "LIVE") continue;
+    const matchSlotsNow = slots.filter((s) => s.matchId === m.id);
+    if (matchSlotsNow.length !== 2) continue;
+    const withAthletes = matchSlotsNow.map((s) => ({
+      ...s,
+      athleteId: athleteInSlot(s.matchId, s.position),
+    }));
+    const athleteSlots = withAthletes.filter(
+      (s) => s.slotType === "ATHLETE" && s.athleteId != null
+    );
+    const byeSlots = withAthletes.filter((s) => s.slotType === "BYE");
+    if (athleteSlots.length !== 1 || byeSlots.length !== 1) continue;
+    const adv = athleteSlots[0]!;
+    await db
+      .update(matches)
+      .set({
+        status: "BYE",
+        winnerId: adv.athleteId,
+        winnerSide: adv.position === 1 ? "AKA" : "AO",
+      })
+      .where(eq(matches.id, m.id));
+    // Feed the athlete into the next round's WINNER_OF slot immediately —
+    // the same athlete the draw-engine graph walk propagates on the next
+    // confirm (idempotent: later resolutions write the same value). Never
+    // touch a downstream match that is already LIVE/CONFIRMED/BYE: its
+    // bracket history is final.
+    const downstream = await db
+      .select({ matchId: matchSlots.matchId })
+      .from(matchSlots)
+      .innerJoin(matches, eq(matches.id, matchSlots.matchId))
+      .where(
+        and(
+          eq(matchSlots.slotType, "WINNER_OF"),
+          eq(matchSlots.sourceMatchId, m.id),
+          notInArray(matches.status, ["LIVE", "CONFIRMED", "BYE"])
+        )
+      );
+    for (const d of downstream) {
+      await db
+        .update(matchSlots)
+        .set({ athleteId: adv.athleteId })
+        .where(
+          and(
+            eq(matchSlots.matchId, d.matchId),
+            eq(matchSlots.slotType, "WINNER_OF"),
+            eq(matchSlots.sourceMatchId, m.id)
+          )
+        );
+    }
+    walkovers += 1;
+  }
+
+  // B1: write the filled athletes back into the stored draw graph. The draw
+  // view (`resolveDraw` via `assembleCategoryDraw`) is pure from the latest
+  // graph version — without this, TBD slots stay null, first-round bouts
+  // resolve UNRESOLVED, and winners never propagate. Draw versions are
+  // immutable history: a NEW version row is written (the locked version is
+  // never mutated) and `draws.version` is bumped to it.
+  const finalAthleteBySlot = new Map<string, string>();
+  for (const s of slots) {
+    const athleteId = athleteInSlot(s.matchId, s.position);
+    if (s.slotType === "ATHLETE" && athleteId) {
+      finalAthleteBySlot.set(`${s.matchId}:${s.position}`, athleteId);
+    }
+  }
+  await writeEliminationFillGraphVersion(categoryId, finalAthleteBySlot);
+
+  if (plan.length > 0 || walkovers > 0) {
     const [cat] = await db
       .select({ tournamentId: categories.tournamentId })
       .from(categories)
@@ -339,11 +473,65 @@ export async function fillEliminationBracket(
       ringId: ringId ?? undefined,
       tournamentId: cat?.tournamentId,
       status: "elimination-filled",
-      data: { filled: plan.length },
+      data: { filled: plan.length, walkovers },
     });
   }
 
   return { filled: plan.length };
+}
+
+/**
+ * B1 helper: patch the stored draw graph with the elimination fill-in.
+ *
+ * `finalAthleteBySlot` maps `${matchId}:${position}` -> athleteId for every
+ * filled first-round ATHLETE slot. The latest graph version is deep-cloned,
+ * its ATHLETE slots' `registrationId`s patched, the checksum recomputed, and
+ * a NEW `draw_versions` row written (the stored versions are immutable —
+ * the locked version is never mutated in place); `draws.version` advances to
+ * the new row. No-op when nothing differs (idempotent retries).
+ */
+async function writeEliminationFillGraphVersion(
+  categoryId: string,
+  finalAthleteBySlot: ReadonlyMap<string, string>
+): Promise<void> {
+  if (finalAthleteBySlot.size === 0) return;
+  const [draw] = await db
+    .select()
+    .from(draws)
+    .where(eq(draws.categoryId, categoryId))
+    .limit(1);
+  if (!draw) return;
+  const [latest] = await db
+    .select()
+    .from(drawVersions)
+    .where(eq(drawVersions.drawId, draw.id))
+    .orderBy(sql`${drawVersions.version} desc`)
+    .limit(1);
+  if (!latest) return;
+
+  const graph = structuredClone(latest.graph) as unknown as DrawGraph;
+  let changed = false;
+  for (const gs of graph.slots) {
+    if (gs.slotType !== "ATHLETE") continue;
+    const athleteId = finalAthleteBySlot.get(`${gs.matchId}:${gs.position}`);
+    if (athleteId && gs.registrationId !== athleteId) {
+      gs.registrationId = athleteId;
+      changed = true;
+    }
+  }
+  if (!changed) return;
+
+  const { checksum: _previous, ...body } = graph;
+  const patched: DrawGraph = { ...body, checksum: checksumOf(body) };
+  const version = latest.version + 1;
+  await db.insert(drawVersions).values({
+    drawId: draw.id,
+    version,
+    graph: patched as unknown as Record<string, unknown>,
+    checksum: patched.checksum,
+    reason: "Group-stage elimination fill-in",
+  });
+  await db.update(draws).set({ version }).where(eq(draws.id, draw.id));
 }
 
 /**

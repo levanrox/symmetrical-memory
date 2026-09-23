@@ -439,6 +439,11 @@ export const matches = pgTable(
     // for this bout. Set by the moderator before/at bout time; null until set.
     akaKataNumber: integer('aka_kata_number'),
     aoKataNumber: integer('ao_kata_number'),
+    // Kata disqualification (M4): side disqualified by the moderator
+    // ('AKA' | 'AO'); null when neither side is disqualified. The decision
+    // engine zeroes the disqualified side's marks and awards the bout to
+    // the opponent — the only legal path to a 0.0 in a decision.
+    disqualifiedSide: text('disqualified_side'),
   },
   (table) => [unique().on(table.categoryId, table.matchNo)]
 );
