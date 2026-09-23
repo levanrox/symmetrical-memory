@@ -15,6 +15,7 @@ export const COMPETITION_FORMATS = [
   'SINGLE_ELIM_REPECHAGE',
   'ROUND_ROBIN',
   'POOLS_THEN_ELIM',
+  'GROUPS_THEN_ELIMINATION',
   'DOUBLE_ELIM',
 ] as const;
 export type CompetitionFormat = (typeof COMPETITION_FORMATS)[number];
@@ -41,6 +42,7 @@ export const TIE_BREAK_CRITERIA = [
   'SENSHU',
   'HIGHER_IPPON_COUNT',
   'HIGHER_WAZA_ARI_COUNT',
+  'HIGHER_TOTAL_SCORE',
   'HANTEI',
 ] as const;
 export type TieBreakCriterion = (typeof TIE_BREAK_CRITERIA)[number];
