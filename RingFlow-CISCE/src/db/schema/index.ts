@@ -3,6 +3,7 @@ import {
   type AnyPgColumn,
   boolean,
   date,
+  index,
   integer,
   jsonb,
   numeric,
@@ -156,6 +157,9 @@ export const categories = pgTable('categories', {
   kataGroupSize: integer('kata_group_size'),
   kataAdvancePerGroup: integer('kata_advance_per_group'),
   kataRankingMethod: text('kata_ranking_method'),
+  // Kata judge panel size (P3). Null = default: 7 when the kata format
+  // involves round-robin groups, else 5 (see resolvePanelSize).
+  kataPanelSize: integer('kata_panel_size'),
   importBatchId: uuid('import_batch_id').references(() => importBatches.id, {
     onDelete: 'set null',
   }),
@@ -430,6 +434,10 @@ export const matches = pgTable(
     senshu: text('senshu'),
     winnerSide: text('winner_side'),
     decisionMethod: text('decision_method'),
+    // Kata choice per side (P3): official WKF kata numbers (1-102) announced
+    // for this bout. Set by the moderator before/at bout time; null until set.
+    akaKataNumber: integer('aka_kata_number'),
+    aoKataNumber: integer('ao_kata_number'),
   },
   (table) => [unique().on(table.categoryId, table.matchNo)]
 );
@@ -469,6 +477,102 @@ export const matchEvents = pgTable(
       .defaultNow(),
   },
   (table) => [unique().on(table.matchId, table.seq)]
+);
+
+// =========================================================================
+// 3b. Kata Judge Scoring (P3)
+// =========================================================================
+// Judges are numbered SEATS, not identities. A judge scans a QR / enters a
+// 6-char join code, gives a display name, and lands in `judge_requests` as
+// pending; the moderator approves (assigning the lowest free seat and issuing
+// the session token) or rejects. The token travels only in an httpOnly
+// cookie and is never serialized into a response body (C1 lesson).
+
+export const judgeJoinCodes = pgTable('judge_join_codes', {
+  id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+  ringId: uuid('ring_id')
+    .notNull()
+    .references(() => rings.id, { onDelete: 'cascade' }),
+  // CSPRNG, 6 chars from an unambiguous alphabet (no 0/O/1/I/L).
+  code: text('code').notNull().unique(),
+  createdBy: text('created_by'),
+  expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }).notNull(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true, mode: 'date' }),
+  createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+    .notNull()
+    .defaultNow(),
+});
+
+export const judgeRequests = pgTable(
+  'judge_requests',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    ringId: uuid('ring_id')
+      .notNull()
+      .references(() => rings.id, { onDelete: 'cascade' }),
+    joinCodeUsed: text('join_code_used').notNull(),
+    judgeName: text('judge_name').notNull(),
+    // Assigned on approval: the lowest free seat (1-based).
+    seatNumber: integer('seat_number'),
+    status: text('status').notNull().default('pending'), // 'pending' | 'approved' | 'rejected' | 'expired' | 'revoked'
+    // Live credential: set ONLY on approval, cleared on revoke. NEVER
+    // serialize this column into a response (see serializeJudgeRequest).
+    sessionToken: uuid('session_token').unique(),
+    expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'date' }),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [index('judge_requests_ring_status_idx').on(table.ringId, table.status)]
+);
+
+export const kataScores = pgTable(
+  'kata_scores',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    matchId: text('match_id')
+      .notNull()
+      .references(() => matches.id, { onDelete: 'cascade' }),
+    judgeRequestId: uuid('judge_request_id')
+      .notNull()
+      .references(() => judgeRequests.id, { onDelete: 'cascade' }),
+    seatNumber: integer('seat_number').notNull(),
+    side: text('side').notNull(), // 'AKA' | 'AO'
+    // Integer tenths (50-100) so 0.1-step arithmetic stays exact.
+    scoreTenths: integer('score_tenths').notNull(),
+    // True when entered by the moderator (empty seat, or a correction of a
+    // judge's score); false for scores submitted by a judge's own device.
+    isManual: boolean('is_manual').notNull().default(false),
+    // Client idempotency key: a retry with the same key returns the original
+    // row instead of writing twice. NULL for plain upserts.
+    idempotencyKey: text('idempotency_key').unique(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [unique().on(table.matchId, table.judgeRequestId, table.side)]
+);
+
+// Derived group standings for kata group stages (P3). DESIGN DECISION:
+// standings are computed per group bout-result and stored here — NOT by
+// mutating `draws.kata_groups`, which is the immutable draw-input snapshot
+// (members + config at draw time). Rewriting the snapshot on every bout would
+// destroy draw history; this table is cheap to upsert per group and trivially
+// queryable by the tally UI. standings is RankedKataAthlete[] (see P2).
+export const kataGroupStandings = pgTable(
+  'kata_group_standings',
+  {
+    id: uuid('id').primaryKey().default(sql`gen_random_uuid()`),
+    categoryId: uuid('category_id')
+      .notNull()
+      .references(() => categories.id, { onDelete: 'cascade' }),
+    groupId: text('group_id').notNull(),
+    standings: jsonb('standings').notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [unique().on(table.categoryId, table.groupId)]
 );
 
 // =========================================================================
@@ -523,6 +627,26 @@ export const ringsRelations = relations(rings, ({ one, many }) => ({
   tournament: one(tournaments, { fields: [rings.tournamentId], references: [tournaments.id] }),
   assignments: many(categoryAssignments),
   moderatorRequests: many(moderatorRequests),
+  judgeJoinCodes: many(judgeJoinCodes),
+  judgeRequests: many(judgeRequests),
+}));
+
+export const judgeJoinCodesRelations = relations(judgeJoinCodes, ({ one }) => ({
+  ring: one(rings, { fields: [judgeJoinCodes.ringId], references: [rings.id] }),
+}));
+
+export const judgeRequestsRelations = relations(judgeRequests, ({ one, many }) => ({
+  ring: one(rings, { fields: [judgeRequests.ringId], references: [rings.id] }),
+  scores: many(kataScores),
+}));
+
+export const kataScoresRelations = relations(kataScores, ({ one }) => ({
+  match: one(matches, { fields: [kataScores.matchId], references: [matches.id] }),
+  judgeRequest: one(judgeRequests, { fields: [kataScores.judgeRequestId], references: [judgeRequests.id] }),
+}));
+
+export const kataGroupStandingsRelations = relations(kataGroupStandings, ({ one }) => ({
+  category: one(categories, { fields: [kataGroupStandings.categoryId], references: [categories.id] }),
 }));
 
 export const categoryAssignmentsRelations = relations(categoryAssignments, ({ one }) => ({

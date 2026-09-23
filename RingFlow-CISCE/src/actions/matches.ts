@@ -13,10 +13,10 @@ import {
   drawVersions,
   tournaments,
 } from "@/db/schema";
-import { resolveDraw } from "@/engine/draw-engine";
-import type { DrawGraph } from "@/engine/draw-engine/types";
 import { normalizeClock } from "@/lib/matchClock";
 import { resolveConfirmOutcome, clampScore, assertMatchRingBinding } from "@/lib/boutGuards";
+import { advanceBracketAfterConfirm } from "@/lib/draws/bracketAdvance";
+import type { DrawGraph } from "@/engine/draw-engine/types";
 import { logger } from "@/lib/logger";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
@@ -596,118 +596,17 @@ export async function confirmBoutResult(
       },
     });
 
-    // 4. Bracket advancement: resolve graph with ALL confirmed outcomes
-    const allMatches = await tx
-      .select()
-      .from(matches)
-      .where(eq(matches.categoryId, categoryId));
-
-    const allSlots = await tx
-      .select()
-      .from(matchSlots)
-      .where(
-        inArray(
-          matchSlots.matchId,
-          allMatches.map((m) => m.id)
-        )
-      );
-
-    const outcomes = new Map<string, { kind: "WINNER"; side: "AKA" | "AO" }>();
-    for (const m of allMatches) {
-      const isCurrent = m.id === matchId;
-      const wId = isCurrent ? winnerId : m.winnerId;
-      if (wId) {
-        let side: "AKA" | "AO" = isCurrent ? winningSide : (m.winnerSide as "AKA" | "AO") || "AKA";
-        if (!isCurrent && !m.winnerSide) {
-          const slots = allSlots.filter((s) => s.matchId === m.id);
-          const aka = slots.find((s) => s.position === 1);
-          side = wId === aka?.athleteId ? "AKA" : "AO";
-        }
-        outcomes.set(m.id, {
-          kind: "WINNER",
-          side,
-        });
-      }
-    }
-
-    const resolved = resolveDraw(graph, outcomes);
-
-    // Update slots in dependent matches with the advancing athlete
-    for (const rm of resolved.matches) {
-      const akaId = rm.slots[0]?.registrationId;
-      const aoId = rm.slots[1]?.registrationId;
-
-      if (akaId) {
-        await tx
-          .update(matchSlots)
-          .set({ athleteId: akaId })
-          .where(
-            and(
-              eq(matchSlots.matchId, rm.matchId),
-              eq(matchSlots.position, 1)
-            )
-          );
-      }
-      if (aoId) {
-        await tx
-          .update(matchSlots)
-          .set({ athleteId: aoId })
-          .where(
-            and(
-              eq(matchSlots.matchId, rm.matchId),
-              eq(matchSlots.position, 2)
-            )
-          );
-      }
-
-      // Update match status if both athletes are ready or if walkover
-      if (rm.status && rm.status !== "PENDING" && rm.status !== "UNRESOLVED") {
-        await tx
-          .update(matches)
-          .set({ status: rm.status })
-          .where(and(eq(matches.id, rm.matchId), sql`status != 'CONFIRMED'`));
-      }
-    }
-
-    // 5. matchesCompleted counts bouts actually fought, so it lines up with the
-    //    expected_matches the draw wrote (which excludes byes/walkovers).
-    const totalConfirmed = allMatches.filter(
-      (m) => (m.id === matchId || m.status === "CONFIRMED") && m.status !== "BYE"
-    ).length;
-
-    const [assignment] = await tx
-      .select()
-      .from(categoryAssignments)
-      .where(eq(categoryAssignments.categoryId, categoryId));
-
-    if (assignment) {
-      await tx
-        .update(categoryAssignments)
-        .set({ matchesCompleted: totalConfirmed })
-        .where(eq(categoryAssignments.id, assignment.id));
-
-      // Reset rings.currentMatchId so the next ready bout gets picked automatically
-      await tx
-        .update(rings)
-        .set({ currentMatchId: null })
-        .where(eq(rings.id, assignment.ringId));
-
-      broadcastLiveEvent({
-        table: "matches",
-        op: "UPDATE",
-        id: matchId,
-        matchId,
-        ringId: assignment.ringId,
-        categoryId,
-        status: "CONFIRMED",
-      });
-      broadcastLiveEvent({
-        table: "category_assignments",
-        op: "UPDATE",
-        ringId: assignment.ringId,
-        categoryId,
-      });
-    }
+    // 4-5. Bracket advancement + assignment bookkeeping. Shared helper
+    // (src/lib/draws/bracketAdvance.ts) — behaviour identical to the inline
+    // code this replaced; the kata confirm path reuses it for
+    // single-elimination kata brackets.
+    await advanceBracketAfterConfirm(tx, {
+      categoryId,
+      matchId,
+      winnerId,
+      winningSide,
+      graph,
+    });
 
     return { duplicate: false as const };
   });

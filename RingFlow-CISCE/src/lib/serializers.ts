@@ -182,4 +182,22 @@ export function serializeStagerRequest(sr: any) {
   };
 }
 
-
+/**
+ * Serialize a judge request for moderator lists (P3).
+ *
+ * Explicit field selection — never spread the row: the `sessionToken`
+ * column is a live credential and must never leave the server (C1 lesson).
+ */
+export function serializeJudgeRequest(jr: any) {
+  if (!jr) return null;
+  return {
+    id: jr.id,
+    ring_id: jr.ringId ?? jr.ring_id,
+    join_code_used: jr.joinCodeUsed ?? jr.join_code_used,
+    judge_name: jr.judgeName ?? jr.judge_name,
+    seat_number: jr.seatNumber ?? jr.seat_number ?? null,
+    status: jr.status,
+    expires_at: jr.expiresAt ? new Date(jr.expiresAt).toISOString() : (jr.expires_at || null),
+    created_at: jr.createdAt ? new Date(jr.createdAt).toISOString() : (jr.created_at || null),
+  };
+}
