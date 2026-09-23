@@ -130,6 +130,16 @@ function mapCategoryField(
       return ["day", empty ? null : value.trim()];
     case "bronze_medals":
       return ["bronzeMedals", empty ? null : Number.parseInt(value, 10)];
+    case "kata_format":
+      // Already normalised to a canonical enum string (or "") by
+      // checkCategoryFields; blank clears back to the default.
+      return ["kataFormat", empty ? null : value.trim()];
+    case "kata_ranking_method":
+      return ["kataRankingMethod", empty ? null : value.trim()];
+    case "kata_advance_per_group":
+      return ["kataAdvancePerGroup", empty ? null : Number.parseInt(value, 10)];
+    case "kata_group_size":
+      return ["kataGroupSize", empty ? null : Number.parseInt(value, 10)];
     default:
       return null;
   }
@@ -146,6 +156,10 @@ const CATEGORY_IMPORTABLE = new Set([
   "belt",
   "day",
   "bronze_medals",
+  "kata_format",
+  "kata_ranking_method",
+  "kata_advance_per_group",
+  "kata_group_size",
 ]);
 
 /* ------------------------------------------------------------------ */

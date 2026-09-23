@@ -20,6 +20,12 @@ import {
   performCategoryDraw,
   performGenerateAllTournamentDraws,
 } from "@/lib/draws/generateDraws";
+import {
+  isKataDrawFormatValue,
+  isKataRankingMethodValue,
+  parseKataAdvancePerGroup,
+  parseKataGroupSize,
+} from "@/lib/draws/kataSettings";
 import { isAnyStaff } from "@/lib/staffAccess";
 
 /**
@@ -81,6 +87,72 @@ export async function setCategoryDrawOption(
   }
 
   await db.update(categories).set({ bronzeMedals }).where(eq(categories.id, categoryId));
+
+  try {
+    revalidatePath(`/admin/event/${cat.tournamentId}/categories`);
+  } catch {}
+
+  return { success: true };
+}
+
+/**
+ * Records a kata category's draw configuration. Admin only: stored on the
+ * category, it takes effect the next time the draw is generated (the draw
+ * engine reads these columns via resolveKataDrawFormat). Null/blank means
+ * "event default": elimination, victory-points ranking, 2 advance per group,
+ * WKF 3.7.9 group sizing. Values outside the known enums are rejected, the
+ * same trust boundary as setCategoryDrawOption.
+ */
+export async function setKataDrawFormat(
+  categoryId: string,
+  input: {
+    kataFormat?: string | null;
+    kataRankingMethod?: string | null;
+    kataAdvancePerGroup?: number | string | null;
+    kataGroupSize?: number | string | null;
+  }
+) {
+  const [cat] = await db
+    .select({ tournamentId: categories.tournamentId })
+    .from(categories)
+    .where(eq(categories.id, categoryId));
+
+  if (!cat) return { success: false, error: "Category not found" };
+
+  await ensureAdminOwnsTournament(cat.tournamentId);
+
+  const patch: {
+    kataFormat?: string | null;
+    kataRankingMethod?: string | null;
+    kataAdvancePerGroup?: number | null;
+    kataGroupSize?: number | null;
+  } = {};
+
+  if (input.kataFormat !== undefined) {
+    const v = (input.kataFormat ?? "").trim();
+    if (v !== "" && !isKataDrawFormatValue(v)) {
+      return { success: false, error: `Unknown kata draw format "${input.kataFormat}"` };
+    }
+    patch.kataFormat = v === "" ? null : v;
+  }
+
+  if (input.kataRankingMethod !== undefined) {
+    const v = (input.kataRankingMethod ?? "").trim();
+    if (v !== "" && !isKataRankingMethodValue(v)) {
+      return { success: false, error: `Unknown kata ranking method "${input.kataRankingMethod}"` };
+    }
+    patch.kataRankingMethod = v === "" ? null : v;
+  }
+
+  if (input.kataAdvancePerGroup !== undefined) {
+    patch.kataAdvancePerGroup = parseKataAdvancePerGroup(input.kataAdvancePerGroup);
+  }
+
+  if (input.kataGroupSize !== undefined) {
+    patch.kataGroupSize = parseKataGroupSize(input.kataGroupSize);
+  }
+
+  await db.update(categories).set(patch).where(eq(categories.id, categoryId));
 
   try {
     revalidatePath(`/admin/event/${cat.tournamentId}/categories`);

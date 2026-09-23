@@ -4,6 +4,12 @@
  * athlete-vs-category mismatch warnings (warnings, never errors).
  */
 import type { ParsedTable } from "./csv";
+import {
+  parseKataAdvancePerGroup,
+  parseKataDrawFormatLoose,
+  parseKataGroupSize,
+  parseKataRankingMethodLoose,
+} from "../draws/kataSettings";
 
 /* ------------------------------------------------------------------ */
 /* Templates                                                           */
@@ -21,6 +27,10 @@ export const CATEGORY_TEMPLATE_HEADERS = [
   "belt",
   "day",
   "bronze_medals",
+  "kata_format",
+  "kata_ranking_method",
+  "kata_advance_per_group",
+  "kata_group_size",
 ] as const;
 
 export const ATHLETE_TEMPLATE_HEADERS = [
@@ -38,7 +48,7 @@ export const ATHLETE_TEMPLATE_HEADERS = [
 ] as const;
 
 const CATEGORY_EXAMPLE =
-  "Boys Kumite U12 40kg,BU12K40,kumite,M,10,12,U12,35-40 kg,,Day 1,2";
+  "Boys Kumite U12 40kg,BU12K40,kumite,M,10,12,U12,35-40 kg,,Day 1,2,,,,";
 
 const ATHLETE_EXAMPLE =
   "Aarav Sharma,SP-1001,,Delhi Public School,DPS,M,11,38,Blue,Boys Kumite U12 40kg,BU12K40";
@@ -49,6 +59,10 @@ export function categoryTemplateCsv(): string {
     `# Lines starting with # are ignored. event_type: kata | kumite | team_kata | team_kumite\n` +
     `# (left blank it is inferred: names containing "kata" become kata, otherwise kumite).\n` +
     `# sex: M | F | any. code is an optional short alias athletes can reference instead of the full name.\n` +
+    `# kata_format (kata categories only): elimination | groups | round_robin (blank = elimination).\n` +
+    `# kata_ranking_method: victory_points | total_score (blank = victory_points).\n` +
+    `# kata_advance_per_group: how many advance from each group (blank = 2).\n` +
+    `# kata_group_size: athletes per group override (blank = WKF 3.7.9 table).\n` +
     `${CATEGORY_TEMPLATE_HEADERS.join(",")}\n` +
     `${CATEGORY_EXAMPLE}\n`
   );
@@ -108,6 +122,22 @@ const HEADER_ALIASES: Record<string, string> = {
   weight: "weight_class",
   bronzemedals: "bronze_medals",
   "bronze medals": "bronze_medals",
+  kataformat: "kata_format",
+  "kata format": "kata_format",
+  drawformat: "kata_format",
+  "draw format": "kata_format",
+  katarankingmethod: "kata_ranking_method",
+  "kata ranking method": "kata_ranking_method",
+  rankingmethod: "kata_ranking_method",
+  "ranking method": "kata_ranking_method",
+  kataadvancepergroup: "kata_advance_per_group",
+  "kata advance per group": "kata_advance_per_group",
+  advancepergroup: "kata_advance_per_group",
+  "advance per group": "kata_advance_per_group",
+  katagroupsize: "kata_group_size",
+  "kata group size": "kata_group_size",
+  groupsize: "kata_group_size",
+  "group size": "kata_group_size",
   // athletes
   athlete: "name",
   "athlete name": "name",
@@ -267,6 +297,32 @@ export function checkCategoryFields(raw: Record<string, string>): FieldCheck {
     warnings.push(`bronze_medals "${raw.bronze_medals}" is not a number — ignored`);
   }
   fields.bronze_medals = bronze !== null ? String(bronze) : "";
+
+  // Kata draw settings: warnings, never errors — an unrecognised value is
+  // ignored so one bad cell never kills the import (same contract as
+  // event_type and sex above). Canonical enum strings are stored so the
+  // draw engine reads them verbatim.
+  const kf = parseKataDrawFormatLoose(raw.kata_format ?? "");
+  if (kf.unknown)
+    warnings.push(`kata_format "${raw.kata_format}" not recognised — ignored`);
+  fields.kata_format = kf.value ?? "";
+
+  const krm = parseKataRankingMethodLoose(raw.kata_ranking_method ?? "");
+  if (krm.unknown)
+    warnings.push(`kata_ranking_method "${raw.kata_ranking_method}" not recognised — ignored`);
+  fields.kata_ranking_method = krm.value ?? "";
+
+  const advRaw = (raw.kata_advance_per_group ?? "").trim();
+  const adv = parseKataAdvancePerGroup(advRaw);
+  if (advRaw && adv === null)
+    warnings.push(`kata_advance_per_group "${raw.kata_advance_per_group}" is not a number — ignored`);
+  fields.kata_advance_per_group = adv !== null ? String(adv) : "";
+
+  const gsRaw = (raw.kata_group_size ?? "").trim();
+  const gs = parseKataGroupSize(gsRaw);
+  if (gsRaw && gs === null)
+    warnings.push(`kata_group_size "${raw.kata_group_size}" is not a number — ignored`);
+  fields.kata_group_size = gs !== null ? String(gs) : "";
 
   return { fields, errors, warnings };
 }

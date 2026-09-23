@@ -19,7 +19,6 @@ import {
   buildKataStageGraph,
   DEFAULT_KATA_ADVANCE_PER_GROUP,
   kataFoughtBoutCount,
-  parseKataDrawFormat,
   parseKataRankingMethod,
   roundRobinBouts,
   type KataDrawFormat,
@@ -27,6 +26,7 @@ import {
   type KataParticipant,
   type KataRankingMethod,
 } from "./kataDraws";
+import { resolveKataDrawFormat, isKataCategoryName } from "./kataSettings";
 import { WKF_KATA_2026, WKF_KUMITE_2026 } from "@/engine/rules-engine";
 import { eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
@@ -51,10 +51,7 @@ export async function isKataCategory(category: {
     .from(tournamentCategoryDefinitions)
     .where(eq(tournamentCategoryDefinitions.tournamentId, category.tournamentId));
 
-  const norm = category.name.toLowerCase().trim();
-  const def = defs.find((d) => d.categoryName.toLowerCase().trim() === norm);
-  if (def) return def.eventType === "kata" || def.eventType === "team_kata";
-  return category.name.toLowerCase().includes("kata");
+  return isKataCategoryName(category.name, defs);
 }
 
 /** One row of the entrant list, from either the entries table or the legacy path. */
@@ -174,9 +171,10 @@ export async function performCategoryDraw(
   // groups, round-robin bouts and (for GROUPS_THEN_ELIMINATION) the
   // placeholder elimination bracket are built by kataDraws and persisted by
   // the same persistDrawGraph below. Kumite and single-elimination kata keep
-  // the existing path untouched.
-  const kataFormat = parseKataDrawFormat(cat.kataFormat);
-  if (kata && kataFormat !== "SINGLE_ELIM_REPECHAGE") {
+  // the existing path untouched. resolveKataDrawFormat is the single decision
+  // point, so a stored kata_format can never be silently ignored.
+  const kataFormat = resolveKataDrawFormat(kata, cat.kataFormat);
+  if (kataFormat !== "SINGLE_ELIM_REPECHAGE") {
     return performKataGroupDraw(categoryId, cat, participantList, {
       format: kataFormat,
       rankingMethod: parseKataRankingMethod(cat.kataRankingMethod),

@@ -7,11 +7,13 @@ import { CategoryInput } from "@/actions/tournament";
 import { matchesCategorySearch } from "@/lib/searchUtils";
 import * as XLSX from "xlsx";
 import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
-import { generateAllTournamentDraws, generateCategoryDraw, setCategoryDrawOption } from "@/actions/draws";
+import { generateAllTournamentDraws, generateCategoryDraw, setCategoryDrawOption, setKataDrawFormat } from "@/actions/draws";
 import { downloadAllCategoryDrawPdfs, downloadCategoryDrawPdf } from "@/actions/drawPdfs";
 import { exportTournamentResultsCsv, exportTournamentResultsPdf } from "@/actions/resultsExport";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import { CategoryDefinitionsModal } from "@/components/admin/CategoryDefinitionsModal";
+import { KataDrawSettingsModal, type KataDrawSettingsDraft } from "@/components/admin/KataDrawSettingsModal";
+import { kataDrawFormatShortLabel } from "@/lib/draws/kataSettings";
 import { useRouter } from "next/navigation";
 
 type Category = {
@@ -24,6 +26,13 @@ type Category = {
   doc_url?: string | null;
   /** 0 = no bronze, 1 = single bronze, 2 = repechage; null inherits the event default. */
   bronze_medals?: number | null;
+  /** Kata draw settings; null/undefined = event defaults. */
+  kataFormat?: string | null;
+  kataRankingMethod?: string | null;
+  kataAdvancePerGroup?: number | null;
+  kataGroupSize?: number | null;
+  /** True when the draw engine treats this category as kata. */
+  is_kata?: boolean;
 };
 
 interface Props {
@@ -59,6 +68,8 @@ export default function CategoriesClient({
   // Digital Draws & Official Rules State
   const [showDefinitionsModal, setShowDefinitionsModal] = useState(false);
   const [bracketModalCategory, setBracketModalCategory] = useState<{ id: string; name: string } | null>(null);
+  const [kataSettingsCategory, setKataSettingsCategory] = useState<Category | null>(null);
+  const [savingKataSettings, setSavingKataSettings] = useState(false);
   const [isGeneratingAllDraws, setIsGeneratingAllDraws] = useState(false);
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
   const router = useRouter();
@@ -452,6 +463,43 @@ export default function CategoriesClient({
     }
   };
 
+  /**
+   * Record this kata category's draw configuration. Stored on the category;
+   * it takes effect the next time the draw is generated. Mirrors the bronze
+   * flow: save, update local state, offer the rebuild.
+   */
+  const handleKataSettingsSave = async (draft: KataDrawSettingsDraft) => {
+    const cat = kataSettingsCategory;
+    if (!cat) return;
+    setSavingKataSettings(true);
+    try {
+      const patch = {
+        kataFormat: draft.kataFormat || null,
+        kataRankingMethod: draft.kataRankingMethod || null,
+        kataAdvancePerGroup: draft.kataAdvancePerGroup === "" ? null : Number(draft.kataAdvancePerGroup),
+        kataGroupSize: draft.kataGroupSize === "" ? null : Number(draft.kataGroupSize),
+      };
+      const res = await setKataDrawFormat(cat.id, patch);
+      if (!res.success) {
+        alert(res.error || "Could not save the kata draw settings.");
+        return;
+      }
+      const updated = { ...cat, ...patch };
+      setCategories((prev) =>
+        prev.map((c) => (c.id === cat.id ? updated : c))
+      );
+      setKataSettingsCategory(null);
+      // An existing bracket was built with the old settings; offer the rebuild.
+      if (window.confirm(
+        "Kata draw settings saved. Regenerate this category's draw now so the bracket matches?"
+      )) {
+        await handleGenerateOneDraw(updated);
+      }
+    } finally {
+      setSavingKataSettings(false);
+    }
+  };
+
   const handleDownloadSinglePdf = async (categoryId: string) => {
     try {
       const res = await downloadCategoryDrawPdf(categoryId);
@@ -758,6 +806,23 @@ export default function CategoriesClient({
                             <option value="2">Two bronzes</option>
                           </select>
                         </label>
+
+                        {/* Kata draw settings: format, ranking, groups — kata categories only */}
+                        {cat.is_kata && (
+                          <button
+                            type="button"
+                            onClick={() => setKataSettingsCategory(cat)}
+                            title="Kata draw settings (format, ranking, groups)"
+                            className="flex items-center gap-1 cursor-pointer rounded border border-outline-variant bg-white px-1.5 py-1 text-[#3D3A33] hover:border-[#0E9C7C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                          >
+                            <span className="material-symbols-outlined text-[16px] text-[#0E9C7C]">tune</span>
+                            {kataDrawFormatShortLabel(cat.kataFormat) && (
+                              <span className="font-data-mono text-[11px] font-bold">
+                                {kataDrawFormatShortLabel(cat.kataFormat)}
+                              </span>
+                            )}
+                          </button>
+                        )}
 
                         {/* Rebuild just this category's bracket */}
                         <button
@@ -1087,6 +1152,29 @@ export default function CategoriesClient({
           window.location.reload();
         }}
       />
+
+      {/* Kata draw settings modal */}
+      {kataSettingsCategory && (
+        <KataDrawSettingsModal
+          key={kataSettingsCategory.id}
+          categoryName={kataSettingsCategory.name}
+          initial={{
+            kataFormat: kataSettingsCategory.kataFormat ?? "",
+            kataRankingMethod: kataSettingsCategory.kataRankingMethod ?? "",
+            kataAdvancePerGroup:
+              kataSettingsCategory.kataAdvancePerGroup != null
+                ? String(kataSettingsCategory.kataAdvancePerGroup)
+                : "",
+            kataGroupSize:
+              kataSettingsCategory.kataGroupSize != null
+                ? String(kataSettingsCategory.kataGroupSize)
+                : "",
+          }}
+          saving={savingKataSettings}
+          onClose={() => setKataSettingsCategory(null)}
+          onSave={(draft) => void handleKataSettingsSave(draft)}
+        />
+      )}
     </div>
   );
 }

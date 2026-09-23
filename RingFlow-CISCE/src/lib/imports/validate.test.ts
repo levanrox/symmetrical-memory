@@ -188,3 +188,58 @@ describe("chest numbers", () => {
     expect(assignChestNumbers([], 2)).toEqual(["1", "2"]);
   });
 });
+
+describe("kata draw settings columns", () => {
+  it("canonicalises friendly header spellings", () => {
+    expect(canonicalHeader("Draw Format")).toBe("kata_format");
+    expect(canonicalHeader("kata format")).toBe("kata_format");
+    expect(canonicalHeader("Ranking Method")).toBe("kata_ranking_method");
+    expect(canonicalHeader("advance per group")).toBe("kata_advance_per_group");
+    expect(canonicalHeader("Group Size")).toBe("kata_group_size");
+  });
+  it("template documents the kata columns", () => {
+    const csv = categoryTemplateCsv();
+    expect(csv).toContain("kata_format");
+    expect(csv).toContain("kata_ranking_method");
+    expect(csv).toContain("kata_advance_per_group");
+    expect(csv).toContain("kata_group_size");
+  });
+  it("normalises kata settings to canonical enum strings", () => {
+    const r = checkCategoryFields({
+      name: "Boys Kata U12",
+      event_type: "kata",
+      kata_format: "groups",
+      kata_ranking_method: "total score",
+      kata_advance_per_group: "3",
+      kata_group_size: "6",
+    });
+    expect(r.errors).toHaveLength(0);
+    expect(r.warnings).toHaveLength(0);
+    expect(r.fields.kata_format).toBe("GROUPS_THEN_ELIMINATION");
+    expect(r.fields.kata_ranking_method).toBe("TOTAL_SCORE");
+    expect(r.fields.kata_advance_per_group).toBe("3");
+    expect(r.fields.kata_group_size).toBe("6");
+  });
+  it("warns (never errors) on unrecognised kata values", () => {
+    const r = checkCategoryFields({
+      name: "Boys Kata U12",
+      kata_format: "bogus",
+      kata_ranking_method: "bogus",
+      kata_advance_per_group: "lots",
+      kata_group_size: "lots",
+    });
+    expect(r.errors).toHaveLength(0);
+    expect(r.warnings).toHaveLength(4);
+    expect(r.fields.kata_format).toBe("");
+    expect(r.fields.kata_ranking_method).toBe("");
+    expect(r.fields.kata_advance_per_group).toBe("");
+    expect(r.fields.kata_group_size).toBe("");
+  });
+  it("blank kata columns stay blank", () => {
+    const r = checkCategoryFields({ name: "Boys Kata U12" });
+    expect(r.errors).toHaveLength(0);
+    expect(r.warnings).toHaveLength(0);
+    expect(r.fields.kata_format).toBe("");
+    expect(r.fields.kata_ranking_method).toBe("");
+  });
+});
