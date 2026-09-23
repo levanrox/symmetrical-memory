@@ -22,6 +22,13 @@
       "when": 1790178301546,
       "tag": "0002_kata_phase1_2_6_7a",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1790178970048,
+      "tag": "0003_kata_p3_judge_backend",
+      "breakpoints": true
     }
   ]
 }
