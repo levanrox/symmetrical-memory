@@ -7,7 +7,7 @@
  * via JUDGE_BASE_URL.
  */
 
-import { describe, expect, it, afterEach } from "vitest";
+import { describe, expect, it, afterEach, vi } from "vitest";
 import {
   getClientIp,
   isPrivateIp,
@@ -15,6 +15,8 @@ import {
   normaliseBaseUrl,
   resolveEnvBaseUrl,
   buildJudgeJoinUrl,
+  probeJudgeHealth,
+  evaluateJudgeUrlTest,
 } from "./judgeAccess";
 
 describe("isPrivateIp", () => {
@@ -139,5 +141,132 @@ describe("buildJudgeJoinUrl", () => {
     process.env.JUDGE_BASE_URL = "https://tunnel.example.com";
     expect(resolveEnvBaseUrl()).toBe("https://tunnel.example.com");
     expect(buildJudgeJoinUrl("ZZ99")).toBe("https://tunnel.example.com/j/ZZ99");
+  });
+});
+
+describe("normaliseBaseUrl edge cases (P7b)", () => {
+  it("trims whitespace and drops a port-only path", () => {
+    expect(normaliseBaseUrl("  https://abc.trycloudflare.com  ")).toBe(
+      "https://abc.trycloudflare.com",
+    );
+  });
+
+  it("keeps non-default ports", () => {
+    expect(normaliseBaseUrl("http://192.168.1.10:3000/")).toBe("http://192.168.1.10:3000");
+  });
+
+  it("lowercases the scheme and keeps a sub-path", () => {
+    expect(normaliseBaseUrl("HTTPS://example.com/sub//")).toBe("https://example.com/sub");
+  });
+
+  it("drops query strings and fragments", () => {
+    expect(normaliseBaseUrl("https://example.com/path?x=1#frag")).toBe(
+      "https://example.com/path",
+    );
+  });
+
+  it("drops embedded credentials", () => {
+    expect(normaliseBaseUrl("https://user:pass@example.com")).toBe("https://example.com");
+  });
+
+  it("rejects javascript: and bare hostnames", () => {
+    expect(normaliseBaseUrl("javascript:alert(1)")).toBe("");
+    expect(normaliseBaseUrl("example.com")).toBe("");
+    expect(normaliseBaseUrl("//example.com")).toBe("");
+    expect(normaliseBaseUrl("https://")).toBe("");
+  });
+});
+
+describe("probeJudgeHealth (P7b, mocked fetch)", () => {
+  const jsonResponse = (body: unknown, status = 200) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    });
+
+  it("extracts the instanceId from a healthy /api/health", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ status: "ok", instanceId: "local-1" }));
+    const probe = await probeJudgeHealth("https://t.example", fetchImpl as typeof fetch);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl.mock.calls[0][0]).toBe("https://t.example/api/health");
+    expect(probe.reachable).toBe(true);
+    expect(probe.remoteInstanceId).toBe("local-1");
+    expect(probe.error).toBeUndefined();
+    expect(probe.latencyMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("stays reachable when the server reports degraded (503 with JSON body)", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ status: "degraded", instanceId: "r-2" }, 503));
+    const probe = await probeJudgeHealth("https://t.example", fetchImpl as typeof fetch);
+    expect(probe.reachable).toBe(true);
+    expect(probe.remoteInstanceId).toBe("r-2");
+  });
+
+  it("reports an error when the body has no instanceId", async () => {
+    const fetchImpl = vi.fn(async () => jsonResponse({ status: "ok" }));
+    const probe = await probeJudgeHealth("https://t.example", fetchImpl as typeof fetch);
+    expect(probe.reachable).toBe(true);
+    expect(probe.remoteInstanceId).toBeNull();
+    expect(probe.error).toMatch(/instanceId/);
+  });
+
+  it("reports an error when the body is not JSON", async () => {
+    const fetchImpl = vi.fn(async () => new Response("<html>nope</html>", { status: 404 }));
+    const probe = await probeJudgeHealth("https://t.example", fetchImpl as typeof fetch);
+    expect(probe.reachable).toBe(true);
+    expect(probe.remoteInstanceId).toBeNull();
+    expect(probe.error).toMatch(/instanceId/);
+  });
+
+  it("reports unreachable when fetch rejects (tunnel down / DNS)", async () => {
+    const fetchImpl = vi.fn(async () => {
+      throw new Error("fetch failed");
+    });
+    const probe = await probeJudgeHealth("https://t.example", fetchImpl as typeof fetch);
+    expect(probe.reachable).toBe(false);
+    expect(probe.remoteInstanceId).toBeNull();
+    expect(probe.error).toBe("fetch failed");
+  });
+});
+
+describe("evaluateJudgeUrlTest (P7b)", () => {
+  const base = {
+    reachable: true,
+    remoteInstanceId: "abc-123",
+    latencyMs: 42,
+  };
+
+  it("ok is true only when the remote ID equals the local ID", () => {
+    const res = evaluateJudgeUrlTest(base, "abc-123");
+    expect(res.ok).toBe(true);
+    expect(res.instanceMatch).toBe(true);
+    expect(res.localInstanceId).toBe("abc-123");
+    expect(res.remoteInstanceId).toBe("abc-123");
+    expect(res.latencyMs).toBe(42);
+  });
+
+  it("fails when the IDs differ (stale tunnel / wrong server)", () => {
+    const res = evaluateJudgeUrlTest(base, "different-id");
+    expect(res.ok).toBe(false);
+    expect(res.instanceMatch).toBe(false);
+  });
+
+  it("fails when the server was unreachable", () => {
+    const res = evaluateJudgeUrlTest(
+      { reachable: false, remoteInstanceId: null, latencyMs: 5, error: "fetch failed" },
+      "abc-123",
+    );
+    expect(res.ok).toBe(false);
+    expect(res.instanceMatch).toBe(false);
+    expect(res.error).toBe("fetch failed");
+  });
+
+  it("fails when there is no remote instanceId even though the host answered", () => {
+    const res = evaluateJudgeUrlTest(
+      { reachable: true, remoteInstanceId: null, latencyMs: 5, error: "no instanceId" },
+      "abc-123",
+    );
+    expect(res.ok).toBe(false);
+    expect(res.instanceMatch).toBe(false);
   });
 });

@@ -11,6 +11,8 @@ import {
 } from "@/actions/organiser";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { useRouter } from "next/navigation";
+import JudgeAccessSection from "@/components/admin/JudgeAccessSection";
+import type { JudgeAccessConfig } from "@/actions/judgeAccess";
 
 export interface OrganiserRequest {
   id: string;
@@ -40,9 +42,10 @@ interface Tournament {
 interface Props {
   tournament: Tournament;
   initialOrganiserRequests?: OrganiserRequest[];
+  judgeAccess?: JudgeAccessConfig | null;
 }
 
-export default function SettingsClient({ tournament, initialOrganiserRequests = [] }: Props) {
+export default function SettingsClient({ tournament, initialOrganiserRequests = [], judgeAccess }: Props) {
   const router = useRouter();
 
   const [form, setForm] = useState({
@@ -611,6 +614,9 @@ export default function SettingsClient({ tournament, initialOrganiserRequests = 
               )}
             </div>
           </section>
+
+          {/* Judge Access — server-wide judge URL + tunnel test */}
+          {judgeAccess && <JudgeAccessSection initial={judgeAccess} />}
 
           {/* Danger Zone */}
           <section className="border border-outline-variant rounded-xl p-8 bg-surface-container-lowest">

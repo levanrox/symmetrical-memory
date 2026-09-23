@@ -1,8 +1,8 @@
 import { db } from "@/db";
 import { sql } from "drizzle-orm";
 import { connect } from "node:net";
-import { randomUUID } from "node:crypto";
 import { logger } from "@/lib/logger";
+import { getInstanceId } from "@/lib/instanceId";
 
 /**
  * Liveness: "is the app process able to serve traffic?"
@@ -11,15 +11,14 @@ import { logger } from "@/lib/logger";
  */
 
 /**
- * Per-boot instance identifier (PHASE P7a).
+ * Per-boot instance identifier (PHASE P7a/P7b).
  *
- * Generated once at module load, so it is stable for the whole process
- * lifetime but different on every restart. The admin "Test" button fetches
- * `<public-tunnel-url>/api/health` and compares this value with the one the
- * local server reports, proving the pasted URL reaches THIS server and not
- * a stale/typo'd one.
+ * Lives in `@/lib/instanceId` (see getInstanceId): generated once at module
+ * load, stable for the process lifetime, different on every restart. The
+ * admin "Test" button fetches `<public-tunnel-url>/api/health` and compares
+ * this value with the one the local server reports, proving the pasted URL
+ * reaches THIS server and not a stale/typo'd one.
  */
-const INSTANCE_ID = randomUUID();
 
 /** TCP connect probe — the realtime server has no unauthenticated HTTP
  * health endpoint, so a socket connect is the honest reachability signal. */
@@ -70,7 +69,7 @@ export async function GET() {
   return Response.json(
     {
       status: ok ? "ok" : "degraded",
-      instanceId: INSTANCE_ID,
+      instanceId: getInstanceId(),
       checks,
       time: new Date().toISOString(),
     },

@@ -180,3 +180,56 @@ alternatives (e.g. Redis). For a tournament, one container is plenty —
 - File uploads are PDF-only (10 MB cap), stored under
   `FILE_STORAGE_DIR` (default `./storage`) with strict key validation —
   no path traversal.
+
+## 8. Judge access (venue WiFi vs tunnel)
+
+Judges score from their own phones. They reach the judge pages (`/j/*`)
+in one of two ways, tried in this order:
+
+1. **Venue WiFi (recommended)** — server fully offline. Judges open the
+   venue-LAN address of the server. Nothing to configure: with no judge
+   base URL set, judge links are relative (`/j/…`) and work on the event
+   network.
+2. **Public tunnel** — judges on their own mobile data. Run the tunnel on
+   the server machine and point the app at it (steps below).
+3. **Moderator-entered scores** — last resort. If neither of the above
+   works, the moderator types the missing judges' scores in by hand from
+   the tatami console. Bouts may start even when not all judge seats are
+   filled.
+
+### Event-day steps (tunnel mode)
+
+1. On the server machine:
+   ```sh
+   ./scripts/start-judge-tunnel.sh
+   ```
+   The script prints a public URL like
+   `https://something-random.trycloudflare.com`. Keep it running for the
+   whole event (Ctrl+C stops the tunnel).
+2. In the app, open **Settings → Judge access**, paste the printed URL
+   into **Judge access URL**, and press **SAVE**.
+3. Press **TEST**. The server fetches `<url>/api/health` and compares its
+   per-boot instance ID with its own:
+   - Green *"Live — this URL reaches this server"* → safe to print QR codes.
+   - Red → the URL does not reach this server. Check for a typo, a stale
+     URL from a previous tunnel run (the URL is random **per run** — a
+     new run needs a new paste + Test), or a stopped tunnel.
+4. Print the judge QR cards from the tatami consoles (they encode the
+   tested base URL). Scanning a QR code only opens the join page —
+   nothing is granted until the moderator approves the named judge seat.
+
+Notes:
+
+- The Test result (and its timestamp) is saved with the setting, so the
+  next shift can see at a glance that the link is live.
+- If the `JUDGE_BASE_URL` env var is set, it wins over the saved value
+  and the Settings field becomes read-only — manage the URL in the env
+  file instead. To switch back to venue-WiFi mode, clear the field (or
+  the env var) so the effective URL is empty.
+- Judges through the tunnel can reach **only** `/j/*` and other public
+  endpoints. Staff pages (`/admin`, `/moderator`, `/organiser`, `/stager`)
+  return 404 for public client IPs — the tunnel never exposes staff
+  controls to the internet (see `src/proxy.ts`).
+- `GET /api/judge-access/status` (admin session required) reports
+  `{ mode: "wifi" | "tunnel", baseUrl, lastTest }` for consoles that want
+  to poll judge-link health.

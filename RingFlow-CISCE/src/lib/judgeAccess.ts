@@ -13,7 +13,11 @@
  * connection.
  */
 
-const JUDGE_SETTING_KEY = "judge_base_url";
+/** app_settings key holding the admin-configured judge base URL. */
+export const JUDGE_SETTING_KEY = "judge_base_url";
+
+/** app_settings key holding the last "Test judge URL" result (JSON). */
+export const JUDGE_LAST_TEST_SETTING_KEY = "judge_url_last_test";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (no Next runtime, no DB — unit-testable)
@@ -167,6 +171,114 @@ export function buildJudgeJoinUrl(joinCode: string, baseUrl?: string): string {
   const code = encodeURIComponent(joinCode.trim());
   const base = normaliseBaseUrl(baseUrl ?? resolveEnvBaseUrl());
   return base ? `${base}/j/${code}` : `/j/${code}`;
+}
+
+// ---------------------------------------------------------------------------
+// Judge URL test (PHASE P7b): probe + compare, kept pure for unit tests.
+// The server action in src/actions/judgeAccess.ts composes these.
+// ---------------------------------------------------------------------------
+
+/** Raw outcome of probing `<baseUrl>/api/health`. */
+export interface JudgeHealthProbeResult {
+  /** A server answered (even with a non-2xx) and returned parseable JSON. */
+  reachable: boolean;
+  /** The `instanceId` the remote `/api/health` reported, if any. */
+  remoteInstanceId: string | null;
+  /** Round-trip time in ms. */
+  latencyMs: number;
+  /** Human-readable reason when something went wrong. */
+  error?: string;
+}
+
+/** Full test result: the probe plus the this-server comparison. */
+export interface JudgeUrlTestResult extends JudgeHealthProbeResult {
+  /** True only when the probed URL demonstrably reaches THIS server. */
+  ok: boolean;
+  /** True when remote `instanceId` equals this server's. */
+  instanceMatch: boolean;
+  /** This server's per-boot instance ID (never hardcoded). */
+  localInstanceId: string;
+}
+
+/** Where the effective judge base URL came from. */
+export type JudgeUrlSource = "env" | "db" | "unset";
+
+/** Last-test record persisted in app_settings (JSON). */
+export interface JudgeUrlLastTest {
+  at: string;
+  url: string;
+  ok: boolean;
+  reachable: boolean;
+  instanceMatch: boolean;
+  latencyMs: number;
+  localInstanceId: string;
+  remoteInstanceId: string | null;
+  error?: string;
+}
+
+/**
+ * Fetch `<baseUrl>/api/health` and extract its `instanceId`.
+ *
+ * `fetchImpl` is injectable so unit tests can mock the network; defaults
+ * to the global fetch. Never logs the URL or instance IDs.
+ */
+export async function probeJudgeHealth(
+  baseUrl: string,
+  fetchImpl: (input: string, init?: RequestInit) => Promise<Response> = fetch,
+  timeoutMs = 8000,
+): Promise<JudgeHealthProbeResult> {
+  const started = Date.now();
+  try {
+    const res = await fetchImpl(`${baseUrl}/api/health`, {
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    const latencyMs = Date.now() - started;
+    let remoteInstanceId: string | null = null;
+    try {
+      const body = (await res.json()) as { instanceId?: unknown };
+      remoteInstanceId =
+        typeof body?.instanceId === "string" && body.instanceId ? body.instanceId : null;
+    } catch {
+      remoteInstanceId = null;
+    }
+    if (!remoteInstanceId) {
+      return {
+        reachable: true,
+        remoteInstanceId: null,
+        latencyMs,
+        error: "Server answered but /api/health returned no instanceId.",
+      };
+    }
+    return { reachable: true, remoteInstanceId, latencyMs };
+  } catch (err) {
+    return {
+      reachable: false,
+      remoteInstanceId: null,
+      latencyMs: Date.now() - started,
+      error: err instanceof Error ? err.message : "Request failed",
+    };
+  }
+}
+
+/**
+ * Compare the probe result with this server's instance ID.
+ *
+ * `ok` is true ONLY when the remote ID equals the local one — a matching
+ * ID proves the pasted URL reaches THIS server process, not a stale
+ * tunnel, a typo'd host, or some other RingFlow instance.
+ */
+export function evaluateJudgeUrlTest(
+  probe: JudgeHealthProbeResult,
+  localInstanceId: string,
+): JudgeUrlTestResult {
+  const remote = probe.remoteInstanceId;
+  const instanceMatch = probe.reachable && !!remote && remote === localInstanceId;
+  return {
+    ...probe,
+    ok: instanceMatch,
+    instanceMatch,
+    localInstanceId,
+  };
 }
 
 // ---------------------------------------------------------------------------
