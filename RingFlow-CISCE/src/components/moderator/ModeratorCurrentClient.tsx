@@ -12,11 +12,13 @@ import {
   getModeratorRingAssignments,
 } from "@/actions/moderator";
 import { getRingActiveBout, setActiveBout } from "@/actions/matches";
+import { isKataCategoryForRing } from "@/actions/judge";
 import { getRingClock, setRingSidesSwapped } from "@/actions/clock";
 import { normalizeClock, type RingClock } from "@/lib/matchClock";
 import { getCategoryDraw } from "@/actions/draws";
 import { useLiveEvents } from "@/hooks/useLiveEvents";
 import { BoutScoringPad } from "@/components/moderator/BoutScoringPad";
+import KataBoutConsole from "@/components/moderator/KataBoutConsole";
 import { BoutPickerModal } from "@/components/moderator/BoutPickerModal";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import MatchTimer from "@/components/moderator/MatchTimer";
@@ -44,6 +46,10 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
   const [activeMode, setActiveMode] = useState<"digital" | "counter">("digital");
   const [showBracketModal, setShowBracketModal] = useState(false);
   const [showDisplayPanel, setShowDisplayPanel] = useState(false);
+  // Kata mode: when the active bout belongs to a kata category the console
+  // shows the kata workflow (judge tally, HANTEI, confirm) instead of the
+  // kumite scoring pad. null = still resolving.
+  const [isKata, setIsKata] = useState<boolean | null>(null);
   const [deskSidesSwapped, setDeskSidesSwapped] = useState<boolean>(() => {
     if (typeof window !== "undefined") {
       try {
@@ -145,6 +151,49 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
   useEffect(() => {
     loadBoutData();
   }, [loadBoutData]);
+
+  const activeCategoryId = boutData?.category?.id;
+
+  // Kata mode resolution: server-authoritative via P2's isKataCategory, per
+  // active category. While null the desk shows a skeleton instead of the
+  // kumite pad, so a kata bout never flashes the wrong console.
+  useEffect(() => {
+    if (!activeCategoryId) {
+      setIsKata(null);
+      return;
+    }
+    let alive = true;
+    setIsKata(null);
+    isKataCategoryForRing(ringId, activeCategoryId)
+      .then((v) => {
+        if (alive) setIsKata(v);
+      })
+      .catch(() => {
+        if (alive) setIsKata(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [ringId, activeCategoryId]);
+
+  // Shared by the kumite pad and the kata console: instant client-side match
+  // count bump, then reload the bout and the next-bout queue. Takes the
+  // assignment as an argument so this hook can live above the early return.
+  const handleBoutCompletedFor = React.useCallback(
+    (assignment: any) => {
+      setAssignments((prev) =>
+        prev.map((a) =>
+          a.id === assignment.id
+            ? { ...a, matches_completed: Math.min((assignment.categories?.expected_matches || 99), (a.matches_completed || 0) + 1) }
+            : a
+        )
+      );
+      setSelectedMatchId(null);
+      loadBoutData();
+      router.refresh();
+    },
+    [loadBoutData, router]
+  );
 
   const refreshAssignments = React.useCallback(async () => {
     try {
@@ -400,7 +449,9 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       {boutData?.hasDraw && (
         <div className="hidden lg:col-span-3 lg:col-start-1 lg:row-start-1 lg:mb-0 lg:flex lg:flex-col lg:gap-2">
           <div className="rounded-xl border border-[#E1DDCF] bg-white p-3 shadow-2xs">
-            {/* Small, quiet mode toggle */}
+            {/* Small, quiet mode toggle — kumite only. Kata bouts are always
+                judge-scored, so the toggle hides once kata mode resolves. */}
+            {isKata !== true && (
             <div className="mb-2 flex items-center rounded-lg border border-[#E1DDCF] bg-[#F5F3EC] p-0.5">
               <button
                 onClick={() => setActiveMode("digital")}
@@ -427,6 +478,7 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
                 Counter
               </button>
             </div>
+            )}
 
             {/* Change bout is the action this desk performs most */}
             <button
@@ -507,30 +559,32 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       <div className="lg:col-span-6 lg:col-start-4 lg:row-span-3 lg:row-start-1">
       {/* Phone/tablet controls. On a laptop these live in the left column, so the
           scoring pad starts at the top of the centre and needs no scrolling. */}
-      {/* Mobile/tablet controls toolbar — compact row */}
+      {/* Mobile/tablet controls toolbar — compact row, thumb-sized targets */}
       {boutData?.hasDraw && (
         <div className="mb-3 sm:mb-4 flex items-center gap-1.5 sm:gap-2 overflow-x-auto scrollbar-none lg:hidden">
-          {/* Mode toggle */}
-          <div className="flex shrink-0 items-center gap-0.5 bg-[#F5F3EC] p-0.5 rounded-lg border border-[#E1DDCF]">
+          {/* Mode toggle — kumite only; kata bouts are always judge-scored */}
+          {isKata !== true && (
+          <div className="flex shrink-0 items-center gap-0.5 bg-[#F5F3EC] p-1 rounded-lg border border-[#E1DDCF]">
             <button
               onClick={() => setActiveMode("digital")}
-              className={`min-h-[36px] px-2.5 py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-all cursor-pointer ${activeMode === "digital" ? "bg-[#0E9C7C] text-white shadow-xs" : "text-[#68645A]"}`}
+              className={`min-h-[48px] px-3 py-1.5 rounded-md text-xs font-bold transition-all cursor-pointer ${activeMode === "digital" ? "bg-[#0E9C7C] text-white shadow-xs" : "text-[#68645A]"}`}
             >
               Runner
             </button>
             <button
               onClick={() => setActiveMode("counter")}
-              className={`min-h-[36px] px-2.5 py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-all cursor-pointer ${activeMode === "counter" ? "bg-[#0E9C7C] text-white shadow-xs" : "text-[#68645A]"}`}
+              className={`min-h-[48px] px-3 py-1.5 rounded-md text-xs font-bold transition-all cursor-pointer ${activeMode === "counter" ? "bg-[#0E9C7C] text-white shadow-xs" : "text-[#68645A]"}`}
             >
               Counter
             </button>
           </div>
+          )}
 
           <button
             onClick={() => setShowBoutSelector(true)}
-            className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg border border-[#E1DDCF] bg-white px-2.5 py-1.5 text-[10px] sm:text-xs font-bold text-[#1B1815] cursor-pointer hover:bg-[#FAF9F5]"
+            className="flex min-h-[48px] shrink-0 items-center gap-1.5 rounded-lg border border-[#E1DDCF] bg-white px-3.5 py-1.5 text-xs font-bold text-[#1B1815] cursor-pointer hover:bg-[#FAF9F5]"
           >
-            <span className="material-symbols-outlined text-[14px]">grid_view</span>
+            <span className="material-symbols-outlined text-[18px]">grid_view</span>
             Bout
           </button>
 
@@ -542,9 +596,9 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
             return (
               <button
                 onClick={() => void handleSelectBout(nextReady.id)}
-                className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[10px] sm:text-xs font-extrabold text-amber-900 cursor-pointer hover:bg-amber-100"
+                className="flex min-h-[48px] shrink-0 items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3.5 py-1.5 text-xs font-extrabold text-amber-900 cursor-pointer hover:bg-amber-100"
               >
-                <span className="material-symbols-outlined text-[14px]">bolt</span>
+                <span className="material-symbols-outlined text-[18px]">bolt</span>
                 Next #{nextReady.matchNo}
               </button>
             );
@@ -552,9 +606,9 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
 
           <button
             onClick={() => setShowBracketModal(true)}
-            className="flex min-h-[36px] shrink-0 items-center gap-1 rounded-lg border border-[#0E9C7C] bg-white px-2.5 py-1.5 text-[10px] sm:text-xs font-bold text-[#0E9C7C] cursor-pointer hover:bg-emerald-50"
+            className="flex min-h-[48px] shrink-0 items-center gap-1.5 rounded-lg border border-[#0E9C7C] bg-white px-3.5 py-1.5 text-xs font-bold text-[#0E9C7C] cursor-pointer hover:bg-emerald-50"
           >
-            <span className="material-symbols-outlined text-[14px]">account_tree</span>
+            <span className="material-symbols-outlined text-[18px]">account_tree</span>
             <span className="hidden sm:inline">Bracket</span>
           </button>
         </div>
@@ -564,8 +618,25 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       {boutData?.hasDraw && activeMode === "digital" && (
         <div className="space-y-4 mb-8">
 
-          {/* Active Bout Scoring Pad with unified clock */}
+          {/* Active bout console: kata workflow for kata categories, the
+              kumite scoring pad otherwise. While kata mode resolves, a
+              skeleton holds the space so the wrong console never flashes. */}
           {boutData.currentMatch ? (
+            isKata === null ? (
+              <div className="space-y-3" aria-label="Loading bout console">
+                <div className="h-24 animate-pulse rounded-2xl bg-surface-container" />
+                <div className="h-64 animate-pulse rounded-2xl bg-surface-container" />
+              </div>
+            ) : isKata ? (
+              <KataBoutConsole
+                key={boutData.currentMatch.id}
+                ringId={ringId}
+                match={boutData.currentMatch}
+                categoryName={activeAssignment.categories?.name || "Category"}
+                onRefresh={() => loadBoutData()}
+                onBoutCompleted={() => handleBoutCompletedFor(activeAssignment)}
+              />
+            ) : (
             <BoutScoringPad
               match={boutData.currentMatch}
               ringId={ringId}
@@ -579,20 +650,9 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
               deskSidesSwapped={deskSidesSwapped}
               onToggleDeskSides={toggleDeskSides}
               deskFontSize={deskFontSize}
-              onBoutCompleted={() => {
-                // Instantly increment match count on client for immediate UI feedback
-                setAssignments((prev) =>
-                  prev.map((a) =>
-                    a.id === activeAssignment.id
-                      ? { ...a, matches_completed: Math.min((activeAssignment.categories?.expected_matches || 99), (a.matches_completed || 0) + 1) }
-                      : a
-                  )
-                );
-                setSelectedMatchId(null);
-                loadBoutData();
-                router.refresh();
-              }}
+              onBoutCompleted={() => handleBoutCompletedFor(activeAssignment)}
             />
+            )
           ) : (
             <div className="p-8 bg-white rounded-2xl border border-[#E1DDCF] text-center">
               <span className="material-symbols-outlined text-4xl text-neutral-400 mb-2">sports_martial_arts</span>

@@ -7,12 +7,13 @@ import { usePathname } from "next/navigation";
 const TABS = [
   { key: "current", label: "Current", icon: "grid_view" },
   { key: "queue", label: "Queue", icon: "format_list_bulleted" },
+  { key: "judges", label: "Judges", icon: "gavel" },
   { key: "controls", label: "Controls", icon: "settings_accessibility" },
 ];
 
 /**
  * Laptop-and-up navigation. The bottom bar is a phone affordance; on a desk
- * the same three destinations live in the header where the pointer already is.
+ * the same four destinations live in the header where the pointer already is.
  */
 export default function ModeratorTopTabs({ ringId }: { ringId: string }) {
   const pathname = usePathname();

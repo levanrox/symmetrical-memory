@@ -24,6 +24,7 @@ import {
   matchEvents,
   matchSlots,
   rings,
+  tournaments,
 } from "@/db/schema";
 import { and, asc, desc, eq, isNull } from "drizzle-orm";
 import { sql } from "drizzle-orm";
@@ -279,12 +280,19 @@ export async function getRingJudgeState(ringId: string) {
     .select({
       id: rings.id,
       name: rings.name,
+      tournamentId: rings.tournamentId,
       currentMatchId: rings.currentMatchId,
     })
     .from(rings)
     .where(eq(rings.id, ringId))
     .limit(1);
   if (!ring) throw new Error("Ring not found");
+
+  const [tournament] = await db
+    .select({ id: tournaments.id, name: tournaments.name })
+    .from(tournaments)
+    .where(eq(tournaments.id, ring.tournamentId))
+    .limit(1);
 
   const panelSize = await panelSizeForRing(ringId);
   const activeCode = await findActiveJoinCode(ringId);
@@ -343,6 +351,7 @@ export async function getRingJudgeState(ringId: string) {
 
   return {
     ring: { id: ring.id, name: ring.name },
+    tournament: tournament ? { id: tournament.id, name: tournament.name } : null,
     joinCode: activeCode
       ? {
           code: activeCode.code,
@@ -927,6 +936,121 @@ export async function refreshKataGroupStandings(categoryId: string, groupId: str
   await authorizeJudgeRing(assignment.ringId);
   const standings = await recomputeGroupStandings(categoryId, groupId);
   return { success: true, standings };
+}
+
+// ---------------------------------------------------------------------------
+// Kata bout tally + helpers (P5)
+// ---------------------------------------------------------------------------
+
+export interface KataBoutSeatTally {
+  seatNumber: number;
+  judgeName: string | null;
+  aka: { tenths: number; isManual: boolean } | null;
+  ao: { tenths: number; isManual: boolean } | null;
+}
+
+/**
+ * Per-seat judge tally for a kata bout: seats 1..panelSize with the current
+ * occupant's name and each side's mark (null when not submitted).
+ *
+ * Explicit field selection throughout — `sessionToken` never leaves the DB.
+ * Scores are grouped by seatNumber (the stable identity the moderator sees);
+ * the judge name is the seat's current occupant. Manual placeholder seats
+ * (created by `submitManualScore` for empty seats) carry the
+ * "Manual entry · Seat N" name so the moderator can tell them apart.
+ */
+export async function getKataBoutTally(matchId: string): Promise<{
+  matchId: string;
+  status: string;
+  panelSize: number;
+  seats: KataBoutSeatTally[];
+}> {
+  const ringId = await ringIdForMatchLocal(matchId);
+  if (!ringId) throw new Error("Match is not currently assigned to a ring");
+  await authorizeJudgeRing(ringId);
+  const bout = await assertKataMatch(matchId);
+  const panelSize = await panelSizeForRing(ringId);
+
+  const approved = await db
+    .select({
+      judgeName: judgeRequests.judgeName,
+      seatNumber: judgeRequests.seatNumber,
+    })
+    .from(judgeRequests)
+    .where(
+      and(eq(judgeRequests.ringId, ringId), eq(judgeRequests.status, "approved"))
+    )
+    .orderBy(asc(judgeRequests.seatNumber));
+
+  const scoreRows = await db
+    .select({
+      seatNumber: kataScores.seatNumber,
+      side: kataScores.side,
+      scoreTenths: kataScores.scoreTenths,
+      isManual: kataScores.isManual,
+    })
+    .from(kataScores)
+    .where(eq(kataScores.matchId, matchId));
+
+  const seats: KataBoutSeatTally[] = Array.from(
+    { length: panelSize },
+    (_, i) => {
+      const seatNumber = i + 1;
+      const occupant = approved.find((a) => a.seatNumber === seatNumber);
+      const akaRow = scoreRows.find(
+        (r) => r.seatNumber === seatNumber && r.side === "AKA"
+      );
+      const aoRow = scoreRows.find(
+        (r) => r.seatNumber === seatNumber && r.side === "AO"
+      );
+      return {
+        seatNumber,
+        judgeName: occupant?.judgeName ?? null,
+        aka: akaRow
+          ? { tenths: akaRow.scoreTenths, isManual: akaRow.isManual }
+          : null,
+        ao: aoRow
+          ? { tenths: aoRow.scoreTenths, isManual: aoRow.isManual }
+          : null,
+      };
+    }
+  );
+
+  return { matchId, status: bout.status, panelSize, seats };
+}
+
+/**
+ * Server-authoritative kata check for a category, using P2's
+ * `isKataCategory` (definition event_type first, name fallback). The kata
+ * console is a kata-mode screen, so it authorizes through the judge ladder.
+ */
+export async function isKataCategoryForRing(
+  ringId: string,
+  categoryId: string
+): Promise<boolean> {
+  await authorizeJudgeRing(ringId);
+  const [cat] = await db
+    .select({ tournamentId: categories.tournamentId, name: categories.name })
+    .from(categories)
+    .where(eq(categories.id, categoryId))
+    .limit(1);
+  if (!cat) return false;
+  return isKataCategory({ tournamentId: cat.tournamentId, name: cat.name });
+}
+
+/** Lightweight pending-approval count for the moderator nav badge. */
+export async function getPendingJudgeCount(ringId: string): Promise<number> {
+  await authorizeJudgeRing(ringId);
+  const rows = await db
+    .select({ id: judgeRequests.id })
+    .from(judgeRequests)
+    .where(
+      and(
+        eq(judgeRequests.ringId, ringId),
+        eq(judgeRequests.status, "pending")
+      )
+    );
+  return rows.length;
 }
 
 // ---------------------------------------------------------------------------
