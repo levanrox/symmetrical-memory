@@ -7,14 +7,83 @@ import {
   drawVersions,
   matches,
   matchSlots,
+  tournamentCategoryDefinitions,
   tournaments,
 } from "@/db/schema";
 import { generateDraw } from "@/engine/draw-engine";
 import type { DrawGraph, Participant } from "@/engine/draw-engine/types";
 import { foughtBoutCount } from "@/lib/draws/boutCount";
+import {
+  buildKataGroups,
+  buildKataGroupsSnapshot,
+  buildKataStageGraph,
+  DEFAULT_KATA_ADVANCE_PER_GROUP,
+  kataFoughtBoutCount,
+  parseKataDrawFormat,
+  parseKataRankingMethod,
+  roundRobinBouts,
+  type KataDrawFormat,
+  type KataGroupsSnapshot,
+  type KataParticipant,
+  type KataRankingMethod,
+} from "./kataDraws";
 import { WKF_KATA_2026, WKF_KUMITE_2026 } from "@/engine/rules-engine";
 import { eq, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
+
+/**
+ * Kata detection, P2.
+ *
+ * Prefers the explicit `event_type` on the tournament's category definitions —
+ * matched by normalised category name, the same key the definition-sync
+ * actions use — and falls back to the historical name-contains-"kata" check
+ * when the category was created ad-hoc without a definition.
+ */
+export async function isKataCategory(category: {
+  tournamentId: string;
+  name: string;
+}): Promise<boolean> {
+  const defs = await db
+    .select({
+      categoryName: tournamentCategoryDefinitions.categoryName,
+      eventType: tournamentCategoryDefinitions.eventType,
+    })
+    .from(tournamentCategoryDefinitions)
+    .where(eq(tournamentCategoryDefinitions.tournamentId, category.tournamentId));
+
+  const norm = category.name.toLowerCase().trim();
+  const def = defs.find((d) => d.categoryName.toLowerCase().trim() === norm);
+  if (def) return def.eventType === "kata" || def.eventType === "team_kata";
+  return category.name.toLowerCase().includes("kata");
+}
+
+/** One row of the entrant list, from either the entries table or the legacy path. */
+interface DrawParticipantRow {
+  athleteId: string;
+  name: string;
+  school: string | null;
+  dojo: string | null;
+  seed: number | null;
+}
+
+export interface CategoryDrawSuccess {
+  success: true;
+  drawId: string;
+  matchCount: number;
+  foughtBouts: number;
+  version: number;
+  /** Only present on the kata group-format path (P2). */
+  kataFormat?: KataDrawFormat;
+  /** Only present on the kata group-format path (P2). */
+  groupCount?: number;
+}
+
+export interface CategoryDrawFailure {
+  success: false;
+  error: string;
+}
+
+export type CategoryDrawResult = CategoryDrawSuccess | CategoryDrawFailure;
 
 /**
  * The unimplemented-by-design core of draw generation: pure database work with
@@ -24,7 +93,7 @@ import { revalidatePath } from "next/cache";
 export async function performCategoryDraw(
   categoryId: string,
   options?: { bronzeMedals?: 0 | 1 | 2; separateByClub?: boolean }
-) {
+): Promise<CategoryDrawResult> {
   // 1. Fetch category
   const [cat] = await db
     .select()
@@ -66,7 +135,7 @@ export async function performCategoryDraw(
     .where(eq(categoryEntries.categoryId, categoryId));
 
   // Fallback: if category_entries is empty, check legacy athletes.category_id
-  let participantList = entries;
+  let participantList: DrawParticipantRow[] = entries;
   if (participantList.length === 0) {
     const legacyAthletes = await db
       .select({
@@ -98,8 +167,24 @@ export async function performCategoryDraw(
   }));
 
   // 4. Select ruleset
-  const isKata = cat.name.toLowerCase().includes("kata");
-  const ruleset = isKata ? WKF_KATA_2026 : WKF_KUMITE_2026;
+  const kata = await isKataCategory(cat);
+  const ruleset = kata ? WKF_KATA_2026 : WKF_KUMITE_2026;
+
+  // 4b. Kata group formats (P2) bypass the single-elimination engine: the
+  // groups, round-robin bouts and (for GROUPS_THEN_ELIMINATION) the
+  // placeholder elimination bracket are built by kataDraws and persisted by
+  // the same persistDrawGraph below. Kumite and single-elimination kata keep
+  // the existing path untouched.
+  const kataFormat = parseKataDrawFormat(cat.kataFormat);
+  if (kata && kataFormat !== "SINGLE_ELIM_REPECHAGE") {
+    return performKataGroupDraw(categoryId, cat, participantList, {
+      format: kataFormat,
+      rankingMethod: parseKataRankingMethod(cat.kataRankingMethod),
+      advancePerGroup: cat.kataAdvancePerGroup ?? DEFAULT_KATA_ADVANCE_PER_GROUP,
+      groupSizeOverride: cat.kataGroupSize ?? null,
+      bronzeMedals,
+    });
+  }
 
   // 5. Run draw engine
   const graph: DrawGraph = generateDraw(
@@ -123,6 +208,105 @@ export async function performCategoryDraw(
   );
 
   // 6. Save draw into database atomically
+  const result = await persistDrawGraph({
+    categoryId,
+    tournamentId: cat.tournamentId,
+    graph,
+    bronzeMedals,
+    kataGroups: null,
+    foughtBouts: foughtBoutCount(graph),
+  });
+
+  return { success: true, ...result };
+}
+
+/**
+ * The kata group-stage draw path (P2).
+ *
+ * Builds the groups (WKF 3.7.9 sizing, top-4 seeds distributed, seeded-random
+ * fill), the round-robin bouts, and — for GROUPS_THEN_ELIMINATION — the
+ * placeholder elimination bracket, then persists everything through the same
+ * transactional writer as the elimination path.
+ */
+async function performKataGroupDraw(
+  categoryId: string,
+  cat: { tournamentId: string; name: string },
+  participantList: DrawParticipantRow[],
+  opts: {
+    format: KataDrawFormat;
+    rankingMethod: KataRankingMethod;
+    advancePerGroup: number;
+    groupSizeOverride: number | null;
+    bronzeMedals: 0 | 1 | 2;
+  }
+): Promise<CategoryDrawSuccess> {
+  const participants: KataParticipant[] = participantList.map((p) => ({
+    registrationId: p.athleteId,
+    displayName: p.name,
+    clubId: p.school || p.dojo || "Independent",
+    districtId: null,
+    seed: p.seed ?? null,
+  }));
+
+  const randomSeed = Date.now();
+  const groups = buildKataGroups(participants, {
+    categoryId,
+    groupSizeOverride: opts.groupSizeOverride,
+    randomSeed,
+  });
+  const pairings = groups.flatMap(roundRobinBouts);
+  const graph = buildKataStageGraph({
+    categoryId,
+    rulesetId: WKF_KATA_2026.id,
+    format: opts.format,
+    groups,
+    pairings,
+    advancePerGroup: opts.advancePerGroup,
+    rankingMethod: opts.rankingMethod,
+    randomSeed,
+  });
+
+  const snapshot = buildKataGroupsSnapshot({
+    format: opts.format,
+    rankingMethod: opts.rankingMethod,
+    advancePerGroup: opts.advancePerGroup,
+    randomSeed,
+    groups,
+  });
+
+  const result = await persistDrawGraph({
+    categoryId,
+    tournamentId: cat.tournamentId,
+    graph,
+    bronzeMedals: opts.bronzeMedals,
+    kataGroups: snapshot,
+    foughtBouts: kataFoughtBoutCount(graph),
+  });
+
+  return {
+    success: true,
+    ...result,
+    kataFormat: opts.format,
+    groupCount: groups.length,
+  };
+}
+
+/**
+ * Transactional draw writer shared by both draw paths: replaces the
+ * category's matches, upserts the draw row, snapshots the graph version, and
+ * records the bout count the progress bars read.
+ */
+async function persistDrawGraph(args: {
+  categoryId: string;
+  tournamentId: string;
+  graph: DrawGraph;
+  bronzeMedals: 0 | 1 | 2;
+  kataGroups: KataGroupsSnapshot | null;
+  foughtBouts: number;
+}) {
+  const { categoryId, tournamentId, graph, bronzeMedals, kataGroups, foughtBouts } =
+    args;
+
   const result = await db.transaction(async (tx) => {
     // Delete existing matches and slots (cascade deletes slots)
     await tx.delete(matches).where(eq(matches.categoryId, categoryId));
@@ -148,6 +332,7 @@ export async function performCategoryDraw(
           checksum: graph.checksum,
           state: "DRAFT",
           bronzeMedals,
+          kataGroups,
         })
         .where(eq(draws.id, drawId));
     } else {
@@ -162,6 +347,7 @@ export async function performCategoryDraw(
         checksum: graph.checksum,
         state: "DRAFT",
         bronzeMedals,
+        kataGroups,
       });
     }
 
@@ -174,7 +360,8 @@ export async function performCategoryDraw(
       reason: "Generated by organizer",
     });
 
-    // Insert exploded matches
+    // Insert exploded matches. Group-stage bouts carry their group id so the
+    // ring queue and results views can filter/sort by group.
     if (graph.matches.length > 0) {
       await tx.insert(matches).values(
         graph.matches.map((m) => ({
@@ -184,6 +371,7 @@ export async function performCategoryDraw(
           roundNo: m.roundNo,
           roundName: m.roundName,
           bracketType: m.bracketType,
+          groupId: m.poolId ?? null,
           status: "SCHEDULED",
         }))
       );
@@ -205,10 +393,8 @@ export async function performCategoryDraw(
 
     // The category's bout count is now a fact rather than the athletes-minus-one
     // estimate: every progress bar reads "Match X of Y" straight from this
-    // column. `foughtBoutCount` excludes byes and empty matches, so 100% stays
-    // reachable once every real bout is confirmed.
-    const foughtBouts = foughtBoutCount(graph);
-
+    // column. Byes and empty matches are excluded, so 100% stays reachable
+    // once every real bout is confirmed.
     await tx
       .update(categories)
       .set({ expectedMatches: foughtBouts })
@@ -218,9 +404,9 @@ export async function performCategoryDraw(
   });
 
   try {
-    revalidatePath(`/admin/event/${cat.tournamentId}/categories`);
+    revalidatePath(`/admin/event/${tournamentId}/categories`);
   } catch {}
-  return { success: true, ...result };
+  return result;
 }
 
 export async function performGenerateAllTournamentDraws(
