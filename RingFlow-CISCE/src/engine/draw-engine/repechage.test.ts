@@ -87,12 +87,18 @@ describe('buildRepechage — structure', () => {
     expect(build.matches.filter((match) => match.bracketType === 'REPECHAGE')).toHaveLength(2);
   });
 
-  it('runs the two lines against each other when only one bronze is awarded', () => {
+  it('runs only the semifinal losers against each other when local official one bronze is awarded', () => {
     const build = buildRepechage('cat-1', { roundsTotal: 3, bronzeMedals: 1, firstMatchNo: 1 });
 
-    // Two ladders plus one final bout between their winners.
-    expect(build.matches).toHaveLength(3);
-    expect(build.matches.filter((match) => match.bracketType === 'BRONZE')).toHaveLength(1);
+    // Only one bronze match between the two semifinal losers — early round losers eliminated
+    expect(build.matches).toHaveLength(1);
+    expect(build.matches[0].bracketType).toBe('BRONZE');
+  });
+
+  it('generates zero extra matches when local official joint bronze (3) is awarded', () => {
+    const build = buildRepechage('cat-1', { roundsTotal: 3, bronzeMedals: 3, firstMatchNo: 1 });
+
+    expect(build.matches).toHaveLength(0);
   });
 
   it('binds every rung lazily, by line and round', () => {
@@ -146,8 +152,8 @@ describe('repechage — the medals it actually awards', () => {
 
     const bronze = bronzeOf(graph);
     expect(bronze).toHaveLength(1);
-    // The two line winners (p8 and p7) meet; AKA takes it.
-    expect(bronze).toEqual(['p8']);
+    // The two semifinal losers (p4 and p3) meet; AKA (p4) takes it.
+    expect(bronze).toEqual(['p4']);
   });
 
   it('awards no bronze at all when the organiser asks for none', () => {

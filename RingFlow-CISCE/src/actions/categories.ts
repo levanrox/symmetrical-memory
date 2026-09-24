@@ -6,6 +6,7 @@ import { eq, and } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { ensureAdminOwnsTournament } from "./admin";
 import { CategoryInput } from "./tournament";
+import { syncTournamentCategoryCounts } from "@/lib/categories/syncCounts";
 
 export async function addCategory(tournamentId: string, input: CategoryInput) {
   await ensureAdminOwnsTournament(tournamentId);
@@ -32,6 +33,7 @@ export async function addCategory(tournamentId: string, input: CategoryInput) {
     })
     .returning();
 
+  await syncTournamentCategoryCounts(tournamentId);
   revalidatePath(`/admin/event/${tournamentId}/categories`);
   return newCat;
 }
@@ -64,6 +66,7 @@ export async function bulkAddCategories(tournamentId: string, inputCategories: a
 
   if (toInsert.length > 0) {
     await db.insert(categories).values(toInsert);
+    await syncTournamentCategoryCounts(tournamentId);
   }
 
   revalidatePath(`/admin/event/${tournamentId}/categories`);

@@ -410,11 +410,22 @@ function computePodium(
   const finalResult = resolved.get(final.id);
   if (finalResult === undefined || finalResult.winnerRegistrationId === null) return null;
 
-  const bronze = graph.matches
+  let bronze = graph.matches
     .filter((match) => match.bracketType === 'BRONZE')
     .map((match) => resolved.get(match.id))
     .map((match) => match?.winnerRegistrationId ?? null)
     .filter((id): id is string => id !== null);
+
+  if (bronze.length === 0 && graph.bronzeMedals === 3) {
+    // Local Official: both semifinal losers receive bronze directly
+    const semiIds = finalResult.slots
+      .map((s) => s.sourceMatchId)
+      .filter((id): id is string => Boolean(id));
+
+    bronze = semiIds
+      .map((id) => resolved.get(id)?.loserRegistrationId ?? null)
+      .filter((id): id is string => id !== null);
+  }
 
   return {
     goldRegistrationId: finalResult.winnerRegistrationId,

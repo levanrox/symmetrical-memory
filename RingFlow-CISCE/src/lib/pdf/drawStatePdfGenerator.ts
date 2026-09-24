@@ -158,8 +158,10 @@ export async function generateDrawStatePdfBytes(data: DrawStatePdfData): Promise
       category.bronzeMedals === 0
         ? "no bronze bout"
         : category.bronzeMedals === 1
-          ? "single bronze"
-          : "two bronzes";
+          ? "local official (single bronze)"
+          : category.bronzeMedals === 3
+            ? "local official (joint bronzes)"
+            : "two bronzes (WKF repechage)";
     page.drawText(
       ellipsize(
         `${category.matches.length} bouts · ${withScores} with points · ${summary}`,

@@ -43,7 +43,7 @@ export interface RepechageBuild {
  */
 export function buildRepechage(
   categoryId: string,
-  options: { roundsTotal: number; bronzeMedals: 1 | 2; firstMatchNo: number },
+  options: { roundsTotal: number; bronzeMedals: 1 | 2 | 3; firstMatchNo: number },
 ): RepechageBuild {
   const { roundsTotal, bronzeMedals, firstMatchNo } = options;
 
@@ -51,6 +51,12 @@ export function buildRepechage(
   // A bracket of two has none: no repechage, and no bronze to award.
   const rungsPerLine = roundsTotal - 1;
   if (rungsPerLine < 1) {
+    return { matches: [], slots: [] };
+  }
+
+  // bronzeMedals === 3: Local Official joint bronze — both semifinal losers are awarded
+  // bronze directly without fighting extra bouts. No matches or slots needed.
+  if (bronzeMedals === 3) {
     return { matches: [], slots: [] };
   }
 
@@ -85,6 +91,17 @@ export function buildRepechage(
 
   const topOfLine = new Map<'A' | 'B', SlotFiller>();
 
+  if (bronzeMedals === 1) {
+    // Local Official: Only semifinal losers compete for a single bronze.
+    // Early round losers are eliminated ("rest all gone"); no intermediate repechage ladders.
+    topOfLine.set('A', { kind: 'REPECHAGE', line: 'A', roundNo: rungsPerLine - 1 });
+    topOfLine.set('B', { kind: 'REPECHAGE', line: 'B', roundNo: rungsPerLine - 1 });
+    addMatch('BRONZE', [mustTop(topOfLine, 'A'), mustTop(topOfLine, 'B')]);
+    return { matches, slots };
+  }
+
+  // Official WKF repechage (bronzeMedals === 2):
+  // Build full ladders for all entrants beaten by finalists in lines A and B.
   for (const line of ['A', 'B'] as const) {
     if (rungsPerLine === 1) {
       // Only one round in the half, so the line holds a single entrant: the
@@ -98,7 +115,7 @@ export function buildRepechage(
     for (let rung = 1; rung < rungsPerLine; rung += 1) {
       const isTopOfLadder = rung === rungsPerLine - 1;
 
-      const match = addMatch(isTopOfLadder && bronzeMedals === 2 ? 'BRONZE' : 'REPECHAGE', [
+      const match = addMatch(isTopOfLadder ? 'BRONZE' : 'REPECHAGE', [
         previous,
         { kind: 'REPECHAGE', line, roundNo: rung },
       ]);
@@ -109,17 +126,12 @@ export function buildRepechage(
     topOfLine.set(line, previous);
   }
 
-  if (bronzeMedals === 2) {
-    if (rungsPerLine === 1) {
-      // Each line has one survivor and no natural bout. Modelled as a walkover
-      // rather than a special "awarded without fighting" concept, so resolution
-      // treats it the same way it treats every other bye.
-      addMatch('BRONZE', [mustTop(topOfLine, 'A'), { kind: 'BYE' }]);
-      addMatch('BRONZE', [mustTop(topOfLine, 'B'), { kind: 'BYE' }]);
-    }
-  } else {
-    // One bronze: the two lines meet each other.
-    addMatch('BRONZE', [mustTop(topOfLine, 'A'), mustTop(topOfLine, 'B')]);
+  if (rungsPerLine === 1) {
+    // Each line has one survivor and no natural bout. Modelled as a walkover
+    // rather than a special "awarded without fighting" concept, so resolution
+    // treats it the same way it treats every other bye.
+    addMatch('BRONZE', [mustTop(topOfLine, 'A'), { kind: 'BYE' }]);
+    addMatch('BRONZE', [mustTop(topOfLine, 'B'), { kind: 'BYE' }]);
   }
 
   return { matches, slots };

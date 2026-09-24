@@ -49,7 +49,7 @@ export function generateDraw(input: DrawInput, ruleset: Ruleset): DrawGraph {
   // the ladder nor the bronze bouts.
   const roundsTotal = totalRounds(size);
   const bronzeMedals = input.options?.bronzeMedals ?? 2;
-  const awardsBronze = bronzeMedals === 1 || bronzeMedals === 2;
+  const awardsBronze = bronzeMedals === 1 || bronzeMedals === 2 || bronzeMedals === 3;
   const repechage =
     input.format === 'SINGLE_ELIM_REPECHAGE' && awardsBronze
       ? buildRepechage(input.categoryId, {
@@ -100,6 +100,7 @@ export function generateDraw(input: DrawInput, ruleset: Ruleset): DrawGraph {
     rulesetId: ruleset.id,
     tournamentSize: size,
     byeCount: byes,
+    bronzeMedals,
     randomSeed: input.seeding.mode === 'RANDOM_SEEDED' ? (input.seeding.randomSeed ?? null) : null,
     rounds,
     matches,

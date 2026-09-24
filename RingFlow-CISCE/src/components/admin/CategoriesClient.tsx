@@ -7,32 +7,19 @@ import { CategoryInput } from "@/actions/tournament";
 import { matchesCategorySearch } from "@/lib/searchUtils";
 import * as XLSX from "xlsx";
 import { PdfViewerModal } from "@/components/ui/PdfViewerModal";
-import { generateAllTournamentDraws, generateCategoryDraw, setCategoryDrawOption, setKataDrawFormat } from "@/actions/draws";
+import { generateAllTournamentDraws, generateCategoryDraw, setCategoryDrawOption, toggleCategoryDrawLock } from "@/actions/draws";
 import { downloadAllCategoryDrawPdfs, downloadCategoryDrawPdf } from "@/actions/drawPdfs";
 import { exportTournamentResultsCsv, exportTournamentResultsPdf } from "@/actions/resultsExport";
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import { CategoryDefinitionsModal } from "@/components/admin/CategoryDefinitionsModal";
-import { KataDrawSettingsModal, type KataDrawSettingsDraft } from "@/components/admin/KataDrawSettingsModal";
+import { CategoryDrawDrawer, type CategoryDrawInfo } from "@/components/admin/CategoryDrawDrawer";
+import { BulkDrawGenerationModal } from "@/components/admin/BulkDrawGenerationModal";
 import { useRouter } from "next/navigation";
 
-type Category = {
-  id: string;
-  name: string;
-  age_bracket: string | null;
-  weight_class: string | null;
-  athletes_count: number;
-  expected_matches: number;
-  doc_url?: string | null;
-  /** 0 = no bronze, 1 = single bronze, 2 = repechage; null inherits the event default. */
-  bronze_medals?: number | null;
-  /** Kata draw settings; null/undefined = event defaults. */
-  kataFormat?: string | null;
-  kataRankingMethod?: string | null;
-  kataAdvancePerGroup?: number | null;
-  kataGroupSize?: number | null;
-  /** True when the draw engine treats this category as kata. */
-  is_kata?: boolean;
-};
+/** CategoryDrawInfo carries the draw-lifecycle fields plus the kata draw
+ *  settings (extended in CategoryDrawDrawer), so the drawer is the single
+ *  place where both kumite and kata draw settings live. */
+type Category = CategoryDrawInfo;
 
 interface Props {
   tournamentId: string;
@@ -67,10 +54,11 @@ export default function CategoriesClient({
   // Digital Draws & Official Rules State
   const [showDefinitionsModal, setShowDefinitionsModal] = useState(false);
   const [bracketModalCategory, setBracketModalCategory] = useState<{ id: string; name: string } | null>(null);
-  const [kataSettingsCategory, setKataSettingsCategory] = useState<Category | null>(null);
-  const [savingKataSettings, setSavingKataSettings] = useState(false);
+  const [selectedDrawerCategory, setSelectedDrawerCategory] = useState<Category | null>(null);
+  const [showBulkModal, setShowBulkModal] = useState(false);
   const [isGeneratingAllDraws, setIsGeneratingAllDraws] = useState(false);
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null);
+  const [togglingLockId, setTogglingLockId] = useState<string | null>(null);
   const router = useRouter();
   const [isDownloadingAllPdfs, setIsDownloadingAllPdfs] = useState(false);
   const [exporting, setExporting] = useState<"csv" | "pdf" | null>(null);
@@ -346,18 +334,8 @@ export default function CategoriesClient({
   };
 
   // ── Digital Draws & Bulk PDF Handlers ───────────────────────────────────────
-  const handleGenerateAllDraws = async () => {
-    if (!confirm("Generate digital tournament draws for all categories? This will compute seeded brackets, byes, and school separation.")) return;
-
-    try {
-      setIsGeneratingAllDraws(true);
-      const res = await generateAllTournamentDraws(tournamentId);
-      alert(`Draw Generation Complete!\n- Generated: ${res.generatedCount} categories\n- Skipped: ${res.skippedCount} categories (< 2 athletes)\n${res.errors.length > 0 ? '\nNotices:\n' + res.errors.join('\n') : ''}`);
-    } catch (err: any) {
-      alert(`Failed to generate draws: ${err.message}`);
-    } finally {
-      setIsGeneratingAllDraws(false);
-    }
+  const handleGenerateAllDraws = () => {
+    setShowBulkModal(true);
   };
 
   const handleDownloadAllDrawPdfs = async () => {
@@ -425,9 +403,21 @@ export default function CategoriesClient({
 
   /** Rebuild one category's bracket, using its own bronze setting. */
   const handleGenerateOneDraw = async (cat: any) => {
+    if (cat.is_locked) {
+      const unlockFirst = confirm(
+        `Category "${cat.name}" draw is LOCKED to protect matches.\n\nRegenerating will replace this bracket. Do you want to unlock and regenerate?`
+      );
+      if (!unlockFirst) return;
+    } else if (cat.confirmed_matches > 0) {
+      const forceOk = confirm(
+        `CAUTION: Category "${cat.name}" already has ${cat.confirmed_matches} completed match(es).\n\nRegenerating will wipe these matches and create a new bracket. Are you absolutely sure you want to proceed?`
+      );
+      if (!forceOk) return;
+    }
+
     setRegeneratingId(cat.id);
     try {
-      const res = await generateCategoryDraw(cat.id);
+      const res = await generateCategoryDraw(cat.id, { forceRegenerate: true });
       if (!res.success) {
         alert(res.error || "Could not generate the draw for this category.");
         return;
@@ -440,12 +430,43 @@ export default function CategoriesClient({
     }
   };
 
+  const handleToggleLock = async (cat: Category) => {
+    if (!cat.has_draw && !cat.draw_state) {
+      alert("Please generate a digital draw for this category first before locking.");
+      return;
+    }
+    setTogglingLockId(cat.id);
+    try {
+      const res = await toggleCategoryDrawLock(cat.id);
+      if (!res.success) {
+        alert(res.error || "Failed to update draw lock state.");
+        return;
+      }
+      setCategories((prev) =>
+        prev.map((c) =>
+          c.id === cat.id
+            ? {
+                ...c,
+                is_locked: res.state === "LOCKED",
+                draw_state: res.state,
+              }
+            : c
+        )
+      );
+      router.refresh();
+    } catch (err: any) {
+      alert(err?.message || "Failed to toggle draw lock.");
+    } finally {
+      setTogglingLockId(null);
+    }
+  };
+
   /**
    * Record how many bronze medals this category awards. Stored on the category;
    * it takes effect the next time the draw is generated.
    */
   const handleBronzeChange = async (cat: any, value: string) => {
-    const bronzeMedals = value === "inherit" ? null : (Number(value) as 0 | 1 | 2);
+    const bronzeMedals = value === "inherit" ? null : (Number(value) as 0 | 1 | 2 | 3);
     const res = await setCategoryDrawOption(cat.id, bronzeMedals);
     if (!res.success) {
       alert(res.error || "Could not save the bronze setting.");
@@ -459,68 +480,6 @@ export default function CategoriesClient({
       "Bronze setting saved. Regenerate this category's draw now so the bracket matches?"
     )) {
       await handleGenerateOneDraw(cat);
-    }
-  };
-
-  /**
-   * Record this kata category's draw format, inline in the row exactly like
-   * the bronze selector. Stored on the category; it takes effect the next
-   * time the draw is generated. Mirrors the bronze flow: save, update local
-   * state, offer the rebuild.
-   */
-  const handleKataFormatChange = async (cat: any, value: string) => {
-    const kataFormat = value === "" ? null : value;
-    const res = await setKataDrawFormat(cat.id, { kataFormat });
-    if (!res.success) {
-      alert(res.error || "Could not save the kata draw format.");
-      return;
-    }
-    const updated = { ...cat, kataFormat };
-    setCategories((prev) =>
-      prev.map((c) => (c.id === cat.id ? updated : c))
-    );
-    // An existing bracket was built with the old format; offer the rebuild.
-    if (window.confirm(
-      "Draw format saved. Regenerate this category's draw now so it matches?"
-    )) {
-      await handleGenerateOneDraw(updated);
-    }
-  };
-
-  /**
-   * Record this kata category's advanced group settings (ranking method,
-   * advancers, group size). Stored on the category; it takes effect the next
-   * time the draw is generated. Mirrors the bronze flow: save, update local
-   * state, offer the rebuild.
-   */
-  const handleKataSettingsSave = async (draft: KataDrawSettingsDraft) => {
-    const cat = kataSettingsCategory;
-    if (!cat) return;
-    setSavingKataSettings(true);
-    try {
-      const patch = {
-        kataRankingMethod: draft.kataRankingMethod || null,
-        kataAdvancePerGroup: draft.kataAdvancePerGroup === "" ? null : Number(draft.kataAdvancePerGroup),
-        kataGroupSize: draft.kataGroupSize === "" ? null : Number(draft.kataGroupSize),
-      };
-      const res = await setKataDrawFormat(cat.id, patch);
-      if (!res.success) {
-        alert(res.error || "Could not save the kata draw settings.");
-        return;
-      }
-      const updated = { ...cat, ...patch };
-      setCategories((prev) =>
-        prev.map((c) => (c.id === cat.id ? updated : c))
-      );
-      setKataSettingsCategory(null);
-      // An existing bracket was built with the old settings; offer the rebuild.
-      if (window.confirm(
-        "Kata draw settings saved. Regenerate this category's draw now so the bracket matches?"
-      )) {
-        await handleGenerateOneDraw(updated);
-      }
-    } finally {
-      setSavingKataSettings(false);
     }
   };
 
@@ -734,13 +693,14 @@ export default function CategoriesClient({
         <table className="w-full table-fixed min-w-[340px] sm:min-w-0 text-left border-collapse">
           <thead className="bg-surface-container-low border-b border-outline-variant">
             <tr>
-              <th className={`${readOnly ? "w-[40%] sm:w-[42%] md:w-[36%]" : "w-[34%] sm:w-[34%] md:w-[30%]"} px-2.5 sm:px-4 md:px-6 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant`}>Name</th>
-              <th className={`${readOnly ? "w-[18%] sm:w-[18%] md:w-[18%]" : "w-[15%] sm:w-[16%] md:w-[15%]"} px-1.5 sm:px-3 md:px-4 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant`}>Age</th>
-              <th className={`${readOnly ? "w-[22%] sm:w-[22%] md:w-[18%]" : "w-[18%] sm:w-[18%] md:w-[15%]"} px-1.5 sm:px-3 md:px-4 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant`}>Weight</th>
-              <th className={`${readOnly ? "w-[20%] sm:w-[18%] md:w-[12%]" : "w-[18%] sm:w-[16%] md:w-[11%]"} px-1.5 sm:px-2 md:px-4 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant text-center whitespace-nowrap`}>Athletes</th>
-              <th className="hidden md:table-cell md:w-[16%] px-2 md:px-4 py-3 sm:py-4 font-label-caps text-label-caps text-on-surface-variant text-center">Expected Matches</th>
+              <th className={`${readOnly ? "w-[38%] sm:w-[38%] md:w-[32%]" : "w-[28%] sm:w-[28%] md:w-[26%]"} px-2.5 sm:px-4 md:px-6 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant`}>Name</th>
+              <th className={`${readOnly ? "w-[16%] sm:w-[16%] md:w-[15%]" : "w-[14%] sm:w-[14%] md:w-[12%]"} px-1.5 sm:px-3 md:px-4 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant`}>Age</th>
+              <th className={`${readOnly ? "w-[18%] sm:w-[18%] md:w-[15%]" : "w-[16%] sm:w-[16%] md:w-[12%]"} px-1.5 sm:px-3 md:px-4 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant`}>Weight</th>
+              <th className={`${readOnly ? "w-[14%] sm:w-[14%] md:w-[10%]" : "w-[12%] sm:w-[12%] md:w-[9%]"} px-1.5 sm:px-2 md:px-4 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant text-center whitespace-nowrap`}>Athletes</th>
+              <th className="w-[16%] sm:w-[16%] md:w-[15%] px-2 md:px-3 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant text-center">Draw State</th>
+              <th className="hidden md:table-cell md:w-[10%] px-2 md:px-4 py-3 sm:py-4 font-label-caps text-label-caps text-on-surface-variant text-center">Matches</th>
               {!readOnly && (
-                <th className="w-[15%] sm:w-[16%] md:w-[14%] px-2 sm:px-4 md:px-6 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant text-right">Actions</th>
+                <th className="w-[14%] sm:w-[14%] md:w-[16%] px-2 sm:px-4 md:px-6 py-3 sm:py-4 font-label-caps text-[11.5px] sm:text-label-caps text-on-surface-variant text-right">Actions</th>
               )}
             </tr>
           </thead>
@@ -752,6 +712,7 @@ export default function CategoriesClient({
                 <td className="px-1.5 sm:px-3 md:px-4 py-2"><input value={addForm.age_bracket} onChange={e => setAddForm({ ...addForm, age_bracket: e.target.value })} placeholder="Age" className="w-full p-1.5 sm:p-2 text-xs sm:text-sm border rounded" /></td>
                 <td className="px-1.5 sm:px-3 md:px-4 py-2"><input value={addForm.weight_class} onChange={e => setAddForm({ ...addForm, weight_class: e.target.value })} placeholder="Weight" className="w-full p-1.5 sm:p-2 text-xs sm:text-sm border rounded" /></td>
                 <td className="px-1 sm:px-2 md:px-4 py-2"><input type="number" value={addForm.athletes_count} onChange={e => setAddForm({ ...addForm, athletes_count: parseInt(e.target.value) || 0 })} className="w-full p-1.5 sm:p-2 text-xs sm:text-sm border rounded text-center font-data-mono" /></td>
+                <td className="px-2 md:px-3 py-2 text-center text-xs font-data-mono text-on-surface-variant">-</td>
                 <td className="hidden md:table-cell px-2 md:px-4 py-2 text-center text-on-surface-variant text-xs font-data-mono">Auto</td>
                 <td className="px-2 sm:px-4 md:px-6 py-2 text-right">
                   <div className="flex gap-1.5 sm:gap-2 justify-end">
@@ -803,75 +764,86 @@ export default function CategoriesClient({
                   <td className="px-1 sm:px-2 md:px-4 py-3 sm:py-4 text-center font-data-mono text-on-surface text-sm sm:text-base font-medium">
                     {cat.athletes_count}
                   </td>
+                  
+                  {/* Draw Lifecycle State Pill */}
+                  <td className="px-2 md:px-3 py-3 sm:py-4 text-center">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedDrawerCategory(cat)}
+                      className="cursor-pointer transition-transform hover:scale-105"
+                      title="Click to manage draw lifecycle & bronze settings"
+                    >
+                      {(() => {
+                        const confirmed = cat.confirmed_matches ?? 0;
+                        const live = cat.live_matches ?? 0;
+                        const total = cat.total_matches ?? cat.expected_matches ?? 0;
+                        const hasDraw = Boolean(cat.has_draw || cat.draw_state);
+                        const isLocked = Boolean(cat.is_locked || cat.draw_state === "LOCKED");
+
+                        if (!hasDraw) {
+                          return (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold font-data-mono text-slate-500 bg-slate-100 hover:bg-slate-200 border border-slate-200 px-2 py-0.5 rounded-full">
+                              <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
+                              No Draw
+                            </span>
+                          );
+                        }
+                        if (total > 0 && confirmed >= total) {
+                          return (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold font-data-mono text-emerald-950 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 px-2 py-0.5 rounded-full">
+                              <span className="material-symbols-outlined text-[13px] text-amber-600">workspace_premium</span>
+                              Finished
+                            </span>
+                          );
+                        }
+                        if (confirmed > 0 || live > 0) {
+                          return (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold font-data-mono text-emerald-900 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 px-2 py-0.5 rounded-full">
+                              <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                              Live {confirmed}/{total}
+                            </span>
+                          );
+                        }
+                        if (isLocked) {
+                          return (
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold font-data-mono text-indigo-900 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 px-2 py-0.5 rounded-full">
+                              <span className="material-symbols-outlined text-[12px]">lock</span>
+                              Official
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="inline-flex items-center gap-1 text-[11px] font-bold font-data-mono text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-200 px-2 py-0.5 rounded-full">
+                            <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+                            Draft
+                          </span>
+                        );
+                      })()}
+                    </button>
+                  </td>
+
                   <td className="hidden md:table-cell px-2 md:px-4 py-3 sm:py-4 text-center font-data-mono">{cat.expected_matches}</td>
                   {!readOnly && (
                     <td className="px-2 sm:px-4 md:px-6 py-3 sm:py-4 text-right">
-                      <div className="flex justify-end items-center gap-2 sm:gap-3">
+                      <div className="flex justify-end items-center gap-2 sm:gap-2.5">
                         {/* Digital Bracket Tree Modal */}
                         <button
                           type="button"
                           onClick={() => setBracketModalCategory({ id: cat.id, name: cat.name })}
                           title="View interactive digital draw bracket"
-                          className="material-symbols-outlined text-[#0E9C7C] hover:text-[#0B7C63] transition-colors text-[18px] cursor-pointer"
+                          className="w-7 h-7 inline-flex items-center justify-center rounded-lg hover:bg-emerald-50 text-[#0E9C7C] hover:text-[#0B7C63] transition-colors cursor-pointer shrink-0"
                         >
-                          account_tree
+                          <span className="material-symbols-outlined text-[18px]">account_tree</span>
                         </button>
-                        {/* Bronze medals: how this category's draw is built */}
-                        <label className="flex items-center gap-1" title="Bronze medals for this category">
-                          <span className="material-symbols-outlined text-[16px] text-[#C08A5A]">workspace_premium</span>
-                          <select
-                            value={cat.bronze_medals === null || cat.bronze_medals === undefined ? "inherit" : String(cat.bronze_medals)}
-                            onChange={(e) => void handleBronzeChange(cat, e.target.value)}
-                            className="cursor-pointer rounded border border-outline-variant bg-white px-1.5 py-1 font-data-mono text-[11px] font-bold text-[#3D3A33] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-                          >
-                            <option value="inherit">Event default</option>
-                            <option value="0">No bronze</option>
-                            <option value="1">One bronze</option>
-                            <option value="2">Two bronzes</option>
-                          </select>
-                        </label>
 
-                        {/* Kata draw format: inline in the row, exactly like the bronze selector */}
-                        {cat.is_kata && (
-                          <label className="flex items-center gap-1" title="Kata draw format for this category">
-                            <span className="material-symbols-outlined text-[16px] text-[#0E9C7C]">table_chart</span>
-                            <select
-                              value={cat.kataFormat ?? ""}
-                              onChange={(e) => void handleKataFormatChange(cat, e.target.value)}
-                              className="cursor-pointer rounded border border-outline-variant bg-white px-1.5 py-1 font-data-mono text-[11px] font-bold text-[#3D3A33] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-                            >
-                              <option value="">Elimination</option>
-                              <option value="GROUPS_THEN_ELIMINATION">Groups + elim.</option>
-                              <option value="ROUND_ROBIN">Round robin</option>
-                            </select>
-                          </label>
-                        )}
-
-                        {/* Kata advanced group settings (ranking, advancers, size) */}
-                        {cat.is_kata && (
-                          <button
-                            type="button"
-                            onClick={() => setKataSettingsCategory(cat)}
-                            title="Kata group settings (ranking method, advancers per group, group size)"
-                            className="flex items-center gap-1 cursor-pointer rounded border border-outline-variant bg-white px-1.5 py-1 text-[#3D3A33] hover:border-[#0E9C7C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
-                          >
-                            <span className="material-symbols-outlined text-[16px] text-[#0E9C7C]">tune</span>
-                          </button>
-                        )}
-
-                        {/* Rebuild just this category's bracket */}
+                        {/* Manage Draw Drawer (kumite lifecycle + bronze, kata format + group settings) */}
                         <button
                           type="button"
-                          onClick={() => void handleGenerateOneDraw(cat)}
-                          disabled={regeneratingId === cat.id}
-                          title="Generate or regenerate this category's draw"
-                          className={`material-symbols-outlined transition-colors text-[18px] cursor-pointer ${
-                            regeneratingId === cat.id
-                              ? "animate-spin text-[#0E9C7C]"
-                              : "text-[#0E9C7C] hover:text-[#0B7C63]"
-                          }`}
+                          onClick={() => setSelectedDrawerCategory(cat)}
+                          title="Draw Lifecycle & Bronze Settings"
+                          className="w-7 h-7 inline-flex items-center justify-center rounded-lg hover:bg-stone-100 text-[#504C42] hover:text-[#1B1815] transition-colors cursor-pointer shrink-0"
                         >
-                          autorenew
+                          <span className="material-symbols-outlined text-[18px]">tune</span>
                         </button>
 
                         {/* Download Draw Sheet PDF */}
@@ -879,12 +851,26 @@ export default function CategoriesClient({
                           type="button"
                           onClick={() => handleDownloadSinglePdf(cat.id)}
                           title="Download official draw sheet PDF"
-                          className="material-symbols-outlined text-[#3D3A33] hover:text-[#1B1815] transition-colors text-[18px] cursor-pointer"
+                          className="w-7 h-7 inline-flex items-center justify-center rounded-lg hover:bg-stone-100 text-[#3D3A33] hover:text-[#1B1815] transition-colors cursor-pointer shrink-0"
                         >
-                          picture_as_pdf
+                          <span className="material-symbols-outlined text-[18px]">picture_as_pdf</span>
                         </button>
-                        <button onClick={() => handleStartEdit(cat)} className="material-symbols-outlined text-outline hover:text-primary transition-colors text-sm cursor-pointer">edit</button>
-                        <button onClick={() => handleDelete(cat.id)} className="material-symbols-outlined text-outline hover:text-error transition-colors text-sm cursor-pointer">delete</button>
+                        <button
+                          type="button"
+                          onClick={() => handleStartEdit(cat)}
+                          className="w-7 h-7 inline-flex items-center justify-center rounded-lg hover:bg-stone-100 text-outline hover:text-primary transition-colors cursor-pointer shrink-0"
+                          title="Edit category"
+                        >
+                          <span className="material-symbols-outlined text-[16px]">edit</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDelete(cat.id)}
+                          className="w-7 h-7 inline-flex items-center justify-center rounded-lg hover:bg-red-50 text-outline hover:text-error transition-colors cursor-pointer shrink-0"
+                          title="Delete category"
+                        >
+                          <span className="material-symbols-outlined text-[16px]">delete</span>
+                        </button>
                       </div>
                     </td>
                   )}
@@ -1188,27 +1174,23 @@ export default function CategoriesClient({
         }}
       />
 
-      {/* Kata group settings modal (advanced: ranking, advancers, size) */}
-      {kataSettingsCategory && (
-        <KataDrawSettingsModal
-          key={kataSettingsCategory.id}
-          categoryName={kataSettingsCategory.name}
-          initial={{
-            kataRankingMethod: kataSettingsCategory.kataRankingMethod ?? "",
-            kataAdvancePerGroup:
-              kataSettingsCategory.kataAdvancePerGroup != null
-                ? String(kataSettingsCategory.kataAdvancePerGroup)
-                : "",
-            kataGroupSize:
-              kataSettingsCategory.kataGroupSize != null
-                ? String(kataSettingsCategory.kataGroupSize)
-                : "",
-          }}
-          saving={savingKataSettings}
-          onClose={() => setKataSettingsCategory(null)}
-          onSave={(draft) => void handleKataSettingsSave(draft)}
-        />
-      )}
+      {/* Category Draw Management Drawer (kumite lifecycle + bronze, kata format + group settings) */}
+      <CategoryDrawDrawer
+        isOpen={Boolean(selectedDrawerCategory)}
+        onClose={() => setSelectedDrawerCategory(null)}
+        category={selectedDrawerCategory}
+        tournamentId={tournamentId}
+        onViewBracket={(cat) => setBracketModalCategory({ id: cat.id, name: cat.name })}
+        onRefresh={() => router.refresh()}
+      />
+
+      {/* Bulk Draw Generation Preflight Modal */}
+      <BulkDrawGenerationModal
+        isOpen={showBulkModal}
+        onClose={() => setShowBulkModal(false)}
+        tournamentId={tournamentId}
+        onCompleted={() => router.refresh()}
+      />
     </div>
   );
 }

@@ -176,25 +176,6 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
     };
   }, [ringId, activeCategoryId]);
 
-  // Shared by the kumite pad and the kata console: instant client-side match
-  // count bump, then reload the bout and the next-bout queue. Takes the
-  // assignment as an argument so this hook can live above the early return.
-  const handleBoutCompletedFor = React.useCallback(
-    (assignment: any) => {
-      setAssignments((prev) =>
-        prev.map((a) =>
-          a.id === assignment.id
-            ? { ...a, matches_completed: Math.min((assignment.categories?.expected_matches || 99), (a.matches_completed || 0) + 1) }
-            : a
-        )
-      );
-      setSelectedMatchId(null);
-      loadBoutData();
-      router.refresh();
-    },
-    [loadBoutData, router]
-  );
-
   const refreshAssignments = React.useCallback(async () => {
     try {
       const data = await getModeratorRingAssignments(ringId);
@@ -205,6 +186,30 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
       console.error("Failed to refresh assignments:", err);
     }
   }, [ringId]);
+
+  // Shared by the kumite pad and the kata console: instant client-side match
+  // count bump, then reload the bout and the next-bout queue. Takes the
+  // assignment as an argument so this hook can live above the early return.
+  const handleBoutCompletedFor = React.useCallback(
+    (assignment: any) => {
+      const wasAlreadyConfirmed = boutData?.currentMatch?.status === "CONFIRMED";
+      if (!wasAlreadyConfirmed) {
+        // Instantly increment match count on client for immediate UI feedback
+        setAssignments((prev) =>
+          prev.map((a) =>
+            a.id === assignment.id
+              ? { ...a, matches_completed: Math.min((assignment.categories?.expected_matches || 99), (a.matches_completed || 0) + 1) }
+              : a
+          )
+        );
+      }
+      setSelectedMatchId(null);
+      loadBoutData();
+      refreshAssignments();
+      router.refresh();
+    },
+    [loadBoutData, router, refreshAssignments, boutData?.currentMatch?.status]
+  );
 
   // The desk follows every change on this mat immediately — bout swaps from the
   // picker, scores, clock, category reassignments, and the queue behind it.

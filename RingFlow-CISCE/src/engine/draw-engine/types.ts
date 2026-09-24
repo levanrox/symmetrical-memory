@@ -48,15 +48,14 @@ export interface DrawOptions {
   /**
    * How many bronze medals the category awards.
    *
-   * 2 — the WKF default for elimination with repechage: each finalist's line
-   *     produces one bronze, fed by a repechage ladder.
-   * 1 — the two semifinal losers meet once for a single bronze, no repechage.
-   * 0 — no bronze bout at all (some school and invitational events stop at the
-   *     final).
+   * 2 — Official WKF default: repechage ladders for everyone beaten by finalists (2 bronzes).
+   * 1 — Local Official: the two semifinal losers meet once for a single bronze, no repechage (1 bronze).
+   * 3 — Local Official: both semifinal losers awarded bronze without extra matches (2 bronzes).
+   * 0 — no bronze bout at all (draw stops at the final).
    *
    * This is a decision the organiser makes before the draw, not after.
    */
-  bronzeMedals?: 0 | 1 | 2;
+  bronzeMedals?: 0 | 1 | 2 | 3;
 }
 
 export interface DrawInput {
@@ -148,6 +147,7 @@ export interface DrawGraph {
   /** Bracket size — the next power of two at or above the entrant count. */
   tournamentSize: number;
   byeCount: number;
+  bronzeMedals?: 0 | 1 | 2 | 3;
   randomSeed: number | null;
   rounds: readonly Round[];
   matches: readonly MatchNode[];

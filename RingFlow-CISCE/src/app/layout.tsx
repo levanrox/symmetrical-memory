@@ -66,13 +66,13 @@ export default function RootLayout({
       <head>
         <link rel="icon" href="/icon.png" type="image/png" sizes="any" />
         <link rel="apple-touch-icon" href="/icon.png" />
-        {/* Preconnect only — Material Symbols can't be self-hosted via next/font */}
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        {/* Material Symbols only — all other fonts are self-hosted via next/font above */}
+        {/* Self-hosted Material Symbols font (fully offline-ready, zero CDN dependency) */}
         <link
-          href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap"
-          rel="stylesheet"
+          rel="preload"
+          href="/fonts/material-symbols-outlined.woff2"
+          as="font"
+          type="font/woff2"
+          crossOrigin="anonymous"
         />
       </head>
       <body className="min-h-full flex flex-col">

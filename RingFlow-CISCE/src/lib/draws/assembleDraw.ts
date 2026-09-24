@@ -193,6 +193,8 @@ export async function assembleCategoryDraw(
 
   return {
     locked: false,
+    isDrawLocked: draw.state === "LOCKED",
+    drawState: draw.state,
     draw,
     categoryName: category?.name ?? graph.categoryId,
     /** How this bracket was built: 0, 1 or 2 bronze medals. */
