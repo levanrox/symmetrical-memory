@@ -1,8 +1,23 @@
 import { db } from "@/db";
-import { athletes, categories, draws, drawVersions, matches, matchSlots } from "@/db/schema";
+import {
+  athletes,
+  categories,
+  draws,
+  drawVersions,
+  kataGroupStandings,
+  kataScores,
+  matches,
+  matchSlots,
+} from "@/db/schema";
 import { resolveDraw } from "@/engine/draw-engine/resolution";
 import type { DrawGraph } from "@/engine/draw-engine/types";
 import { eq, inArray, sql } from "drizzle-orm";
+import {
+  buildKataDrawTableView,
+  type KataDrawTableView,
+  type KataTablePoolBout,
+} from "./kataTableView";
+import type { RankedKataAthlete } from "./kataDraws";
 
 /**
  * One category's draw, assembled for display: every bout with its slots, the
@@ -114,8 +129,11 @@ export async function assembleCategoryDraw(
 
   // Build client-ready BracketMatch array
   const matchesMap: Record<string, BracketMatchView> = {};
+  /** Graph pool id per match, so the kata table view can group pool bouts. */
+  const poolIdByMatch = new Map<string, string | null>();
 
   for (const m of graph.matches) {
+    poolIdByMatch.set(m.id, m.poolId ?? null);
     const resolvedMatch = resolvedMatchMap.get(m.id);
     const slotsForMatch = dbSlots
       .filter((s) => s.matchId === m.id)
@@ -182,5 +200,123 @@ export async function assembleCategoryDraw(
     matches: Object.values(matchesMap),
     podium: resolved.podium,
     highlightAthleteId: options?.athleteId ?? null,
+    /**
+     * Kata group formats render as tables (one per group, every participant
+     * named), not as a tree — the "scoring sheet" view. Null for elimination
+     * draws and legacy draws without a group snapshot.
+     */
+    kataDraw: await buildKataDrawView({
+      categoryId,
+      snapshot: draw.kataGroups,
+      athleteMap,
+      poolIdByMatch,
+      matchesMap,
+    }),
   };
+}
+
+/**
+ * Resolve the kata group-stage table view for a draw, or null when the draw
+ * is not a group format. Scores come from `kata_scores` (summed judge marks,
+ * tenths -> units — the same sums the decision totals use); standings come
+ * from the official `kata_group_standings` rows the confirm flow maintains.
+ */
+async function buildKataDrawView(args: {
+  categoryId: string;
+  snapshot: unknown;
+  athleteMap: Map<string, { id: string; name: string; school: string | null; dojo: string | null; chestNumber: string | null }>;
+  poolIdByMatch: Map<string, string | null>;
+  matchesMap: Record<string, BracketMatchView>;
+}): Promise<KataDrawTableView | null> {
+  const { categoryId, snapshot, athleteMap, poolIdByMatch, matchesMap } = args;
+  if (!snapshot || typeof snapshot !== "object") return null;
+  const format = (snapshot as { format?: unknown }).format;
+  if (format !== "GROUPS_THEN_ELIMINATION" && format !== "ROUND_ROBIN") {
+    return null;
+  }
+
+  const matchIds = Object.keys(matchesMap);
+  const [scoreRows, standingRows] = await Promise.all([
+    matchIds.length > 0
+      ? db
+          .select({
+            matchId: kataScores.matchId,
+            side: kataScores.side,
+            scoreTenths: kataScores.scoreTenths,
+          })
+          .from(kataScores)
+          .where(inArray(kataScores.matchId, matchIds))
+      : Promise.resolve([]),
+    db
+      .select({
+        groupId: kataGroupStandings.groupId,
+        standings: kataGroupStandings.standings,
+      })
+      .from(kataGroupStandings)
+      .where(eq(kataGroupStandings.categoryId, categoryId)),
+  ]);
+
+  // Summed judge marks per bout per side (tenths -> units).
+  const sums = new Map<string, { total: number; count: number }>();
+  for (const row of scoreRows) {
+    const key = `${row.matchId}:${row.side}`;
+    const entry = sums.get(key) ?? { total: 0, count: 0 };
+    entry.total += row.scoreTenths / 10;
+    entry.count += 1;
+    sums.set(key, entry);
+  }
+  const sideScore = (matchId: string, side: "AKA" | "AO"): number | null => {
+    const entry = sums.get(`${matchId}:${side}`);
+    if (!entry || entry.count === 0) return null;
+    return Math.round(entry.total * 10) / 10;
+  };
+
+  const scoresByMatch: Record<string, { aka: number | null; ao: number | null }> = {};
+  for (const matchId of matchIds) {
+    scoresByMatch[matchId] = { aka: sideScore(matchId, "AKA"), ao: sideScore(matchId, "AO") };
+  }
+
+  const poolBouts: KataTablePoolBout[] = [];
+  for (const [matchId, view] of Object.entries(matchesMap)) {
+    const groupId = poolIdByMatch.get(matchId);
+    if (!groupId) continue;
+    poolBouts.push({
+      matchId,
+      matchNo: view.matchNo,
+      roundLabel: view.roundName,
+      groupId,
+      akaId: view.aka.id ?? null,
+      aoId: view.ao.id ?? null,
+      akaScore: sideScore(matchId, "AKA"),
+      aoScore: sideScore(matchId, "AO"),
+      winnerId: view.winnerId ?? null,
+      status: view.status,
+    });
+  }
+
+  const standingsByGroup = new Map<string, readonly RankedKataAthlete[]>();
+  for (const row of standingRows) {
+    const list = row.standings as readonly RankedKataAthlete[] | null;
+    if (Array.isArray(list)) standingsByGroup.set(row.groupId, list);
+  }
+
+  const athletes = new Map(
+    [...athleteMap.values()].map((a) => [
+      a.id,
+      {
+        id: a.id,
+        name: a.name,
+        school: a.school || a.dojo || undefined,
+        chestNumber: a.chestNumber ?? null,
+      },
+    ])
+  );
+
+  return buildKataDrawTableView({
+    snapshot,
+    athletes,
+    poolBouts,
+    standingsByGroup,
+    scoresByMatch,
+  });
 }

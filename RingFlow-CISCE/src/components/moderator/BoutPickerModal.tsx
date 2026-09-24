@@ -2,7 +2,9 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DrawBracket } from "@/components/draw/DrawBracket";
+import { KataDrawTables } from "@/components/draw/KataDrawTables";
 import type { BracketMatchView } from "@/lib/draws/assembleDraw";
+import type { KataDrawTableView } from "@/lib/draws/kataTableView";
 
 export interface PickableBout {
   id: string;
@@ -27,6 +29,8 @@ interface Props {
   activeMatchId?: string | null;
   bronzeMedals?: number;
   onSelect: (matchId: string) => void;
+  /** Kata group formats render the "Bracket" tab as group tables instead. */
+  kataDraw?: KataDrawTableView | null;
 }
 
 type StatusFilter = "ready" | "live" | "done" | "all";
@@ -74,6 +78,7 @@ export function BoutPickerModal({
   activeMatchId,
   bronzeMedals = 2,
   onSelect,
+  kataDraw,
 }: Props) {
   const [view, setView] = useState<"list" | "tree">("tree");
   const [query, setQuery] = useState("");
@@ -245,8 +250,8 @@ export function BoutPickerModal({
                   view === "tree" ? "bg-[#0E9C7C] text-white shadow-xs" : "text-[#68645A] hover:text-[#1B1815]"
                 }`}
               >
-                <span className="material-symbols-outlined text-[16px]">account_tree</span>
-                Bracket
+                <span className="material-symbols-outlined text-[16px]">{kataDraw ? "table_chart" : "account_tree"}</span>
+                {kataDraw ? "Tables" : "Bracket"}
               </button>
             </div>
 
@@ -339,7 +344,17 @@ export function BoutPickerModal({
         <div className="min-h-0 flex-1 overflow-hidden p-2.5 sm:p-4 md:p-5">
           {view === "tree" ? (
             <div className="h-full overflow-hidden rounded-xl border border-[#E1DDCF] bg-white shadow-xs">
-              {drawMatches.length > 0 ? (
+              {kataDraw ? (
+                <KataDrawTables
+                  kataDraw={kataDraw}
+                  matches={drawMatches}
+                  categoryName={categoryName}
+                  tournamentSize={tournamentSize}
+                  hideHeader
+                  onSelectMatch={(m) => handleSelect(m.matchId)}
+                  activeMatchId={activeMatchId}
+                />
+              ) : drawMatches.length > 0 ? (
                 <DrawBracket
                   matches={drawMatches}
                   categoryName={categoryName}

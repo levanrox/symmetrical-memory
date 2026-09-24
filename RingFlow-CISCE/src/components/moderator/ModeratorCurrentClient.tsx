@@ -947,6 +947,7 @@ export default function ModeratorCurrentClient({ ringId, initialAssignments, all
           tournamentSize={drawData?.draw?.tournamentSize}
           bronzeMedals={drawData?.bronzeMedals ?? 2}
           activeMatchId={boutData.currentMatch?.id}
+          kataDraw={drawData?.kataDraw ?? null}
           onSelect={(matchId) => void handleSelectBout(matchId)}
         />
       )}

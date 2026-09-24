@@ -1,14 +1,9 @@
 "use client";
 
 import React, { useState } from "react";
-import {
-  KATA_DRAW_FORMAT_OPTIONS,
-  KATA_RANKING_METHOD_OPTIONS,
-} from "@/lib/draws/kataSettings";
+import { KATA_RANKING_METHOD_OPTIONS } from "@/lib/draws/kataSettings";
 
 export interface KataDrawSettingsDraft {
-  /** "" = event default (single elimination). */
-  kataFormat: string;
   /** "" = event default (WKF victory points). */
   kataRankingMethod: string;
   /** "" = default (2). */
@@ -47,7 +42,7 @@ export function KataDrawSettingsModal({
       onClick={onClose}
       role="dialog"
       aria-modal="true"
-      aria-label={`Kata draw settings for ${categoryName}`}
+      aria-label={`Kata group settings for ${categoryName}`}
     >
       <div
         className="bg-[#FAF9F5] w-full max-w-md rounded-2xl shadow-2xl flex flex-col overflow-hidden border border-[#E1DDCF]"
@@ -60,7 +55,7 @@ export function KataDrawSettingsModal({
             </span>
             <div className="min-w-0">
               <h2 className="font-bold text-[#1B1815] text-base leading-tight truncate">
-                Kata draw settings
+                Kata group settings
               </h2>
               <p className="text-xs text-[#68645A] truncate">{categoryName}</p>
             </div>
@@ -76,35 +71,6 @@ export function KataDrawSettingsModal({
         </div>
 
         <div className="px-5 py-4 space-y-4 overflow-y-auto">
-          <div>
-            <label className={fieldLabel} htmlFor="kata-draw-format">
-              Draw format
-            </label>
-            <select
-              id="kata-draw-format"
-              value={draft.kataFormat}
-              onChange={(e) =>
-                setDraft({ ...draft, kataFormat: e.target.value })
-              }
-              className={selectClass}
-            >
-              <option value="">Elimination (default)</option>
-              {KATA_DRAW_FORMAT_OPTIONS.filter(
-                (o) => o.value !== "SINGLE_ELIM_REPECHAGE"
-              ).map((o) => (
-                <option key={o.value} value={o.value} title={o.hint}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            <p className="text-[11px] text-[#68645A] mt-1">
-              {
-                KATA_DRAW_FORMAT_OPTIONS.find((o) => o.value === draft.kataFormat)
-                  ?.hint
-              }
-            </p>
-          </div>
-
           <div>
             <label className={fieldLabel} htmlFor="kata-ranking-method">
               Group ranking

@@ -39,6 +39,7 @@ export async function buildCategoryDrawPdf(categoryId: string) {
     tournamentSize: drawData.draw.tournamentSize,
     byeCount: drawData.draw.byeCount,
     matches: drawData.matches,
+    kataDraw: drawData.kataDraw ?? null,
   });
 
   return {
@@ -78,6 +79,7 @@ export async function buildAllCategoryDrawPdfs(tournamentId: string) {
         tournamentSize: drawData.draw.tournamentSize,
         byeCount: drawData.draw.byeCount,
         matches: drawData.matches,
+        kataDraw: drawData.kataDraw ?? null,
       });
 
       zip.file(`${cat.name.replace(/[^a-zA-Z0-9_\-]/g, "_")}_Draw.pdf`, pdfBytes);

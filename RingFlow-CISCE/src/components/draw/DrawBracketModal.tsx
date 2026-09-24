@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import { getAthleteDraw, getCategoryDraw } from "@/actions/draws";
 import { downloadCategoryDrawPdf } from "@/actions/drawPdfs";
 import { DrawBracket } from "./DrawBracket";
+import { KataDrawTables } from "./KataDrawTables";
 
 interface Props {
   categoryId: string;
@@ -124,7 +125,7 @@ export function DrawBracketModal({
           {loading ? (
             <div className="h-full flex flex-col items-center justify-center gap-3">
               <span className="w-8 h-8 border-3 border-[#0E9C7C] border-t-transparent rounded-full animate-spin" />
-              <p className="text-sm font-medium text-[#68645A]">Loading bracket tree...</p>
+              <p className="text-sm font-medium text-[#68645A]">Loading draw...</p>
             </div>
           ) : drawData?.locked ? (
             <div className="h-full flex flex-col items-center justify-center text-center p-6">
@@ -147,6 +148,27 @@ export function DrawBracketModal({
                 This category doesn&apos;t have an active digital draw. Click &ldquo;Generate Digital Draw&rdquo; in category options to create one.
               </p>
             </div>
+          ) : drawData.kataDraw ? (
+            /* Kata group formats render as tables (one per group, every
+               participant named), not as a tree — the scoring-sheet view. */
+            <KataDrawTables
+              kataDraw={drawData.kataDraw}
+              matches={drawData.matches}
+              categoryName={categoryName || drawData.categoryName || "Draw"}
+              tournamentSize={drawData.draw?.tournamentSize}
+              highlightAthleteId={drawData.highlightAthleteId ?? athleteId ?? null}
+              activeMatchId={activeMatchId}
+              onDownloadPdf={allowPdf ? handleDownloadPdf : undefined}
+              isDownloadingPdf={isDownloadingPdf}
+              onSelectMatch={
+                onSelectMatch
+                  ? (m) => {
+                      onSelectMatch(m);
+                      onClose();
+                    }
+                  : undefined
+              }
+            />
           ) : (
             <DrawBracket
               matches={drawData.matches}

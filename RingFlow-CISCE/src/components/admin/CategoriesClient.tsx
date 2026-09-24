@@ -13,7 +13,6 @@ import { exportTournamentResultsCsv, exportTournamentResultsPdf } from "@/action
 import { DrawBracketModal } from "@/components/draw/DrawBracketModal";
 import { CategoryDefinitionsModal } from "@/components/admin/CategoryDefinitionsModal";
 import { KataDrawSettingsModal, type KataDrawSettingsDraft } from "@/components/admin/KataDrawSettingsModal";
-import { kataDrawFormatShortLabel } from "@/lib/draws/kataSettings";
 import { useRouter } from "next/navigation";
 
 type Category = {
@@ -464,9 +463,35 @@ export default function CategoriesClient({
   };
 
   /**
-   * Record this kata category's draw configuration. Stored on the category;
-   * it takes effect the next time the draw is generated. Mirrors the bronze
-   * flow: save, update local state, offer the rebuild.
+   * Record this kata category's draw format, inline in the row exactly like
+   * the bronze selector. Stored on the category; it takes effect the next
+   * time the draw is generated. Mirrors the bronze flow: save, update local
+   * state, offer the rebuild.
+   */
+  const handleKataFormatChange = async (cat: any, value: string) => {
+    const kataFormat = value === "" ? null : value;
+    const res = await setKataDrawFormat(cat.id, { kataFormat });
+    if (!res.success) {
+      alert(res.error || "Could not save the kata draw format.");
+      return;
+    }
+    const updated = { ...cat, kataFormat };
+    setCategories((prev) =>
+      prev.map((c) => (c.id === cat.id ? updated : c))
+    );
+    // An existing bracket was built with the old format; offer the rebuild.
+    if (window.confirm(
+      "Draw format saved. Regenerate this category's draw now so it matches?"
+    )) {
+      await handleGenerateOneDraw(updated);
+    }
+  };
+
+  /**
+   * Record this kata category's advanced group settings (ranking method,
+   * advancers, group size). Stored on the category; it takes effect the next
+   * time the draw is generated. Mirrors the bronze flow: save, update local
+   * state, offer the rebuild.
    */
   const handleKataSettingsSave = async (draft: KataDrawSettingsDraft) => {
     const cat = kataSettingsCategory;
@@ -474,7 +499,6 @@ export default function CategoriesClient({
     setSavingKataSettings(true);
     try {
       const patch = {
-        kataFormat: draft.kataFormat || null,
         kataRankingMethod: draft.kataRankingMethod || null,
         kataAdvancePerGroup: draft.kataAdvancePerGroup === "" ? null : Number(draft.kataAdvancePerGroup),
         kataGroupSize: draft.kataGroupSize === "" ? null : Number(draft.kataGroupSize),
@@ -807,20 +831,31 @@ export default function CategoriesClient({
                           </select>
                         </label>
 
-                        {/* Kata draw settings: format, ranking, groups — kata categories only */}
+                        {/* Kata draw format: inline in the row, exactly like the bronze selector */}
+                        {cat.is_kata && (
+                          <label className="flex items-center gap-1" title="Kata draw format for this category">
+                            <span className="material-symbols-outlined text-[16px] text-[#0E9C7C]">table_chart</span>
+                            <select
+                              value={cat.kataFormat ?? ""}
+                              onChange={(e) => void handleKataFormatChange(cat, e.target.value)}
+                              className="cursor-pointer rounded border border-outline-variant bg-white px-1.5 py-1 font-data-mono text-[11px] font-bold text-[#3D3A33] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
+                            >
+                              <option value="">Elimination</option>
+                              <option value="GROUPS_THEN_ELIMINATION">Groups + elim.</option>
+                              <option value="ROUND_ROBIN">Round robin</option>
+                            </select>
+                          </label>
+                        )}
+
+                        {/* Kata advanced group settings (ranking, advancers, size) */}
                         {cat.is_kata && (
                           <button
                             type="button"
                             onClick={() => setKataSettingsCategory(cat)}
-                            title="Kata draw settings (format, ranking, groups)"
+                            title="Kata group settings (ranking method, advancers per group, group size)"
                             className="flex items-center gap-1 cursor-pointer rounded border border-outline-variant bg-white px-1.5 py-1 text-[#3D3A33] hover:border-[#0E9C7C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0E9C7C]"
                           >
                             <span className="material-symbols-outlined text-[16px] text-[#0E9C7C]">tune</span>
-                            {kataDrawFormatShortLabel(cat.kataFormat) && (
-                              <span className="font-data-mono text-[11px] font-bold">
-                                {kataDrawFormatShortLabel(cat.kataFormat)}
-                              </span>
-                            )}
                           </button>
                         )}
 
@@ -1153,13 +1188,12 @@ export default function CategoriesClient({
         }}
       />
 
-      {/* Kata draw settings modal */}
+      {/* Kata group settings modal (advanced: ranking, advancers, size) */}
       {kataSettingsCategory && (
         <KataDrawSettingsModal
           key={kataSettingsCategory.id}
           categoryName={kataSettingsCategory.name}
           initial={{
-            kataFormat: kataSettingsCategory.kataFormat ?? "",
             kataRankingMethod: kataSettingsCategory.kataRankingMethod ?? "",
             kataAdvancePerGroup:
               kataSettingsCategory.kataAdvancePerGroup != null
